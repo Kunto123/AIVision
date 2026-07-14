@@ -77,6 +77,7 @@ class ROIEditor(QWidget):
         self._pixmap: Optional[QPixmap] = None
         self._rois: List[ROIData] = []
         self._selected_idx: int = -1
+        self._max_rois: Optional[int] = None  # None = unlimited
 
         # Drag state
         self._dragging = False
@@ -108,6 +109,11 @@ class ROIEditor(QWidget):
         if self._selected_idx >= len(self._rois):
             self._selected_idx = len(self._rois) - 1
         self.update()
+
+    def set_max_rois(self, n: Optional[int]) -> None:
+        """Limit number of ROIs. None = unlimited.
+        When max is reached, clicking empty replaces existing ROI."""
+        self._max_rois = n
 
     def get_rois(self) -> List[ROIData]:
         return list(self._rois)
@@ -310,6 +316,10 @@ class ROIEditor(QWidget):
 
         # Click empty — add new ROI at click position
         if btn == Qt.LeftButton:
+            # If max_rois is set and reached, replace (clear all first)
+            if self._max_rois is not None and len(self._rois) >= self._max_rois:
+                self._rois.clear()
+                self._selected_idx = -1
             img_pos = self._map_to_image(pos)
             self.add_roi(img_pos[0], img_pos[1], ROI_MIN_SIZE, ROI_MIN_SIZE)
             self._resizing = True

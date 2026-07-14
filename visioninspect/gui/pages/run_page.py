@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -110,11 +111,23 @@ class RunPage(QWidget):
         main_layout.addWidget(left_panel, 3)
 
         # === Right Panel: Judgement + Counters ===
+        # Wrapped in a QScrollArea (defensive — matches TEACH/SETTINGS pattern) so
+        # this card stack can't reintroduce the overlap bug if content grows later.
         right_panel = QFrame()
         right_panel.setObjectName("cardPanel")
-        right_layout = QVBoxLayout(right_panel)
+        right_outer = QVBoxLayout(right_panel)
+        right_outer.setContentsMargins(0, 0, 0, 0)
+
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.NoFrame)
+        right_outer.addWidget(right_scroll)
+
+        right_content = QWidget()
+        right_layout = QVBoxLayout(right_content)
         right_layout.setContentsMargins(16, 16, 16, 16)
         right_layout.setSpacing(16)
+        right_scroll.setWidget(right_content)
 
         # Judgement big display
         self._judgement_label = QLabel("—")
@@ -157,38 +170,43 @@ class RunPage(QWidget):
         perf_layout.addStretch()
         right_layout.addWidget(perf_frame)
 
-        # Counters
-        self._counter_frame = QFrame()
-        self._counter_frame.setObjectName("cardPanel")
-        counter_layout = QGridLayout(self._counter_frame)
+        # Counters + NG Delay
+        counter_frame = QFrame()
+        counter_frame.setObjectName("cardPanel")
+        counter_layout = QHBoxLayout(counter_frame)
         counter_layout.setContentsMargins(12, 8, 12, 8)
+        counter_layout.setSpacing(16)
 
-        # Header
-        counter_layout.addWidget(QLabel(""), 0, 0)
-        counter_layout.addWidget(QLabel("Total"), 0, 1)
-        counter_layout.addWidget(QLabel("OK"), 0, 2)
-        counter_layout.addWidget(QLabel("NG"), 0, 3)
-
-        # Nilai
-        counter_layout.addWidget(QLabel(self._tr.tr("run_counter_total")), 1, 0)
-        self._total_counter = QLabel("0")
-        self._total_counter.setObjectName("bigCounter")
-        self._total_counter.setAlignment(Qt.AlignCenter)
-        counter_layout.addWidget(self._total_counter, 1, 1)
-
+        # OK counter
+        ok_box = QVBoxLayout()
+        ok_box.setSpacing(2)
+        ok_box.addWidget(QLabel("OK"), 0, Qt.AlignCenter)
         self._ok_counter = QLabel("0")
         self._ok_counter.setObjectName("bigCounter")
         self._ok_counter.setAlignment(Qt.AlignCenter)
-        self._ok_counter.setStyleSheet("color: #22C55E; font-size: 28px; font-weight: bold;")
-        counter_layout.addWidget(self._ok_counter, 1, 2)
+        self._ok_counter.setStyleSheet("color: #22C55E; font-size: 32px; font-weight: bold;")
+        ok_box.addWidget(self._ok_counter)
+        counter_layout.addLayout(ok_box)
 
+        # Separator
+        sep = QLabel("|")
+        sep.setStyleSheet("color: #233A57; font-size: 24px;")
+        sep.setAlignment(Qt.AlignCenter)
+        counter_layout.addWidget(sep)
+
+        # NG counter
+        ng_box = QVBoxLayout()
+        ng_box.setSpacing(2)
+        ng_box.addWidget(QLabel("NG"), 0, Qt.AlignCenter)
         self._ng_counter = QLabel("0")
         self._ng_counter.setObjectName("bigCounter")
         self._ng_counter.setAlignment(Qt.AlignCenter)
-        self._ng_counter.setStyleSheet("color: #EF4444; font-size: 28px; font-weight: bold;")
-        counter_layout.addWidget(self._ng_counter, 1, 3)
+        self._ng_counter.setStyleSheet("color: #EF4444; font-size: 32px; font-weight: bold;")
+        ng_box.addWidget(self._ng_counter)
+        counter_layout.addLayout(ng_box)
 
-        right_layout.addWidget(self._counter_frame)
+        counter_layout.addStretch()
+        right_layout.addWidget(counter_frame)
 
         right_layout.addStretch()
 
@@ -250,8 +268,7 @@ class RunPage(QWidget):
         self._fps_label.setText(f"{fps:.1f}")
 
     @Slot()
-    def update_counters(self, total: int, ok_count: int, ng_count: int):
-        self._total_counter.setText(str(total))
+    def update_counters(self, ok_count: int, ng_count: int):
         self._ok_counter.setText(str(ok_count))
         self._ng_counter.setText(str(ng_count))
 
@@ -313,6 +330,14 @@ class RunPage(QWidget):
         self._score_label.setText("0.000")
         self._latency_label.setText("— ms")
         self._roi_results_label.setText("ROI: —")
+
+    @Slot()
+    def set_waiting_for_part(self):
+        """Show 'waiting for part' neutral state — no OK/NG."""
+        self._judgement_label.setText("⏳ Menunggu Part")
+        self._judgement_label.setStyleSheet("color: #F59E0B; font-size: 48px; font-weight: bold;")
+        self._score_label.setText("—")
+        self._roi_results_label.setText("ROI: ⏳ Menunggu part terdeteksi di area gate")
 
     @Slot()
     def set_camera_status(self, active: bool):

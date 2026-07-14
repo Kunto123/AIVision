@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from visioninspect.utils.config import Config
 from visioninspect.utils.i18n import Translator
+from visioninspect.core.program import ProgramManager
 
 
 class TestConfig:
@@ -323,3 +324,76 @@ class TestDatabase:
             assert history[0]["correct_judgement"] == "OK"
 
             db.close()
+
+
+class TestProgramManagerPartCheck:
+    """ProgramManager part_check config and master methods."""
+
+    def setup_method(self):
+        self._tmp = Path(tempfile.mkdtemp(prefix="vitest_pc_"))
+        self._pm = ProgramManager(self._tmp / "programs")
+        self._prog = self._pm.create_program("TestProg")
+        self._tmpl = self._pm.create_template("TestProg", "T1")
+
+    def teardown_method(self):
+        import shutil
+        shutil.rmtree(self._tmp)
+
+    def test_default_config_has_part_check(self):
+        cfg = self._pm.get_template_config("TestProg", self._tmpl["id"])
+        assert "part_check" in cfg
+        assert cfg["part_check"]["enabled"] is False
+        assert cfg["part_check"]["method"] == "both"
+
+    def test_get_part_check_config_defaults(self):
+        pc = self._pm.get_part_check_config("TestProg", self._tmpl["id"])
+        assert pc["enabled"] is False
+        assert pc["color_threshold"] == 0.35
+
+    def test_update_partial_keeps_existing(self):
+        self._pm.update_part_check_config(
+            "TestProg", self._tmpl["id"], {"color_threshold": 0.5})
+        pc = self._pm.get_part_check_config("TestProg", self._tmpl["id"])
+        assert pc["color_threshold"] == 0.5
+        assert pc["edge_threshold"] == 0.08  # unchanged
+
+    def test_update_preserves_other_keys(self):
+        self._pm.update_part_check_config(
+            "TestProg", self._tmpl["id"],
+            {"enabled": True, "canny_low": 100})
+        pc = self._pm.get_part_check_config("TestProg", self._tmpl["id"])
+        assert pc["enabled"] is True
+        assert pc["canny_low"] == 100
+        assert pc["canny_high"] == 150  # unchanged
+
+    def test_save_master_creates_file(self):
+        import numpy as np
+        gate_roi = {"x": 10, "y": 10, "width": 100, "height": 80}
+        frame = np.ones((480, 640, 3), dtype=np.uint8) * 200
+        result = self._pm.save_part_check_master(
+            "TestProg", self._tmpl["id"], frame, gate_roi)
+        assert result["has_master"] is True
+        assert len(result["master_mean_bgr"]) == 3
+        img_path = self._pm.get_part_check_master_image_path(
+            "TestProg", self._tmpl["id"])
+        assert img_path is not None and img_path.exists()
+
+    def test_save_master_invalid_roi_raises(self):
+        import numpy as np
+        gate_roi = {"x": 0, "y": 0, "width": 1, "height": 1}
+        frame = np.ones((100, 100, 3), dtype=np.uint8)
+        with pytest.raises(Exception):
+            self._pm.save_part_check_master(
+                "TestProg", self._tmpl["id"], frame, gate_roi)
+
+    def test_old_template_without_part_check(self):
+        cfg = self._pm.get_template_config("TestProg", self._tmpl["id"])
+        del cfg["part_check"]
+        self._pm.update_template_config("TestProg", self._tmpl["id"], cfg)
+        pc = self._pm.get_part_check_config("TestProg", self._tmpl["id"])
+        assert pc["enabled"] is False  # default, not crash
+
+    def test_master_image_path_none(self):
+        path = self._pm.get_part_check_master_image_path(
+            "TestProg", self._tmpl["id"])
+        assert path is None

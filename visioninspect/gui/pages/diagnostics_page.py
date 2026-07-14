@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -61,11 +62,23 @@ class DiagnosticsPage(QWidget):
         layout.addWidget(left_panel, 2)
 
         # === Right: Performance + PLC Test ===
+        # Wrapped in a QScrollArea (defensive — matches TEACH/SETTINGS/RUN pattern)
+        # so this card stack can't reintroduce the overlap bug if content grows.
         right_panel = QFrame()
         right_panel.setObjectName("cardPanel")
-        right_layout = QVBoxLayout(right_panel)
+        right_outer = QVBoxLayout(right_panel)
+        right_outer.setContentsMargins(0, 0, 0, 0)
+
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.NoFrame)
+        right_outer.addWidget(right_scroll)
+
+        right_content = QWidget()
+        right_layout = QVBoxLayout(right_content)
         right_layout.setContentsMargins(16, 16, 16, 16)
         right_layout.setSpacing(16)
+        right_scroll.setWidget(right_content)
 
         # Performance group
         perf_group = QGroupBox("📊 " + self._tr.tr("diagnostics_performance"))

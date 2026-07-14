@@ -172,6 +172,8 @@ class ProgramManager:
         (tmpl_dir / "images" / "ng").mkdir(parents=True)
         (tmpl_dir / "model").mkdir(parents=True)
 
+        from visioninspect.core.part_check import DEFAULT_PART_CHECK_CONFIG
+
         # Default template config
         default_config = {
             "id": tmpl_id,
@@ -191,6 +193,7 @@ class ProgramManager:
             "trained": False,
             "model_version": 0,
             "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "part_check": DEFAULT_PART_CHECK_CONFIG.copy(),
         }
         if config:
             default_config.update(config)
@@ -360,6 +363,65 @@ class ProgramManager:
         """Check if a template has a trained model."""
         cfg = self.get_template_config(program, template_id)
         return cfg.get("trained", False)
+
+    # =====================================================================
+    # PART CHECK
+    # =====================================================================
+
+    def get_part_check_config(self, program: str, template_id: str) -> dict:
+        """Get part check config for a template, with safe defaults for old templates."""
+        from visioninspect.core.part_check import DEFAULT_PART_CHECK_CONFIG
+        cfg = self.get_template_config(program, template_id)
+        pc = cfg.get("part_check", {})
+        merged = DEFAULT_PART_CHECK_CONFIG.copy()
+        merged.update(pc)
+        return merged
+
+    def update_part_check_config(self, program: str, template_id: str,
+                                  updates: dict) -> dict:
+        """Update part check config fields (read-modify-merge-write)."""
+        pc = self.get_part_check_config(program, template_id)
+        pc.update(updates)
+        tmpl_cfg = self.get_template_config(program, template_id)
+        tmpl_cfg["part_check"] = pc
+        self.update_template_config(program, template_id, tmpl_cfg)
+        return pc
+
+    def save_part_check_master(self, program: str, template_id: str,
+                                image, gate_roi: dict,
+                                canny_low: int = 50,
+                                canny_high: int = 150) -> dict:
+        """Crop image to gate_roi, compute master stats, save to disk + config."""
+        from visioninspect.core.part_check import compute_master_stats, crop_roi
+        import time
+
+        cropped = crop_roi(image, gate_roi)
+        if cropped is None or cropped.size == 0 or cropped.shape[0] < 2 or cropped.shape[1] < 2:
+            raise ProgramError("Gate ROI terlalu kecil untuk foto master")
+
+        stats = compute_master_stats(cropped, canny_low, canny_high)
+        tmpl_dir = self._get_template_dir(program) / template_id
+        pc_dir = tmpl_dir / "part_check"
+        pc_dir.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(pc_dir / "master.png"), cropped)
+
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        return self.update_part_check_config(program, template_id, {
+            "has_master": True,
+            "gate_roi": gate_roi,
+            "master_mean_bgr": stats["mean_bgr"],
+            "master_std_bgr": stats["std_bgr"],
+            "master_edge_density": stats["edge_density"],
+            "master_captured_at": now,
+            "master_image_size": stats["image_size"],
+        })
+
+    def get_part_check_master_image_path(self, program: str,
+                                          template_id: str) -> Optional[Path]:
+        """Get path to saved master image, or None."""
+        pc_dir = self._get_template_dir(program) / template_id / "part_check"
+        master = pc_dir / "master.png"
+        return master if master.exists() else None
 
     # =====================================================================
     # INTERNAL

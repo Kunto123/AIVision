@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QStatusBar,
     QTabWidget,
     QVBoxLayout,
@@ -33,6 +34,7 @@ from visioninspect.utils.logging_setup import setup_logging, get_logger
 
 from visioninspect.core.program import ProgramManager
 from visioninspect.core.inference import InferenceEngine, overlay_heatmap
+from visioninspect.core import part_check as pc_module
 from visioninspect.gui.camera_worker import CameraThread, CameraWorker
 from visioninspect.gui.training_worker import TrainingThread, TrainingWorker
 from visioninspect.gui.widgets.roi_editor import ROIData
@@ -41,6 +43,9 @@ from visioninspect.gui.pages.teach_page import TeachPage
 from visioninspect.gui.pages.history_page import HistoryPage
 from visioninspect.gui.pages.settings_page import SettingsPage
 from visioninspect.gui.pages.diagnostics_page import DiagnosticsPage
+from visioninspect.gui.pages.account_page import AccountPage
+from visioninspect.gui.pages.global_settings_page import GlobalSettingsPage
+from visioninspect.gui.dialogs.login_dialog import LoginDialog
 
 logger = get_logger("app")
 
@@ -68,9 +73,13 @@ class MainWindow(QMainWindow):
         self._data_dir = data_dir
         self._pm = ProgramManager(data_dir / "programs")
 
-        # Database (shared instance for history, counters, corrections)
+        # Database (shared instance for history, counters, corrections, users)
         from visioninspect.storage.db import Database
         self._db = Database(data_dir / "database.db")
+
+        # Authentication state
+        self._current_user: Optional[dict] = None
+        self._user_role: str = "operator"
 
         # State
         self._active_program = ""
@@ -105,6 +114,14 @@ class MainWindow(QMainWindow):
         self._inspection_ng = 0
         self._inference_save_counter = 0  # throttle DB saves (~1/sec)
 
+        # NG interval timer (fires every N ms during sustained NG)
+        self._ng_interval_timer = QTimer(self)
+        self._ng_interval_timer.timeout.connect(self._on_ng_interval_tick)
+        self._ng_interval_active = False
+
+        # Part Presence Check (cached config — read from disk only on template switch)
+        self._current_part_check_cfg: dict = {}
+
         self._setup_window()
         self._setup_tabs()
         self._setup_statusbar()
@@ -118,13 +135,16 @@ class MainWindow(QMainWindow):
         # Initial history load
         QTimer.singleShot(1000, self._refresh_history)
 
+        # Show login dialog (blocks until login or cancel)
+        QTimer.singleShot(100, self._show_login)
+
         logger.info("MainWindow initialized")
 
     # ---- Setup ----
 
     def _setup_window(self):
         self.setWindowTitle(self._tr.tr("app_title"))
-        self.setMinimumSize(1280, 800)
+        self.setMinimumSize(1280, 720)
         self.resize(1600, 1000)
 
         central = QWidget()
@@ -143,18 +163,41 @@ class MainWindow(QMainWindow):
         self._history_page = HistoryPage(self._tr)
         self._settings_page = SettingsPage(self._tr)
         self._diagnostics_page = DiagnosticsPage(self._tr)
+        self._account_page = AccountPage(self._db)
+        self._global_settings_page = GlobalSettingsPage(self._config)
 
         self._tabs.addTab(self._run_page, self._tr.tr("nav_run"))
         self._tabs.addTab(self._teach_page, self._tr.tr("nav_teach"))
         self._tabs.addTab(self._history_page, self._tr.tr("nav_history"))
         self._tabs.addTab(self._settings_page, self._tr.tr("nav_settings"))
         self._tabs.addTab(self._diagnostics_page, self._tr.tr("nav_diagnostics"))
+        self._tabs.addTab(self._account_page, "👥 Akun")
+        self._tabs.addTab(self._global_settings_page, "⚙️ Global")
+
+        # By default hide admin-only tabs; shown after login if role=admin
+        for idx in range(1, self._tabs.count()):
+            self._tabs.setTabVisible(idx, False)
+        self._tabs.setTabVisible(5, False)  # account page
 
         self._main_layout.addWidget(self._tabs)
 
     def _setup_statusbar(self):
         self._statusbar = QStatusBar()
         self.setStatusBar(self._statusbar)
+
+        # User info + Logout (right side)
+        self._user_label = QLabel("👤 —")
+        self._user_label.setStyleSheet("font-weight: bold; color: #22C55E; padding: 0 8px;")
+        self._statusbar.addPermanentWidget(self._user_label)
+
+        self._logout_btn = QPushButton("🔓 Logout")
+        self._logout_btn.setFixedHeight(24)
+        self._logout_btn.setStyleSheet(
+            "font-size: 11px; padding: 0 8px; border: 1px solid #233A57;"
+            " border-radius: 3px; background: #1A2A44; color: #EF4444;")
+        self._logout_btn.setVisible(False)
+        self._logout_btn.clicked.connect(self._on_logout)
+        self._statusbar.addPermanentWidget(self._logout_btn)
 
         self._program_label = QLabel("Program: —")
         self._statusbar.addPermanentWidget(self._program_label)
@@ -191,6 +234,68 @@ class MainWindow(QMainWindow):
         if theme_path.exists():
             with open(theme_path, "r", encoding="utf-8") as f:
                 self.setStyleSheet(f.read())
+
+    # ---- Authentication ----
+
+    def _show_login(self):
+        """Show login dialog, apply role visibility after success."""
+        dialog = LoginDialog(self._db, self)
+        if dialog.exec():
+            self._current_user = dialog.user
+            self._user_role = dialog.role
+            self._apply_role_visibility()
+            self.set_status(
+                f"Selamat datang, {dialog.display_name} ({dialog.role})", 3000)
+            logger.info("Login: %s (role=%s)", dialog.username, dialog.role)
+        else:
+            # Login cancelled — exit app
+            logger.info("Login dibatalkan, keluar aplikasi")
+            QTimer.singleShot(200, self.close)
+
+    def _on_logout(self):
+        """Logout current user and show login dialog again."""
+        reply = QMessageBox.question(
+            self, "Logout", "Yakin ingin logout?",
+            QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+
+        # Reset state
+        self._current_user = None
+        self._user_role = "operator"
+        self._logout_btn.setVisible(False)
+        self._user_label.setText("👤 —")
+
+        # Show login dialog again
+        self._show_login()
+
+    def _apply_role_visibility(self):
+        """Show/hide tabs based on user role.
+        Admin sees all tabs EXCEPT RUN. Operator sees only RUN."""
+        is_admin = self._user_role == "admin"
+
+        # Tab indices: 0=RUN, 1=TEACH, 2=HISTORY, 3=SETTINGS, 4=DIAGNOSTICS,
+        #              5=AKUN, 6=GLOBAL SETTINGS
+        self._tabs.setTabVisible(0, not is_admin)  # RUN: operator only
+        self._tabs.setTabVisible(1, is_admin)      # TEACH
+        self._tabs.setTabVisible(2, is_admin)      # HISTORY
+        self._tabs.setTabVisible(3, is_admin)      # SETTINGS
+        self._tabs.setTabVisible(4, is_admin)      # DIAGNOSTICS
+        self._tabs.setTabVisible(5, is_admin)      # AKUN
+        self._tabs.setTabVisible(6, is_admin)      # GLOBAL SETTINGS
+
+        if is_admin:
+            self._account_page.refresh()
+            self._tabs.setCurrentIndex(1)  # Start on TEACH for admin
+        else:
+            self._tabs.setCurrentIndex(0)  # Start on RUN for operator
+            self._reset_counters()          # Fresh counters for operator
+
+        # Update user display in status bar
+        uname = self._current_user.get("display_name", self._current_user.get("username", ""))
+        self._user_label.setText(f"👤 {uname} ({self._user_role})")
+        self._logout_btn.setVisible(True)
+        logger.info("Role applied: %s (admin=%s)", self._user_role, is_admin)
 
     def _connect_signals(self):
         # Settings
@@ -236,6 +341,25 @@ class MainWindow(QMainWindow):
 
         # TEACH: Image deleted from gallery
         self._teach_page.image_deleted.connect(self._on_gallery_image_deleted)
+
+        # ACCOUNT: User changes
+        self._account_page.roles_changed.connect(self._refresh_history)
+
+        # TEACH: Part Presence Check signals
+        pc = self._teach_page
+        pc.get_pc_enabled_cb().toggled.connect(self._on_part_check_config_changed)
+        pc.get_pc_method_combo().currentIndexChanged.connect(
+            self._on_part_check_config_changed)
+        pc.get_pc_color_th_spin().editingFinished.connect(
+            self._on_part_check_config_changed)
+        pc.get_pc_edge_th_spin().editingFinished.connect(
+            self._on_part_check_config_changed)
+        pc.get_pc_canny_low_spin().editingFinished.connect(
+            self._on_part_check_config_changed)
+        pc.get_pc_canny_high_spin().editingFinished.connect(
+            self._on_part_check_config_changed)
+        pc.get_gate_roi_editor().rois_changed.connect(self._on_gate_roi_changed)
+        pc.get_capture_master_button().clicked.connect(self._on_capture_master)
 
         # HISTORY: Correction buttons
         self._history_page.get_correct_ok_button().clicked.connect(
@@ -390,6 +514,24 @@ class MainWindow(QMainWindow):
         if self._tabs.currentIndex() != 0:
             return
 
+        # ── Step 1: Part Presence Check ──
+        pc_cfg = self._current_part_check_cfg
+        if pc_cfg.get("enabled") and pc_cfg.get("has_master") and pc_cfg.get("gate_roi"):
+            try:
+                pc_result = pc_module.evaluate_part_presence(
+                    frame, pc_cfg["gate_roi"], pc_cfg)
+            except Exception as e:
+                logger.warning("Part check error: %s", e)
+                pc_result = None
+            if pc_result is not None and not pc_result.ready:
+                # Stop NG interval timer so phantom NG doesn't count
+                if self._ng_interval_timer.isActive():
+                    self._ng_interval_timer.stop()
+                    self._ng_interval_active = False
+                self._run_page.set_waiting_for_part()
+                return
+        # ── Step 2: QC Inference ──
+
         try:
             overall_ng = False
             worst_score = 0.0
@@ -416,21 +558,40 @@ class MainWindow(QMainWindow):
                 if result.judgement == "NG":
                     overall_ng = True
 
-            final_judgement = "NG" if overall_ng else "OK"
+            raw_judgement = "NG" if overall_ng else "OK"
 
-            # Update RUN page
-            self._run_page.update_judgement(final_judgement, worst_score)
-            self._run_page.update_latency(total_latency / len(roi_results))
+            # Always update latency and ROI info (informational)
+            avg_latency = total_latency / len(roi_results) if roi_results else 0.0
+            self._run_page.update_latency(avg_latency)
             self._run_page.update_roi_results(roi_results)
 
-            # Counters
-            self._inspection_count += 1
-            if final_judgement == "OK":
+            # ---- NG Interval Timer ----
+            if raw_judgement == "OK":
+                # Stop interval timer — anomaly cleared
+                if self._ng_interval_timer.isActive():
+                    self._ng_interval_timer.stop()
+                    self._ng_interval_active = False
+                # Show OK immediately, increment OK counter
+                self._run_page.update_judgement("OK", worst_score)
                 self._inspection_ok += 1
-            else:
-                self._inspection_ng += 1
-            self._run_page.update_counters(
-                self._inspection_count, self._inspection_ok, self._inspection_ng)
+                self._run_page.update_counters(
+                    self._inspection_ok, self._inspection_ng)
+
+            else:  # raw_judgement == "NG"
+                if not self._ng_interval_timer.isActive():
+                    # First NG frame — start interval timer
+                    delay = self._global_settings_page.get_ng_debounce_ms()
+                    if delay > 0:
+                        self._ng_interval_timer.start(delay)
+                        self._ng_interval_active = True
+                    # Show NG immediately on display
+                    self._inspection_ng += 1  # count first NG
+                    self._run_page.update_counters(
+                        self._inspection_ok, self._inspection_ng)
+                    self._run_page.update_judgement("NG", worst_score)
+                else:
+                    # Timer already running — update display (worse score)
+                    self._run_page.update_judgement("NG", worst_score)
 
             # Diagnostics latency
             self._diagnostics_page.update_performance(
@@ -439,34 +600,135 @@ class MainWindow(QMainWindow):
                 self._inference_engine.latency_p95_ms,
             )
 
-            # Save to history DB (NG always, OK every ~30 frames)
-            self._inference_save_counter += 1
-            is_ng = final_judgement == "NG"
-            should_save = is_ng or (self._inference_save_counter % 30 == 0)
-            if should_save:
-                image_path = ""
-                if is_ng:
-                    # Save NG frame to disk for traceability
-                    ts = time.strftime("%Y%m%d_%H%M%S")
-                    history_dir = self._data_dir / "history" / self._active_program
-                    history_dir.mkdir(parents=True, exist_ok=True)
-                    fname = f"NG_{ts}_{self._active_template}_score{worst_score:.3f}.png"
-                    img_path = history_dir / fname
-                    cv2.imwrite(str(img_path), frame)
-                    image_path = str(img_path)
-                self._db.add_inspection({
-                    "program": self._active_program,
-                    "template_id": self._active_template,
-                    "score": worst_score,
-                    "judgement": final_judgement,
-                    "threshold": self._inference_engine.threshold,
-                    "latency_ms": total_latency / len(roi_results),
-                    "image_path": image_path,
-                    "metadata": {"num_rois": len(roi_results)},
-                })
+            # Save OK to history (throttled)
+            if raw_judgement == "OK":
+                self._inference_save_counter += 1
+                if self._inference_save_counter % 30 == 0:
+                    self._db.add_inspection({
+                        "program": self._active_program,
+                        "score": worst_score,
+                        "judgement": "OK",
+                        "threshold": self._inference_engine.threshold,
+                        "latency_ms": avg_latency,
+                        "image_path": "",
+                        "metadata": {"num_rois": len(roi_results)},
+                    })
 
         except Exception as e:
             logger.warning("Inference error: %s", e)
+
+    # ---- NG Interval Timer ----
+
+    def _on_ng_interval_tick(self):
+        """Interval timer tick — NG still ongoing, count another NG."""
+        self._inspection_ng += 1
+        self._run_page.update_counters(self._inspection_ok, self._inspection_ng)
+        # Timer auto-restarts (QTimer with interval keeps firing)
+
+    # ---- Part Presence Check ----
+
+    def _on_part_check_config_changed(self):
+        """Save part check UI state to template config and refresh cache."""
+        if not self._active_template:
+            return
+        pc = self._teach_page
+        updates = {
+            "enabled": pc.get_pc_enabled_cb().isChecked(),
+            "method": pc.get_pc_method_combo().currentData(),
+            "color_threshold": pc.get_pc_color_th_spin().value(),
+            "edge_threshold": pc.get_pc_edge_th_spin().value(),
+            "canny_low": pc.get_pc_canny_low_spin().value(),
+            "canny_high": pc.get_pc_canny_high_spin().value(),
+        }
+        try:
+            self._pm.update_part_check_config(
+                self._active_program, self._active_template, updates)
+            self._refresh_part_check_gate_cache()
+        except Exception as e:
+            logger.warning("Part check config save error: %s", e)
+
+    def _on_gate_roi_changed(self):
+        """Save gate ROI from editor to template config."""
+        if not self._active_template:
+            return
+        gate_rois = self._teach_page.get_gate_roi()
+        gate_roi = gate_rois[0] if gate_rois else None
+        try:
+            self._pm.update_part_check_config(
+                self._active_program, self._active_template,
+                {"gate_roi": gate_roi})
+            self._refresh_part_check_gate_cache()
+        except Exception as e:
+            logger.warning("Gate ROI save error: %s", e)
+
+    def _on_capture_master(self):
+        """Capture current frame as master photo for part check."""
+        if not self._active_template:
+            self.set_status("Tidak ada template aktif!", 3000)
+            return
+        if not self._camera_worker or not self._camera_worker.is_running:
+            self.set_status("Kamera tidak aktif!", 3000)
+            return
+        gate_rois = self._teach_page.get_gate_roi()
+        if not gate_rois:
+            self.set_status("Gambar gate ROI dulu!", 3000)
+            return
+        gate_roi = gate_rois[0]
+        frame = self._camera_worker.get_frame()
+        if frame is None:
+            self.set_status("Gagal ambil frame!", 3000)
+            return
+        try:
+            pc_updates = self._pm.save_part_check_master(
+                self._active_program, self._active_template,
+                frame, gate_roi,
+                canny_low=self._teach_page.get_pc_canny_low_spin().value(),
+                canny_high=self._teach_page.get_pc_canny_high_spin().value(),
+            )
+            self._refresh_part_check_ui()
+            self._refresh_part_check_gate_cache()
+            self.set_status("Foto master part tersimpan!", 3000)
+        except Exception as e:
+            self.set_status(f"Gagal simpan master: {e}", 5000)
+
+    def _refresh_part_check_ui(self):
+        """Load part check config + gate ROI + master thumbnail into TEACH UI."""
+        if not self._active_template:
+            return
+        try:
+            pc_cfg = self._pm.get_part_check_config(
+                self._active_program, self._active_template)
+        except Exception:
+            pc_cfg = {}
+        self._teach_page.set_part_check_config(pc_cfg)
+
+        # Restore gate ROI from config
+        gate_roi_dict = pc_cfg.get("gate_roi")
+        if gate_roi_dict:
+            self._teach_page.set_gate_roi([gate_roi_dict])
+
+        # Master thumbnail
+        master_path = self._pm.get_part_check_master_image_path(
+            self._active_program, self._active_template)
+        if master_path and master_path.exists():
+            from PySide6.QtGui import QPixmap
+            pix = QPixmap(str(master_path))
+            self._teach_page.set_master_status(
+                pc_cfg.get("has_master", False),
+                pc_cfg.get("master_captured_at", ""), pix)
+        else:
+            self._teach_page.set_master_status(False)
+
+    def _refresh_part_check_gate_cache(self):
+        """Reload part check config from disk into in-memory cache."""
+        if not self._active_template:
+            self._current_part_check_cfg = {}
+            return
+        try:
+            self._current_part_check_cfg = self._pm.get_part_check_config(
+                self._active_program, self._active_template)
+        except Exception:
+            self._current_part_check_cfg = {}
 
     # ---- Programs / Templates ----
 
@@ -567,6 +829,10 @@ class MainWindow(QMainWindow):
             self._teach_page.clear_galleries()
             self._load_gallery_thumbnails("ok")
             self._load_gallery_thumbnails("ng")
+
+            # Part Presence Check UI
+            self._refresh_part_check_ui()
+            self._refresh_part_check_gate_cache()
 
     def _load_gallery_thumbnails(self, label: str):
         """Load thumbnail images from disk into gallery."""
@@ -881,7 +1147,11 @@ class MainWindow(QMainWindow):
         self._inspection_count = 0
         self._inspection_ok = 0
         self._inspection_ng = 0
-        self._run_page.update_counters(0, 0, 0)
+        self._run_page.update_counters(0, 0)
+        # Cancel any pending NG interval timer
+        if self._ng_interval_timer.isActive():
+            self._ng_interval_timer.stop()
+        self._ng_interval_active = False
 
     def _on_gallery_image_deleted(self, label: str):
         """Refresh gallery after image deletion."""
@@ -1102,7 +1372,7 @@ class MainWindow(QMainWindow):
             self._retranslate_ui()
 
     def _on_tab_changed(self, index: int):
-        page_names = ["Run", "Teach", "History", "Settings", "Diagnostics"]
+        page_names = ["Run", "Teach", "History", "Settings", "Diagnostics", "Akun", "Global"]
         name = page_names[index] if index < len(page_names) else f"Tab {index}"
         logger.debug("Switched to %s tab", name)
 
@@ -1112,6 +1382,12 @@ class MainWindow(QMainWindow):
         # Refresh history when switching to HISTORY tab
         elif index == 2:
             self._refresh_history()
+        # Refresh account page when switching to AKUN tab
+        elif index == 5:
+            self._account_page.refresh()
+        # Load settings when switching to GLOBAL tab
+        elif index == 6:
+            self._global_settings_page._load_settings()
 
     def _show_about(self):
         QMessageBox.about(

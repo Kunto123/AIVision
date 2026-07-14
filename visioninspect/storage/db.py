@@ -108,7 +108,28 @@ class Database:
             )
         """)
 
+        # Users (authentication, roles, RFID)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                role TEXT NOT NULL DEFAULT 'operator'
+                    CHECK(role IN ('admin', 'operator')),
+                rfid_uid TEXT UNIQUE,
+                rfid_bound_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
         self.conn.commit()
+
+        # Seed default admin if no users exist
+        cursor.execute("SELECT COUNT(*) FROM users")
+        if cursor.fetchone()[0] == 0:
+            self._seed_default_admin()
 
     # ---- Inspection History ----
 
@@ -255,6 +276,122 @@ class Database:
         )
         self.conn.commit()
         return cursor.lastrowid
+
+    # ---- Users / Authentication ----
+
+    @staticmethod
+    def _hash_password(password: str) -> str:
+        """Hash password with SHA-256 + pepper."""
+        import hashlib
+        return hashlib.sha256(f"visioninspect_2024_{password}".encode()).hexdigest()
+
+    def _seed_default_admin(self):
+        """Create default admin account on first run."""
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.conn.execute("""
+            INSERT INTO users (username, password_hash, display_name, role, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, ("admin", self._hash_password("admin"), "Administrator", "admin", now, now))
+        self.conn.commit()
+        logger.info("Default admin account created (admin/admin)")
+
+    def authenticate(self, username: str, password: str) -> Optional[dict]:
+        """Verify credentials. Returns user dict or None."""
+        cursor = self.conn.execute(
+            "SELECT * FROM users WHERE username = ?", (username,))
+        row = cursor.fetchone()
+        if row and dict(row)["password_hash"] == self._hash_password(password):
+            return dict(row)
+        return None
+
+    def get_user_by_rfid(self, rfid_uid: str) -> Optional[dict]:
+        """Look up user by RFID UID."""
+        cursor = self.conn.execute(
+            "SELECT * FROM users WHERE rfid_uid = ?", (rfid_uid,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def list_users(self) -> List[Dict[str, Any]]:
+        """List all users (without password hashes)."""
+        cursor = self.conn.execute(
+            "SELECT id, username, display_name, role, rfid_uid, rfid_bound_at, "
+            "created_at, updated_at FROM users ORDER BY id")
+        return [dict(row) for row in cursor.fetchall()]
+
+    def add_user(self, username: str, password: str, display_name: str = "",
+                 role: str = "operator") -> int:
+        """Add a new user. Returns user ID."""
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        cursor = self.conn.execute("""
+            INSERT INTO users (username, password_hash, display_name, role, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (username, self._hash_password(password), display_name, role, now, now))
+        self.conn.commit()
+        logger.info("User added: %s (role=%s)", username, role)
+        return cursor.lastrowid
+
+    def update_user(self, user_id: int, display_name: str = None,
+                    password: str = None, role: str = None) -> bool:
+        """Update user fields. Returns True if changed."""
+        fields = []
+        values = []
+        if display_name is not None:
+            fields.append("display_name = ?")
+            values.append(display_name)
+        if password is not None:
+            fields.append("password_hash = ?")
+            values.append(self._hash_password(password))
+        if role is not None:
+            fields.append("role = ?")
+            values.append(role)
+        if not fields:
+            return False
+        fields.append("updated_at = ?")
+        values.append(time.strftime("%Y-%m-%d %H:%M:%S"))
+        values.append(user_id)
+        self.conn.execute(
+            f"UPDATE users SET {', '.join(fields)} WHERE id = ?", values)
+        self.conn.commit()
+        return True
+
+    def bind_rfid(self, user_id: int, rfid_uid: str) -> bool:
+        """Bind RFID UID to a user. Returns False if UID already used."""
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            self.conn.execute("""
+                UPDATE users SET rfid_uid = ?, rfid_bound_at = ?, updated_at = ?
+                WHERE id = ?
+            """, (rfid_uid, now, now, user_id))
+            self.conn.commit()
+            logger.info("RFID %s bound to user id=%d", rfid_uid, user_id)
+            return True
+        except Exception:
+            return False
+
+    def unbind_rfid(self, user_id: int) -> bool:
+        """Remove RFID binding from a user."""
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.conn.execute("""
+            UPDATE users SET rfid_uid = NULL, rfid_bound_at = NULL, updated_at = ? WHERE id = ?
+        """, (now, user_id))
+        self.conn.commit()
+        return True
+
+    def delete_user(self, user_id: int) -> bool:
+        """Delete a user. Returns False if last admin."""
+        # Check if this is the last admin
+        cursor = self.conn.execute(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin'")
+        admin_count = cursor.fetchone()[0]
+        cursor = self.conn.execute("SELECT role FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        if row and row["role"] == "admin" and admin_count <= 1:
+            logger.warning("Cannot delete last admin user")
+            return False
+        self.conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        self.conn.commit()
+        logger.info("User deleted: id=%d", user_id)
+        return True
 
     # ---- Maintenance ----
 

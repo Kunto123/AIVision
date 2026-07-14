@@ -1,0 +1,66 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+*.whl
+*.spec
+
+# --- Virtual Environment ---
+.vision/
+venv/
+.venv/
+env/
+.env/
+
+# --- Project Data (training images, models, DB) ---
+data/
+!data/.gitkeep
+
+# Generated history/NG images
+history/
+
+# --- IDE & Editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vs/
+*.suo
+*.user
+*.workspace
+
+# --- OS ---
+Thumbs.db
+.DS_Store
+Desktop.ini
+
+# --- Testing ---
+.pytest_cache/
+htmlcov/
+.coverage
+*.cover
+.pytest_cache/
+test_tmp*/
+
+# --- Hermes Agent (plan files, prompts) ---
+.hermes/
+
+# --- Qt / PySide ---
+*.ui
+*.qrc
+moc_*.py
+rcc_*.py
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Temp ---
+tmp/
+temp/
+*.tmp

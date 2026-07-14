@@ -24,10 +24,16 @@ from visioninspect.utils.i18n import Translator
 class RunPage(QWidget):
     """Halaman RUN — mode inspeksi utama untuk operator."""
 
-    def __init__(self, translator: Translator, parent=None):
+    def __init__(self, translator: Translator, config, parent=None):
         super().__init__(parent)
         self._tr = translator
+        self._config = config
         self._setup_ui()
+        self._load_camera_settings()
+
+    def _load_camera_settings(self):
+        """Load camera settings from config."""
+        self._device_spin.setValue(self._config.get("camera.device_index", 0))
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)

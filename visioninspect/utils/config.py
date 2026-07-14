@@ -124,6 +124,9 @@ class Config:
             "check_interval_sec": 2.0,
         },
 
+        # Global settings
+        "ng_debounce_ms": 500,
+
         # Active program
         "active_program": "",
     }

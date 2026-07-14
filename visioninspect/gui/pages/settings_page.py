@@ -26,10 +26,12 @@ from visioninspect.utils.i18n import Translator
 class SettingsPage(QWidget):
     """Halaman SETTINGS — semua pengaturan aplikasi."""
 
-    def __init__(self, translator: Translator, parent=None):
+    def __init__(self, translator: Translator, config, parent=None):
         super().__init__(parent)
         self._tr = translator
+        self._config = config
         self._setup_ui()
+        self._load_settings()
 
     def _setup_ui(self):
         # Scroll area for settings
@@ -250,3 +252,60 @@ class SettingsPage(QWidget):
 
     def get_save_button(self) -> QPushButton:
         return self._save_btn
+
+    def get_camera_device_spin(self) -> QSpinBox:
+        return self._cam_device
+
+    def _load_settings(self) -> None:
+        """Load settings from config into UI widgets."""
+        # Camera
+        self._cam_device.setValue(self._config.get("camera.device_index", 0))
+        self._cam_width.setValue(self._config.get("camera.resolution_width", 1920))
+        self._cam_height.setValue(self._config.get("camera.resolution_height", 1080))
+        self._cam_fps.setValue(self._config.get("camera.fps_target", 30))
+        self._cam_exposure.setValue(self._config.get("camera.exposure", -1))
+
+        # ROI
+        self._roi_enabled.setChecked(self._config.get("roi.enabled", True))
+        self._roi_x.setValue(self._config.get("roi.x", 0))
+        self._roi_y.setValue(self._config.get("roi.y", 0))
+        self._roi_w.setValue(self._config.get("roi.width", 256))
+        self._roi_h.setValue(self._config.get("roi.height", 256))
+
+        # PLC
+        self._plc_enabled.setChecked(self._config.get("plc.enabled", False))
+        plc_mode = self._config.get("plc.mode", "rs232")
+        self._plc_mode.setCurrentIndex(0 if plc_mode == "rs232" else 1)
+        plc_protocol = self._config.get("plc.protocol", "modbus")
+        self._plc_protocol.setCurrentIndex(0 if plc_protocol == "modbus" else 1)
+        self._plc_port.setText(self._config.get("plc.port", "COM1"))
+        baudrate = str(self._config.get("plc.baudrate", 9600))
+        idx = self._plc_baud.findText(baudrate)
+        if idx >= 0:
+            self._plc_baud.setCurrentIndex(idx)
+        parity = self._config.get("plc.parity", "N")
+        idx = self._plc_parity.findText(parity)
+        if idx >= 0:
+            self._plc_parity.setCurrentIndex(idx)
+
+        # Model
+        algo = self._config.get("model.algorithm", "patchcore")
+        self._model_algo.setCurrentIndex(0 if algo == "patchcore" else 1)
+        backbone = self._config.get("model.backbone", "resnet18")
+        idx = self._model_backbone.findText(backbone)
+        if idx >= 0:
+            self._model_backbone.setCurrentIndex(idx)
+        self._model_input_size.setValue(self._config.get("model.input_size", 256))
+
+        # History
+        self._retention_days.setValue(self._config.get("history.auto_purge_days", 30))
+        self._max_entries.setValue(self._config.get("history.max_history_entries", 10000))
+        self._ok_sample_pct.setValue(self._config.get("history.save_ok_sample_percent", 10))
+
+        # Flask
+        self._flask_enabled.setChecked(self._config.get("flask_api.enabled", False))
+        self._flask_port.setValue(self._config.get("flask_api.port", 5000))
+
+        # Language
+        lang = self._config.get("language", "id")
+        self._lang_combo.setCurrentIndex(0 if lang == "id" else 1)

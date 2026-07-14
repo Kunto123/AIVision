@@ -158,10 +158,10 @@ class MainWindow(QMainWindow):
         self._tabs = QTabWidget()
         self._tabs.setDocumentMode(True)
 
-        self._run_page = RunPage(self._tr)
+        self._run_page = RunPage(self._tr, self._config)
         self._teach_page = TeachPage(self._tr)
         self._history_page = HistoryPage(self._tr)
-        self._settings_page = SettingsPage(self._tr)
+        self._settings_page = SettingsPage(self._tr, self._config)
         self._diagnostics_page = DiagnosticsPage(self._tr)
         self._account_page = AccountPage(self._db)
         self._global_settings_page = GlobalSettingsPage(self._config)
@@ -305,6 +305,7 @@ class MainWindow(QMainWindow):
         # Camera toggle
         self._run_page.get_camera_toggle_button().clicked.connect(self._toggle_camera)
         self._run_page.get_device_spin().valueChanged.connect(self._on_camera_device_change)
+        self._settings_page.get_camera_device_spin().valueChanged.connect(self._on_camera_device_change)
         self._run_page.get_heatmap_button().toggled.connect(self._on_heatmap_toggle)
 
         # TEACH: Capture buttons
@@ -413,6 +414,13 @@ class MainWindow(QMainWindow):
         if self._camera_worker:
             self._camera_worker.set_device(device_index)
             self._config.set("camera.device_index", device_index)
+        # Sync both spinboxes (RunPage and SettingsPage)
+        self._run_page.get_device_spin().blockSignals(True)
+        self._run_page.get_device_spin().setValue(device_index)
+        self._run_page.get_device_spin().blockSignals(False)
+        self._settings_page._cam_device.blockSignals(True)
+        self._settings_page._cam_device.setValue(device_index)
+        self._settings_page._cam_device.blockSignals(False)
 
     # ---- Camera Slots ----
 

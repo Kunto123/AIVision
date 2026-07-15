@@ -72,6 +72,7 @@ class Config:
             "mode": "continuous",  # continuous | plc_trigger | manual
             "openvino_device": "CPU",
             "enable_int8": True,
+            "cycle_delay_ms": 1000,  # jeda antar siklus inspeksi (ms), 0=langsung
         },
 
         # PLC

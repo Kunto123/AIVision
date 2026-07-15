@@ -5,7 +5,7 @@ Menjalankan TrainingPipeline di QThread terpisah agar tidak memblokir GUI.
 
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
@@ -16,10 +16,48 @@ from visioninspect.utils.logging_setup import get_logger
 logger = get_logger("training")
 
 
+def _crop_images_to_rois(
+    src_dir: Path,
+    rois: List[dict],
+    dst_dir: Path,
+    input_size: int = 256,
+) -> int:
+    """Crop all images in *src_dir* to each enabled ROI, resize, and save to *dst_dir*.
+
+    Returns number of cropped images saved.
+    Handles multiple ROIs: 1 image × N ROIs = N training images.
+    Used so training data matches inference pipeline (ROI-crop → resize).
+    """
+    import cv2
+    import uuid
+
+    if not rois:
+        return 0
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for fpath in sorted(src_dir.glob("*.png")) + sorted(src_dir.glob("*.jpg")):
+        img = cv2.imread(str(fpath))
+        if img is None:
+            continue
+        h_img, w_img = img.shape[:2]
+        for roi in rois:
+            x = max(0, min(int(roi["x"]), w_img - 1))
+            y = max(0, min(int(roi["y"]), h_img - 1))
+            w = max(1, min(int(roi.get("width", 256)), w_img - x))
+            h = max(1, min(int(roi.get("height", 256)), h_img - y))
+            crop = img[y:y + h, x:x + w].copy()
+            # Resize to input_size x input_size (matching inference)
+            crop_resized = cv2.resize(crop, (input_size, input_size))
+            uid = uuid.uuid4().hex[:8]
+            dest = dst_dir / f"{fpath.stem}_roi{roi.get('uid', 'x')[:4]}_{uid}.png"
+            cv2.imwrite(str(dest), crop_resized)
+            count += 1
+    return count
+
+
 class TrainingWorker(QObject):
-    """
-    Worker untuk training yang berjalan di QThread terpisah.
-    """
+    """Worker untuk training yang berjalan di QThread terpisah."""
 
     # Signals
     progress = Signal(int, str)   # percent, message
@@ -50,19 +88,48 @@ class TrainingWorker(QObject):
             self.done.emit()
 
     def _do_training(self, program: str, template_id: str):
-        """Internal: jalankan training."""
+        """Internal: jalankan training dengan ROI cropping otomatis.
+
+        Full-frame images dari galeri di-crop ke setiap enabled ROI
+        sebelum training, sehingga data training identik dengan yang
+        dilihat inference pipeline (ROI-crop → resize). Support multi-ROI.
+        """
         # Get template config
         tmpl_cfg = self._pm.get_template_config(program, template_id)
         if not tmpl_cfg:
             raise TrainingError(f"Template '{template_id}' tidak ditemukan")
 
-        # Get image directories
+        # Get image directories (full-frame asli dari galeri)
         tmpl_dir = self._pm._get_template_dir(program) / template_id
         ok_dir = tmpl_dir / "images" / "ok"
         ng_dir = tmpl_dir / "images" / "ng"
 
         if not ok_dir.exists() or len(list(ok_dir.glob("*.png")) + list(ok_dir.glob("*.jpg"))) == 0:
             raise TrainingError("Tidak ada gambar OK di template ini")
+
+        # Extract enabled ROIs and crop images to match inference pipeline
+        rois = self._get_enabled_rois(tmpl_cfg)
+        input_size = tmpl_cfg.get("input_size", 256)
+
+        if rois:
+            self.progress.emit(3, f"Menyiapkan data: crop ke {len(rois)} ROI...")
+            import tempfile
+            ok_crop_dir = Path(tempfile.mkdtemp(prefix="visioninspect_ok_crop_"))
+            ng_crop_dir = Path(tempfile.mkdtemp(prefix="visioninspect_ng_crop_"))
+            n_ok = _crop_images_to_rois(ok_dir, rois, ok_crop_dir, input_size)
+            n_ng = _crop_images_to_rois(ng_dir, rois, ng_crop_dir, input_size)
+            logger.info(
+                "ROI crop: %d OK originals → %d crops across %d ROI(s); "
+                "%d NG originals → %d crops",
+                len(list(ok_dir.glob("*"))), n_ok, len(rois),
+                len(list(ng_dir.glob("*"))), n_ng,
+            )
+            ok_dir = ok_crop_dir
+            ng_dir = ng_crop_dir
+        else:
+            logger.info("Tidak ada ROI — training dengan full-frame images")
+
+        ng_path = ng_dir if (ng_dir.exists() and list(ng_dir.glob("*"))) else None
 
         # Check if torch is available (it fails on Windows with DLL error)
         torch_ok = True
@@ -73,9 +140,23 @@ class TrainingWorker(QObject):
             logger.warning("Torch tidak tersedia, gunakan SimpleThresholdTrainer")
 
         if torch_ok:
-            self._do_anomalib_training(program, template_id, tmpl_cfg, ok_dir, ng_dir)
+            self._do_anomalib_training(program, template_id, tmpl_cfg, ok_dir, ng_path)
         else:
-            self._do_simple_training(program, template_id, tmpl_cfg, ok_dir, ng_dir)
+            self._do_simple_training(program, template_id, tmpl_cfg, ok_dir, ng_path)
+
+    @staticmethod
+    def _get_enabled_rois(tmpl_cfg: dict) -> List[dict]:
+        """Extract enabled ROIs from template config, handling legacy format."""
+        roi_dicts = tmpl_cfg.get("rois", [])
+        if not roi_dicts and "roi" in tmpl_cfg:
+            old = tmpl_cfg["roi"]
+            roi_dicts = [{
+                "uid": "default",
+                "x": old.get("x", 0), "y": old.get("y", 0),
+                "width": old.get("width", 256), "height": old.get("height", 256),
+                "enabled": True, "label": "ROI 1",
+            }]
+        return [r for r in roi_dicts if r.get("enabled", True)]
 
     def _do_simple_training(self, program, template_id, tmpl_cfg, ok_dir, ng_dir):
         """Fallback: training tanpa PyTorch."""
@@ -92,7 +173,7 @@ class TrainingWorker(QObject):
 
         result = trainer.train(
             ok_dir=ok_dir,
-            ng_dir=ng_dir if (ng_dir.exists() and list(ng_dir.glob("*"))) else None,
+            ng_dir=ng_dir,
             output_dir=output_dir,
         )
 
@@ -130,7 +211,7 @@ class TrainingWorker(QObject):
         self.progress.emit(5, "Menyiapkan data...")
         result = self._pipeline.train(
             ok_dir=ok_dir,
-            ng_dir=ng_dir if (ng_dir.exists() and list(ng_dir.glob("*"))) else None,
+            ng_dir=ng_dir,
             output_dir=output_dir,
         )
 

@@ -208,6 +208,32 @@ class SettingsPage(QWidget):
 
         main_layout.addWidget(ng_group)
 
+        # === Cycle Delay ===
+        cycle_group = QGroupBox("🔄 Cycle Delay")
+        cycle_form = QVBoxLayout(cycle_group)
+
+        cycle_delay_row = QHBoxLayout()
+        cycle_delay_row.addWidget(QLabel("Jeda antar siklus:"))
+        self._cycle_delay_spin = QSpinBox()
+        self._cycle_delay_spin.setRange(0, 30000)
+        self._cycle_delay_spin.setValue(1000)
+        self._cycle_delay_spin.setSuffix(" ms")
+        self._cycle_delay_spin.setSingleStep(100)
+        self._cycle_delay_spin.setFixedWidth(130)
+        cycle_delay_row.addWidget(self._cycle_delay_spin)
+        cycle_delay_row.addStretch()
+        cycle_form.addLayout(cycle_delay_row)
+
+        cycle_help = QLabel(
+            "Jeda setelah hasil inspeksi ditampilkan, sebelum siklus berikutnya dimulai.\n"
+            "0 = langsung lanjut ke siklus berikutnya.\n"
+            "Berguna untuk memberi waktu part diganti.")
+        cycle_help.setObjectName("secondaryText")
+        cycle_help.setWordWrap(True)
+        cycle_form.addWidget(cycle_help)
+
+        main_layout.addWidget(cycle_group)
+
         # === Logging Settings ===
         log_group = QGroupBox("📝 Logging")
         log_layout = QVBoxLayout(log_group)
@@ -286,6 +312,7 @@ class SettingsPage(QWidget):
             },
             "language": "id" if self._lang_combo.currentIndex() == 0 else "en",
             "ng_debounce_ms": self._ng_delay_spin.value(),
+            "cycle_delay_ms": self._cycle_delay_spin.value(),
             "show_debug": self._show_debug_cb.isChecked(),
         }
 
@@ -298,6 +325,10 @@ class SettingsPage(QWidget):
     def get_ng_debounce_ms(self) -> int:
         """Get current NG debounce delay from config."""
         return self._config.get("ng_debounce_ms", 500)
+
+    def get_cycle_delay_ms(self) -> int:
+        """Get cycle delay from config (ms). 0 = no delay."""
+        return self._config.get("inference.cycle_delay_ms", 1000)
 
     def _load_settings(self) -> None:
         """Load settings from config into UI widgets."""
@@ -355,6 +386,9 @@ class SettingsPage(QWidget):
 
         # NG Timeout
         self._ng_delay_spin.setValue(self._config.get("ng_debounce_ms", 500))
+
+        # Cycle Delay
+        self._cycle_delay_spin.setValue(self._config.get("inference.cycle_delay_ms", 1000))
 
         # Logging
         self._show_debug_cb.setChecked(self._config.get("show_debug", False))

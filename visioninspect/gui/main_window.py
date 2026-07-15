@@ -118,6 +118,12 @@ class MainWindow(QMainWindow):
         self._ng_interval_timer.timeout.connect(self._on_ng_interval_tick)
         self._ng_interval_active = False
 
+        # Cycle delay timer (jeda antar siklus inspeksi)
+        self._cycle_delay_timer = QTimer(self)
+        self._cycle_delay_timer.setSingleShot(True)
+        self._cycle_delay_timer.timeout.connect(self._on_cycle_delay_tick)
+        self._cycle_delay_active = False
+
         # Part Presence Check (cached config — read from disk only on template switch)
         self._current_part_check_cfg: dict = {}
         # Overlay/gating state (updated every frame in _on_frame_for_inference)
@@ -350,6 +356,8 @@ class MainWindow(QMainWindow):
 
         # TEACH: Image deleted from gallery
         self._teach_page.image_deleted.connect(self._on_gallery_image_deleted)
+        # TEACH: Thumbnail clicked → popup ROI adjust
+        self._teach_page.thumbnail_clicked.connect(self._on_thumbnail_clicked)
 
         # ACCOUNT: User changes
         self._account_page.roles_changed.connect(self._refresh_history)
@@ -549,13 +557,16 @@ class MainWindow(QMainWindow):
 
     def _on_frame_for_inference(self, frame):
         """Run inference on frame from camera — per-ROI + aggregate.
-        Only runs when on RUN tab to avoid CPU waste and counter drift."""
+        Only runs when on RUN tab. Respects cycle delay between inspections."""
         if not self._inference_engine.is_loaded:
             return
         if not self._current_all_rois:
             return
         # Only infer on RUN tab — other tabs don't show inference results
         if self._tabs.currentIndex() != 0:
+            return
+        # Skip frame if in cycle delay (jeda antar siklus)
+        if self._cycle_delay_active:
             return
 
         # ── Step 1: Part Presence Check (fail-safe gating) ──
@@ -665,6 +676,20 @@ class MainWindow(QMainWindow):
                     # Timer already running — update display (worse score)
                     self._run_page.update_judgement("NG", worst_score)
 
+            # ── Cycle delay: jeda antar siklus inspeksi ──
+            cycle_delay = self._settings_page.get_cycle_delay_ms()
+            if cycle_delay > 0:
+                # Stop NG interval timer so it doesn't phantom-count during delay
+                if self._ng_interval_timer.isActive():
+                    self._ng_interval_timer.stop()
+                    self._ng_interval_active = False
+                self._cycle_delay_timer.start(cycle_delay)
+                self._cycle_delay_active = True
+                self._run_page.set_status_message(
+                    f"⏳ Cycle delay {cycle_delay} ms...")
+            else:
+                self._cycle_delay_active = False
+
             # Diagnostics latency
             self._diagnostics_page.update_performance(
                 0, 0, 0,
@@ -696,6 +721,11 @@ class MainWindow(QMainWindow):
         self._inspection_ng += 1
         self._run_page.update_counters(self._inspection_ok, self._inspection_ng)
         # Timer auto-restarts (QTimer with interval keeps firing)
+
+    def _on_cycle_delay_tick(self):
+        """Cycle delay timer tick — ready for next inspection cycle."""
+        self._cycle_delay_active = False
+        self._run_page.set_status_message("⏳ Siap")
 
     # ---- Part Presence Check ----
 
@@ -952,7 +982,11 @@ class MainWindow(QMainWindow):
     # ---- Capture ----
 
     def _on_capture(self, label: str):
-        """Capture frame from camera — or in import mode, save current import image."""
+        """Capture frame from camera — or in import mode, save current import image.
+
+        Full frame disimpan untuk ditampilkan di galeri.
+        ROI cropping dilakukan saat training (lihat TrainingWorker).
+        """
         # === IMPORT REVIEW MODE ===
         if self._is_import_mode:
             self._save_current_import_image(label)
@@ -971,7 +1005,7 @@ class MainWindow(QMainWindow):
             self.set_status("Gagal ambil frame!", 3000)
             return
 
-        # Save to template
+        # Save full frame (cropping ke ROI dilakukan saat training)
         dest = self._pm.save_template_image(
             self._active_program, self._active_template, frame, label)
 
@@ -1259,9 +1293,30 @@ class MainWindow(QMainWindow):
         if self._ng_interval_timer.isActive():
             self._ng_interval_timer.stop()
         self._ng_interval_active = False
+        # Cancel any pending cycle delay
+        if self._cycle_delay_timer.isActive():
+            self._cycle_delay_timer.stop()
+        self._cycle_delay_active = False
+        self._run_page.set_status_message("⏳ Siap")
 
     def _on_gallery_image_deleted(self, label: str):
         """Refresh gallery after image deletion."""
+        self._refresh_template_ui()
+
+    def _on_thumbnail_clicked(self, image_path: str):
+        """Open popup to adjust ROIs on a gallery image."""
+        if not self._active_template:
+            return
+        from visioninspect.gui.dialogs.roi_adjust_dialog import ROIAdjustDialog
+        from visioninspect.gui.widgets.roi_editor import ROIData
+
+        current_rois = self._pm.get_template_config(
+            self._active_program, self._active_template).get("rois", [])
+        dialog = ROIAdjustDialog(image_path, current_rois, self)
+        dialog.exec()
+        # Auto-save on any close (accept = Save, reject = ✕ also saves)
+        updated_rois = [ROIData.from_dict(d) for d in dialog.get_rois()]
+        self._save_rois(updated_rois)
         self._refresh_template_ui()
 
     def _on_threshold_slider(self, value: int):

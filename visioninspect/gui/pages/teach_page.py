@@ -36,6 +36,7 @@ class TeachPage(QWidget):
     """Halaman TEACH — teaching dan training model dengan multi-template."""
 
     image_deleted = Signal(str)
+    thumbnail_clicked = Signal(str)
 
     def __init__(self, translator: Translator, parent=None):
         super().__init__(parent)
@@ -413,11 +414,13 @@ class TeachPage(QWidget):
     def add_ok_thumbnail(self, pixmap, path=""):
         t = ThumbnailWidget(pixmap, path, "#22C55E")
         t.deleted.connect(lambda p: self._on_delete_image(p, "ok"))
+        t.clicked.connect(self.thumbnail_clicked.emit)
         self._ok_gallery_layout.insertWidget(self._ok_gallery_layout.count() - 1, t)
 
     def add_ng_thumbnail(self, pixmap, path=""):
         t = ThumbnailWidget(pixmap, path, "#EF4444")
         t.deleted.connect(lambda p: self._on_delete_image(p, "ng"))
+        t.clicked.connect(self.thumbnail_clicked.emit)
         self._ng_gallery_layout.insertWidget(self._ng_gallery_layout.count() - 1, t)
 
     def _on_delete_image(self, path, label):

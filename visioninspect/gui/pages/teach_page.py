@@ -298,6 +298,11 @@ class TeachPage(QWidget):
         self._pc_method_combo.addItem("Warna (mean/std)", "color")
         self._pc_method_combo.addItem("Tepi (Canny)", "edge")
         self._pc_method_combo.addItem("Keduanya (AND)", "both")
+        self._pc_method_combo.setToolTip(
+            "Warna: cocok bila part punya warna kontras dengan latar. "
+            "Tepi: hanya hitung JUMLAH tepi — tidak deteksi posisi. "
+            "Keduanya: AND — part harus lolos kedua metode."
+        )
         self._pc_method_combo.currentIndexChanged.connect(self._update_pc_field_visibility)
         self._pc_form.addRow("Metode:", self._pc_method_combo)
 
@@ -309,10 +314,16 @@ class TeachPage(QWidget):
         self._pc_form.addRow("Toleransi warna:", self._pc_color_th_spin)
 
         self._pc_edge_th_spin = QDoubleSpinBox()
-        self._pc_edge_th_spin.setRange(0.001, 1.0)
-        self._pc_edge_th_spin.setValue(0.08)
-        self._pc_edge_th_spin.setSingleStep(0.01)
+        self._pc_edge_th_spin.setRange(0.001, 10.0)
+        self._pc_edge_th_spin.setValue(0.5)
+        self._pc_edge_th_spin.setSingleStep(0.1)
         self._pc_edge_th_spin.setDecimals(3)
+        self._pc_edge_th_spin.setToolTip(
+            "Ambang perubahan edge relatif (rasio). "
+            "Makin kecil = makin sensitif. "
+            "0.5 = part dianggap berbeda bila edge berubah >50% "
+            "dari master."
+        )
         self._pc_form.addRow("Toleransi tepi:", self._pc_edge_th_spin)
 
         canny_row = QHBoxLayout()
@@ -518,7 +529,7 @@ class TeachPage(QWidget):
         if idx >= 0:
             self._pc_method_combo.setCurrentIndex(idx)
         self._pc_color_th_spin.setValue(cfg.get("color_threshold", 0.35))
-        self._pc_edge_th_spin.setValue(cfg.get("edge_threshold", 0.08))
+        self._pc_edge_th_spin.setValue(cfg.get("edge_threshold", 0.5))
         self._pc_canny_low_spin.setValue(cfg.get("canny_low", 50))
         self._pc_canny_high_spin.setValue(cfg.get("canny_high", 150))
 

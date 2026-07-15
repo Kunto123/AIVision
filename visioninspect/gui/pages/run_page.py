@@ -346,6 +346,15 @@ class RunPage(QWidget):
         self._roi_results_label.setText("ROI: ⏳ Menunggu part terdeteksi di area gate")
 
     @Slot()
+    def set_part_check_incomplete(self, msg: str):
+        """Show 'part check not configured' warning — block QC, no false NG."""
+        self._judgement_label.setText("⚠️ Part-check belum lengkap")
+        self._judgement_label.setStyleSheet("color: #F59E0B; font-size: 40px; font-weight: bold;")
+        self._score_label.setText("—")
+        self._roi_results_label.setText("ROI: —")
+        self._status_msg.setText(msg)
+
+    @Slot()
     def set_camera_status(self, active: bool):
         """Update camera status indicator."""
         if active:

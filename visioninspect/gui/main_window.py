@@ -44,7 +44,6 @@ from visioninspect.gui.pages.history_page import HistoryPage
 from visioninspect.gui.pages.settings_page import SettingsPage
 from visioninspect.gui.pages.diagnostics_page import DiagnosticsPage
 from visioninspect.gui.pages.account_page import AccountPage
-from visioninspect.gui.pages.global_settings_page import GlobalSettingsPage
 from visioninspect.gui.dialogs.login_dialog import LoginDialog
 
 logger = get_logger("app")
@@ -121,6 +120,10 @@ class MainWindow(QMainWindow):
 
         # Part Presence Check (cached config — read from disk only on template switch)
         self._current_part_check_cfg: dict = {}
+        # Overlay/gating state (updated every frame in _on_frame_for_inference)
+        self._last_part_ready = False
+        self._pc_active_for_overlay = False
+        self._last_gate_roi: Optional[dict] = None
 
         self._setup_window()
         self._setup_tabs()
@@ -164,7 +167,6 @@ class MainWindow(QMainWindow):
         self._settings_page = SettingsPage(self._tr, self._config)
         self._diagnostics_page = DiagnosticsPage(self._tr)
         self._account_page = AccountPage(self._db)
-        self._global_settings_page = GlobalSettingsPage(self._config)
 
         self._tabs.addTab(self._run_page, self._tr.tr("nav_run"))
         self._tabs.addTab(self._teach_page, self._tr.tr("nav_teach"))
@@ -172,7 +174,6 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._settings_page, self._tr.tr("nav_settings"))
         self._tabs.addTab(self._diagnostics_page, self._tr.tr("nav_diagnostics"))
         self._tabs.addTab(self._account_page, "👥 Akun")
-        self._tabs.addTab(self._global_settings_page, "⚙️ Global")
 
         # By default hide admin-only tabs; shown after login if role=admin
         for idx in range(1, self._tabs.count()):
@@ -461,6 +462,34 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 logger.warning("ROI overlay draw error: %s", e)
 
+        # Draw gate ROI on RUN page when part check is active
+        if self._tabs.currentIndex() == 0 and self._pc_active_for_overlay and self._last_gate_roi:
+            try:
+                qp_gate = QPainter(pixmap)
+                qp_gate.setRenderHint(QPainter.Antialiasing)
+                font = QFont("Segoe UI", 9)
+                qp_gate.setFont(font)
+                gx = int(self._last_gate_roi.get("x", 0))
+                gy = int(self._last_gate_roi.get("y", 0))
+                gw = int(self._last_gate_roi.get("width", 64))
+                gh = int(self._last_gate_roi.get("height", 64))
+                # Dynamic color: blue when waiting, green when ready
+                gate_color = "#22C55E" if self._last_part_ready else "#3B82F6"
+                pen = QPen(QColor(gate_color), 2, Qt.DashLine)
+                qp_gate.setPen(pen)
+                qp_gate.drawRect(gx, gy, gw, gh)
+                # Label badge
+                qp_gate.setPen(Qt.NoPen)
+                qp_gate.setBrush(QColor(gate_color))
+                label_w = 44
+                label_y = gy - 16 if gy >= 16 else gy
+                qp_gate.drawRect(gx, label_y, label_w, 16)
+                qp_gate.setPen(QColor("#FFFFFF"))
+                qp_gate.drawText(gx + 3, label_y + 12, "GATE")
+                qp_gate.end()
+            except Exception as e:
+                logger.warning("Gate ROI overlay draw error: %s", e)
+
         self._run_page.set_frame(pixmap)
         # During import review mode, camera frames must NOT overwrite the ROI editor
         if self._is_import_mode:
@@ -522,22 +551,53 @@ class MainWindow(QMainWindow):
         if self._tabs.currentIndex() != 0:
             return
 
-        # ── Step 1: Part Presence Check ──
+        # ── Step 1: Part Presence Check (fail-safe gating) ──
         pc_cfg = self._current_part_check_cfg
-        if pc_cfg.get("enabled") and pc_cfg.get("has_master") and pc_cfg.get("gate_roi"):
+        pc_state = pc_module.part_check_state(pc_cfg)
+        if pc_state == "active":
+            self._pc_active_for_overlay = True
+            self._last_gate_roi = pc_cfg.get("gate_roi")
             try:
                 pc_result = pc_module.evaluate_part_presence(
                     frame, pc_cfg["gate_roi"], pc_cfg)
             except Exception as e:
                 logger.warning("Part check error: %s", e)
                 pc_result = None
-            if pc_result is not None and not pc_result.ready:
+            if pc_result is None:
+                # Exception during evaluation — fail-safe: block QC
+                self._last_part_ready = False
+                if self._ng_interval_timer.isActive():
+                    self._ng_interval_timer.stop()
+                    self._ng_interval_active = False
+                self._run_page.set_waiting_for_part()
+                return
+            if not pc_result.ready:
+                self._last_part_ready = False
                 # Stop NG interval timer so phantom NG doesn't count
                 if self._ng_interval_timer.isActive():
                     self._ng_interval_timer.stop()
                     self._ng_interval_active = False
                 self._run_page.set_waiting_for_part()
                 return
+            self._last_part_ready = True
+        elif pc_state == "incomplete":
+            # Fail-safe: part check enabled but not fully configured
+            # Block QC to prevent false NG 1.000 on empty scene
+            self._pc_active_for_overlay = False
+            self._last_gate_roi = None
+            self._last_part_ready = False
+            if self._ng_interval_timer.isActive():
+                self._ng_interval_timer.stop()
+                self._ng_interval_active = False
+            self._run_page.set_part_check_incomplete(
+                "Part-check aktif tapi belum lengkap: "
+                "foto master / gate ROI belum diset")
+            return
+        else:  # "disabled"
+            self._pc_active_for_overlay = False
+            self._last_gate_roi = None
+            self._last_part_ready = False
+            # Fall through to QC (backward compat)
         # ── Step 2: QC Inference ──
 
         try:
@@ -588,14 +648,11 @@ class MainWindow(QMainWindow):
             else:  # raw_judgement == "NG"
                 if not self._ng_interval_timer.isActive():
                     # First NG frame — start interval timer
-                    delay = self._global_settings_page.get_ng_debounce_ms()
-                    if delay > 0:
-                        self._ng_interval_timer.start(delay)
-                        self._ng_interval_active = True
-                    # Show NG immediately on display
-                    self._inspection_ng += 1  # count first NG
-                    self._run_page.update_counters(
-                        self._inspection_ok, self._inspection_ng)
+                    delay = self._settings_page.get_ng_debounce_ms()
+                    effective_delay = max(delay, 50)  # minimum 50ms agar timer tetap jalan
+                    self._ng_interval_timer.start(effective_delay)
+                    self._ng_interval_active = True
+                    # Show NG immediately on display (counter hanya bertambah via timer tick)
                     self._run_page.update_judgement("NG", worst_score)
                 else:
                     # Timer already running — update display (worse score)
@@ -696,6 +753,15 @@ class MainWindow(QMainWindow):
             self._refresh_part_check_ui()
             self._refresh_part_check_gate_cache()
             self.set_status("Foto master part tersimpan!", 3000)
+            # Peringatan bila metode edge — deteksi pergeseran posisi terbatas
+            method = self._teach_page.get_pc_method_combo().currentData()
+            if method == "edge":
+                logger.warning(
+                    "Metode Tepi (Canny) hanya membandingkan jumlah edge pixel, "
+                    "bukan posisinya. Part yang bergeser dalam ROI masih bisa "
+                    "dianggap 'ready'. Jika part sering bergeser, "
+                    "coba metode Warna atau Keduanya."
+                )
         except Exception as e:
             self.set_status(f"Gagal simpan master: {e}", 5000)
 
@@ -715,12 +781,30 @@ class MainWindow(QMainWindow):
         if gate_roi_dict:
             self._teach_page.set_gate_roi([gate_roi_dict])
 
-        # Master thumbnail
+        # Master thumbnail — tampilkan hasil Canny edge, bukan raw
         master_path = self._pm.get_part_check_master_image_path(
             self._active_program, self._active_template)
         if master_path and master_path.exists():
-            from PySide6.QtGui import QPixmap
-            pix = QPixmap(str(master_path))
+            import cv2
+            import numpy as np
+            from PySide6.QtGui import QPixmap, QImage, QColor
+
+            master_bgr = cv2.imread(str(master_path))
+            if master_bgr is not None and master_bgr.size > 0:
+                gray = cv2.cvtColor(master_bgr, cv2.COLOR_BGR2GRAY)
+                canny_low = self._teach_page.get_pc_canny_low_spin().value()
+                canny_high = self._teach_page.get_pc_canny_high_spin().value()
+                edges = cv2.Canny(gray, canny_low, canny_high)
+
+                # Green edges on dark background
+                preview = np.zeros((*edges.shape, 3), dtype=np.uint8)
+                preview[edges > 0] = [34, 197, 94]  # BGR = hijau #22C55E
+                h, w = preview.shape[:2]
+                rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
+                qimg = QImage(rgb.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
+                pix = QPixmap.fromImage(qimg)
+            else:
+                pix = QPixmap(str(master_path))
             self._teach_page.set_master_status(
                 pc_cfg.get("has_master", False),
                 pc_cfg.get("master_captured_at", ""), pix)
@@ -1006,6 +1090,10 @@ class MainWindow(QMainWindow):
         self._pm.set_active_template(self._active_program, self._active_template)
         # Clear RUN page display immediately before loading new template data
         self._run_page.clear_results()
+        # Reset part check overlay state (will refresh on next frame)
+        self._last_part_ready = False
+        self._pc_active_for_overlay = False
+        self._last_gate_roi = None
         self._refresh_template_ui()
         self._load_template_model()
         self._reset_counters()
@@ -1380,7 +1468,7 @@ class MainWindow(QMainWindow):
             self._retranslate_ui()
 
     def _on_tab_changed(self, index: int):
-        page_names = ["Run", "Teach", "History", "Settings", "Diagnostics", "Akun", "Global"]
+        page_names = ["Run", "Teach", "History", "Settings", "Diagnostics", "Akun"]
         name = page_names[index] if index < len(page_names) else f"Tab {index}"
         logger.debug("Switched to %s tab", name)
 
@@ -1393,9 +1481,6 @@ class MainWindow(QMainWindow):
         # Refresh account page when switching to AKUN tab
         elif index == 5:
             self._account_page.refresh()
-        # Load settings when switching to GLOBAL tab
-        elif index == 6:
-            self._global_settings_page._load_settings()
 
     def _show_about(self):
         QMessageBox.about(

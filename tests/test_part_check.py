@@ -15,6 +15,7 @@ from visioninspect.core.part_check import (
     compute_edge_density,
     compute_master_stats,
     evaluate_part_presence,
+    part_check_state,
     PartCheckResult,
     MIN_STD,
 )
@@ -140,7 +141,7 @@ class TestEvaluatePartPresence:
             "has_master": True,
             "method": method,
             "color_threshold": 0.35,
-            "edge_threshold": 0.08,
+            "edge_threshold": 0.5,  # ratio-based (default baru)
             "canny_low": 50,
             "canny_high": 150,
             "master_mean_bgr": master_stats["mean_bgr"],
@@ -167,9 +168,10 @@ class TestEvaluatePartPresence:
         assert result.color_ready
 
     def test_edge_method(self, master_frame, gate_roi, master_stats):
-        """edge method only checks edge_score."""
+        """edge method only checks edge_score (rasio)."""
         cfg = self._make_cfg(master_stats, method="edge",
-                             edge_threshold=0.08)
+                             edge_threshold=0.5)
+        # Same edges → ratio = 0 → ready
         result = evaluate_part_presence(master_frame, gate_roi, cfg)
         assert result.ready
         assert result.edge_ready
@@ -217,7 +219,7 @@ class TestEvaluatePartPresence:
         assert result.reason == "invalid_gate_roi"
 
     def test_edge_ready_different_edge(self, master_frame, gate_roi, master_stats):
-        """Edge method should fail when edge density differs enough."""
+        """Edge method should fail when edge ratio exceeds threshold."""
         # Master is flat 200-gray (edge_density ≈ 0)
         # Create frame with noise in gate region (max edges)
         noisy = master_frame.copy()
@@ -238,3 +240,123 @@ class TestEvaluatePartPresence:
         result = evaluate_part_presence(master_frame, far_roi, cfg)
         # Result may be ready or not, but should not crash
         assert isinstance(result, PartCheckResult)
+
+    # ── New tests: edge ratio threshold boundary ──
+
+    def test_edge_ready_near_threshold(self, master_frame, gate_roi, master_stats):
+        """Edge ratio: threshold above vs below actual ratio → ready toggles."""
+        # Master is flat 200-gray → master_edge ≈ 0
+        # Use white rectangle di gate untuk edge density terukur
+        y, x = gate_roi["y"], gate_roi["x"]
+        h, w = gate_roi["height"], gate_roi["width"]
+        high_contrast = master_frame.copy()
+        cv2.rectangle(high_contrast, (x, y), (x + w - 1, y + h - 1),
+                      (255, 255, 255), -1)
+
+        cropped = crop_roi(high_contrast, gate_roi)
+        actual_live_edge = compute_edge_density(cropped, 50, 150)
+        master_edge = float(master_stats["edge_density"])
+        denom = max(master_edge, 0.01, 1e-7)
+        expected_ratio = abs(actual_live_edge - master_edge) / denom
+
+        # Threshold di bawah ratio → reject
+        cfg_below = self._make_cfg(
+            master_stats, method="edge",
+            edge_threshold=expected_ratio * 0.5)
+        r_below = evaluate_part_presence(high_contrast, gate_roi, cfg_below)
+        assert not r_below.edge_ready, (
+            f"ratio={expected_ratio:.4f} harus > threshold={expected_ratio*0.5:.4f}")
+
+        # Threshold di atas ratio → accept
+        cfg_above = self._make_cfg(
+            master_stats, method="edge",
+            edge_threshold=expected_ratio * 2.0 + 0.1)
+        r_above = evaluate_part_presence(high_contrast, gate_roi, cfg_above)
+        assert r_above.edge_ready, (
+            f"ratio={expected_ratio:.4f} harus < threshold={expected_ratio*2.0+0.1:.4f}")
+
+    # ── New tests: None master fields → ready=False, bukan exception ──
+
+    def test_edge_missing_edge_density(self, master_frame, gate_roi):
+        """edge method: master_edge_density=None → ready=False."""
+        cfg = {
+            "has_master": True, "method": "edge",
+            "master_edge_density": None,
+            "edge_threshold": 0.5,
+            "canny_low": 50, "canny_high": 150,
+        }
+        result = evaluate_part_presence(master_frame, gate_roi, cfg)
+        assert not result.ready
+        assert result.reason == "no_master"
+
+    def test_color_missing_mean_bgr(self, master_frame, gate_roi, master_stats):
+        """color method: master_mean_bgr=None → ready=False."""
+        cfg = {
+            "has_master": True, "method": "color",
+            "master_mean_bgr": None,
+            "master_std_bgr": master_stats["std_bgr"],
+            "color_threshold": 0.35,
+        }
+        result = evaluate_part_presence(master_frame, gate_roi, cfg)
+        assert not result.ready
+        assert result.reason == "no_master"
+
+    def test_color_missing_std_bgr(self, master_frame, gate_roi, master_stats):
+        """color method: master_std_bgr=None → ready=False."""
+        cfg = {
+            "has_master": True, "method": "color",
+            "master_mean_bgr": master_stats["mean_bgr"],
+            "master_std_bgr": None,
+            "color_threshold": 0.35,
+        }
+        result = evaluate_part_presence(master_frame, gate_roi, cfg)
+        assert not result.ready
+        assert result.reason == "no_master"
+
+    def test_edge_method_ignores_color_fields(self, master_frame, gate_roi, master_stats):
+        """edge method: master_mean_bgr/std_bgr=None TIDAK menyebabkan error."""
+        cfg = {
+            "has_master": True, "method": "edge",
+            "master_edge_density": master_stats["edge_density"],
+            "master_mean_bgr": None,
+            "master_std_bgr": None,
+            "edge_threshold": 0.5,
+            "canny_low": 50, "canny_high": 150,
+        }
+        result = evaluate_part_presence(master_frame, gate_roi, cfg)
+        assert result.ready  # edge-only, tidak sentuh color fields
+
+    def test_color_method_ignores_edge_fields(self, master_frame, gate_roi, master_stats):
+        """color method: master_edge_density=None TIDAK menyebabkan error."""
+        cfg = {
+            "has_master": True, "method": "color",
+            "master_mean_bgr": master_stats["mean_bgr"],
+            "master_std_bgr": master_stats["std_bgr"],
+            "master_edge_density": None,
+            "color_threshold": 0.35,
+        }
+        result = evaluate_part_presence(master_frame, gate_roi, cfg)
+        assert result.ready  # color-only, tidak sentuh edge fields
+
+
+class TestPartCheckState:
+    """part_check_state() returns correct state label."""
+
+    def test_disabled_when_not_enabled(self):
+        assert part_check_state({"enabled": False}) == "disabled"
+        assert part_check_state({}) == "disabled"
+        assert part_check_state({"enabled": True, "has_master": False, "gate_roi": None}) == "incomplete"
+        assert part_check_state({"enabled": True, "has_master": True, "gate_roi": None}) == "incomplete"
+        assert part_check_state({"enabled": True, "has_master": False, "gate_roi": {"x": 0}}) == "incomplete"
+
+    def test_incomplete_missing_master(self):
+        cfg = {"enabled": True, "has_master": False, "gate_roi": {"x": 0, "y": 0, "width": 100, "height": 100}}
+        assert part_check_state(cfg) == "incomplete"
+
+    def test_incomplete_missing_gate_roi(self):
+        cfg = {"enabled": True, "has_master": True, "gate_roi": None}
+        assert part_check_state(cfg) == "incomplete"
+
+    def test_active_fully_configured(self):
+        cfg = {"enabled": True, "has_master": True, "gate_roi": {"x": 0, "y": 0, "width": 100, "height": 100}}
+        assert part_check_state(cfg) == "active"

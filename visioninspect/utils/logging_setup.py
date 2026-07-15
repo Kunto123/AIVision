@@ -54,7 +54,7 @@ def setup_logging(
     # --- Named loggers ---
     for name in ("plc", "inference", "camera", "training", "api"):
         logger = logging.getLogger(name)
-        logger.setLevel(numeric_level)
+        logger.setLevel(logging.DEBUG)  # Capture all levels, filter in handlers
         logger.propagate = True  # Also goes to root
         _add_file_handler(
             logger, log_dir / f"{name}.log", formatter, numeric_level, max_bytes, backup_count

@@ -355,7 +355,7 @@ class TestProgramManagerPartCheck:
             "TestProg", self._tmpl["id"], {"color_threshold": 0.5})
         pc = self._pm.get_part_check_config("TestProg", self._tmpl["id"])
         assert pc["color_threshold"] == 0.5
-        assert pc["edge_threshold"] == 0.08  # unchanged
+        assert pc["edge_threshold"] == 0.5  # unchanged default (ratio-based)
 
     def test_update_preserves_other_keys(self):
         self._pm.update_part_check_config(

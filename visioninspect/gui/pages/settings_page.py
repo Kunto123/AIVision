@@ -181,6 +181,33 @@ class SettingsPage(QWidget):
 
         main_layout.addWidget(flask_group)
 
+        # === NG Detection Settings ===
+        ng_group = QGroupBox("🔴 NG Detection")
+        ng_form = QVBoxLayout(ng_group)
+
+        ng_delay_row = QHBoxLayout()
+        ng_delay_row.addWidget(QLabel("NG Timeout:"))
+        self._ng_delay_spin = QSpinBox()
+        self._ng_delay_spin.setRange(0, 999999)
+        self._ng_delay_spin.setValue(500)
+        self._ng_delay_spin.setSuffix(" ms")
+        self._ng_delay_spin.setSingleStep(100)
+        self._ng_delay_spin.setFixedWidth(130)
+        ng_delay_row.addWidget(self._ng_delay_spin)
+        ng_delay_row.addStretch()
+        ng_form.addLayout(ng_delay_row)
+
+        ng_help = QLabel(
+            "Jeda minimum sebelum NG dihitung.\n"
+            "Timer mulai saat anomali terdeteksi.\n"
+            "Setiap kali timer habis → NG +1, lalu timer reset.\n"
+            "0 = instant (setiap frame NG dihitung).")
+        ng_help.setObjectName("secondaryText")
+        ng_help.setWordWrap(True)
+        ng_form.addWidget(ng_help)
+
+        main_layout.addWidget(ng_group)
+
         # === Language ===
         lang_group = QGroupBox(self._tr.tr("settings_language"))
         lang_layout = QHBoxLayout(lang_group)
@@ -248,6 +275,7 @@ class SettingsPage(QWidget):
                 "port": self._flask_port.value(),
             },
             "language": "id" if self._lang_combo.currentIndex() == 0 else "en",
+            "ng_debounce_ms": self._ng_delay_spin.value(),
         }
 
     def get_save_button(self) -> QPushButton:
@@ -255,6 +283,10 @@ class SettingsPage(QWidget):
 
     def get_camera_device_spin(self) -> QSpinBox:
         return self._cam_device
+
+    def get_ng_debounce_ms(self) -> int:
+        """Get current NG debounce delay from config."""
+        return self._config.get("ng_debounce_ms", 500)
 
     def _load_settings(self) -> None:
         """Load settings from config into UI widgets."""
@@ -309,3 +341,6 @@ class SettingsPage(QWidget):
         # Language
         lang = self._config.get("language", "id")
         self._lang_combo.setCurrentIndex(0 if lang == "id" else 1)
+
+        # NG Timeout
+        self._ng_delay_spin.setValue(self._config.get("ng_debounce_ms", 500))

@@ -34,7 +34,7 @@ DEFAULT_PART_CHECK_CONFIG: dict = {
     "method": "both",
     "gate_roi": None,  # {x, y, width, height} or None
     "color_threshold": 0.35,
-    "edge_threshold": 0.08,
+    "edge_threshold": 0.5,  # rasio relatif: selisih / max(master, MIN_EDGE_FLOOR)
     "canny_low": 50,
     "canny_high": 150,
     "has_master": False,
@@ -46,6 +46,8 @@ DEFAULT_PART_CHECK_CONFIG: dict = {
 }
 
 MIN_STD = 5.0  # floor for std_bgr (0-255 scale), prevents div-by-zero
+MIN_EDGE_FLOOR = 0.01  # floor untuk denominator rasio edge, cegah blow-up saat master_edge ≈ 0
+EPSILON = 1e-7  # safety divider
 
 
 # ── Data Classes ───────────────────────────────────────────────────────
@@ -64,6 +66,22 @@ class PartCheckResult:
 
 
 # ── Core Functions ─────────────────────────────────────────────────────
+
+
+def part_check_state(pc_cfg: dict) -> str:
+    """Return state of part check: ``"disabled"`` | ``"incomplete"`` | ``"active"``.
+
+    * ``"disabled"`` — part check is turned off (backward compat for old templates).
+    * ``"incomplete"`` — part check is enabled but master photo or gate ROI missing
+      (fail-safe: block QC, don't produce false NG).
+    * ``"active"`` — fully configured, can evaluate part presence.
+    """
+    if not pc_cfg.get("enabled"):
+        return "disabled"
+    if not (pc_cfg.get("has_master") and pc_cfg.get("gate_roi")):
+        return "incomplete"
+    return "active"
+
 
 def crop_roi(frame: npt.NDArray, roi: dict) -> Optional[npt.NDArray]:
     """Crop frame to ROI with bounds checking (min 1px)."""
@@ -122,6 +140,10 @@ def evaluate_part_presence(
     """Evaluate whether a part is present at the gate ROI.
     Compares live frame against master statistics.
 
+    Metode "edge" menggunakan rasio relatif (ternormalisasi terhadap
+    master_edge_density) agar stabil di berbagai kondisi pencahayaan
+    dan ukuran ROI. Lihat MIN_EDGE_FLOOR sebagai denominator minimum.
+
     Args:
         frame_bgr: Full camera frame (BGR).
         gate_roi: Dict with x, y, width, height.
@@ -146,33 +168,56 @@ def evaluate_part_presence(
 
     method = part_check_cfg.get("method", "both")
     color_threshold = float(part_check_cfg.get("color_threshold", 0.35))
-    edge_threshold = float(part_check_cfg.get("edge_threshold", 0.08))
+    edge_threshold = float(part_check_cfg.get("edge_threshold", 0.5))
     canny_low = int(part_check_cfg.get("canny_low", 50))
     canny_high = int(part_check_cfg.get("canny_high", 150))
 
-    master_mean = np.array(part_check_cfg["master_mean_bgr"], dtype=np.float32)
-    master_std = np.array(part_check_cfg["master_std_bgr"], dtype=np.float32)
+    color_score: Optional[float] = None
+    color_ready: Optional[bool] = None
+    edge_score: Optional[float] = None
+    edge_ready: Optional[bool] = None
+    live_edge: Optional[float] = None
 
-    # ── Color score: normalized z-score of mean BGR ──
-    live_mean = cv2.mean(cropped)[:3]
-    live_mean_arr = np.array(live_mean, dtype=np.float32)
-    z = np.abs(live_mean_arr - master_mean) / master_std
-    color_score = float(np.mean(z))
-    color_ready = color_score < color_threshold
+    # ── Color score (hanya bila method=color/both) ──
+    if method in ("color", "both"):
+        mm = part_check_cfg.get("master_mean_bgr")
+        ms = part_check_cfg.get("master_std_bgr")
+        if mm is None or ms is None:
+            return PartCheckResult(
+                ready=False, method=method,
+                reason="no_master",
+            )
+        master_mean = np.array(mm, dtype=np.float32)
+        master_std = np.array(ms, dtype=np.float32)
+        live_mean = cv2.mean(cropped)[:3]
+        live_mean_arr = np.array(live_mean, dtype=np.float32)
+        z = np.abs(live_mean_arr - master_mean) / master_std
+        color_score = float(np.mean(z))
+        color_ready = color_score < color_threshold
 
-    # ── Edge score: absolute difference in edge density ──
-    live_edge = compute_edge_density(cropped, canny_low, canny_high)
-    master_edge = float(part_check_cfg["master_edge_density"])
-    edge_score = abs(live_edge - master_edge)
-    edge_ready = edge_score < edge_threshold
+    # ── Edge score (hanya bila method=edge/both) ──
+    # Menggunakan rasio relatif: |live - master| / max(master, MIN_EDGE_FLOOR)
+    # supaya tidak bergantung pada magnitudo absolut edge density.
+    if method in ("edge", "both"):
+        me = part_check_cfg.get("master_edge_density")
+        if me is None:
+            return PartCheckResult(
+                ready=False, method=method,
+                reason="no_master",
+            )
+        master_edge = float(me)
+        live_edge = compute_edge_density(cropped, canny_low, canny_high)
+        denom = max(master_edge, MIN_EDGE_FLOOR, EPSILON)
+        edge_score = abs(live_edge - master_edge) / denom
+        edge_ready = edge_score < edge_threshold
 
     # ── Combine ──
     if method == "color":
-        ready = color_ready
+        ready = bool(color_ready)
     elif method == "edge":
-        ready = edge_ready
+        ready = bool(edge_ready)
     else:  # "both" (AND)
-        ready = color_ready and edge_ready
+        ready = bool(color_ready and edge_ready)
 
     reason = "" if ready else "mismatch"
 

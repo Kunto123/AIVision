@@ -208,6 +208,16 @@ class SettingsPage(QWidget):
 
         main_layout.addWidget(ng_group)
 
+        # === Logging Settings ===
+        log_group = QGroupBox("📝 Logging")
+        log_layout = QVBoxLayout(log_group)
+        self._show_debug_cb = QCheckBox("Tampilkan log debug di terminal")
+        self._show_debug_cb.setToolTip(
+            "Menampilkan log DEBUG (PC_EVAL, dll) di console.\n"
+            "Matikan untuk produksi agar terminal tidak penuh.")
+        log_layout.addWidget(self._show_debug_cb)
+        main_layout.addWidget(log_group)
+
         # === Language ===
         lang_group = QGroupBox(self._tr.tr("settings_language"))
         lang_layout = QHBoxLayout(lang_group)
@@ -276,6 +286,7 @@ class SettingsPage(QWidget):
             },
             "language": "id" if self._lang_combo.currentIndex() == 0 else "en",
             "ng_debounce_ms": self._ng_delay_spin.value(),
+            "show_debug": self._show_debug_cb.isChecked(),
         }
 
     def get_save_button(self) -> QPushButton:
@@ -344,3 +355,6 @@ class SettingsPage(QWidget):
 
         # NG Timeout
         self._ng_delay_spin.setValue(self._config.get("ng_debounce_ms", 500))
+
+        # Logging
+        self._show_debug_cb.setChecked(self._config.get("show_debug", False))

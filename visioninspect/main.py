@@ -22,6 +22,24 @@ from visioninspect.utils.logging_setup import setup_logging, get_logger
 from visioninspect.gui.main_window import MainWindow
 
 
+def _setup_qt_message_handler():
+    """Saring warning Qt yang tidak berbahaya (QPainter::end dll)."""
+    from PySide6.QtCore import qInstallMessageHandler, QtMsgType
+    import sys
+
+    def handler(mode, context, message):
+        # Abaikan QPainter::end warnings yang tidak berbahaya
+        if "QPainter::end" in message and "saved states" in message:
+            return
+        # Cetak warning/error lainnya ke stderr (default Qt behavior)
+        if mode == QtMsgType.QtCriticalMsg or mode == QtMsgType.QtFatalMsg:
+            print(f"QT CRITICAL: {message}", file=sys.stderr)
+        elif mode == QtMsgType.QtWarningMsg:
+            print(f"QT WARN: {message}", file=sys.stderr)
+
+    qInstallMessageHandler(handler)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=f"{APP_NAME} v{APP_VERSION} — Industrial Visual Inspection System"
@@ -94,6 +112,9 @@ def main():
 
     # High-DPI support
     app.setStyle("Fusion")  # Use Fusion style as base
+
+    # Saring QPainter warnings yang tidak berbahaya
+    _setup_qt_message_handler()
 
     # --- Main Window ---
     try:

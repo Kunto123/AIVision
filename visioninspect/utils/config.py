@@ -34,6 +34,7 @@ class Config:
         "language": "id",
         "theme": "dark",
         "data_dir": str(DEFAULT_DATA_DIR),
+        "show_debug": False,
 
         # Camera
         "camera": {

@@ -135,6 +135,13 @@ class MainWindow(QMainWindow):
         self._start_perf_monitor()
         self._init_programs()
 
+        # Apply saved debug logging setting on startup
+        import logging
+        show_debug = self._config.get("show_debug", False)
+        for h in logging.getLogger().handlers:
+            if isinstance(h, logging.StreamHandler):
+                h.setLevel(logging.DEBUG if show_debug else logging.INFO)
+
         # Initial history load
         QTimer.singleShot(1000, self._refresh_history)
 
@@ -781,28 +788,32 @@ class MainWindow(QMainWindow):
         if gate_roi_dict:
             self._teach_page.set_gate_roi([gate_roi_dict])
 
-        # Master thumbnail — tampilkan hasil Canny edge, bukan raw
+        # Master thumbnail — Canny edge preview hanya untuk metode edge/both
         master_path = self._pm.get_part_check_master_image_path(
             self._active_program, self._active_template)
         if master_path and master_path.exists():
-            import cv2
-            import numpy as np
-            from PySide6.QtGui import QPixmap, QImage, QColor
+            method = pc_cfg.get("method", "both")
+            show_edge = method in ("edge", "both")
+            from PySide6.QtGui import QPixmap, QImage
 
-            master_bgr = cv2.imread(str(master_path))
-            if master_bgr is not None and master_bgr.size > 0:
-                gray = cv2.cvtColor(master_bgr, cv2.COLOR_BGR2GRAY)
-                canny_low = self._teach_page.get_pc_canny_low_spin().value()
-                canny_high = self._teach_page.get_pc_canny_high_spin().value()
-                edges = cv2.Canny(gray, canny_low, canny_high)
-
-                # Green edges on dark background
-                preview = np.zeros((*edges.shape, 3), dtype=np.uint8)
-                preview[edges > 0] = [34, 197, 94]  # BGR = hijau #22C55E
-                h, w = preview.shape[:2]
-                rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
-                qimg = QImage(rgb.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
-                pix = QPixmap.fromImage(qimg)
+            if show_edge:
+                import cv2
+                import numpy as np
+                master_bgr = cv2.imread(str(master_path))
+                if master_bgr is not None and master_bgr.size > 0:
+                    gray = cv2.cvtColor(master_bgr, cv2.COLOR_BGR2GRAY)
+                    canny_low = self._teach_page.get_pc_canny_low_spin().value()
+                    canny_high = self._teach_page.get_pc_canny_high_spin().value()
+                    edges = cv2.Canny(gray, canny_low, canny_high)
+                    # Green edges on dark background
+                    preview = np.zeros((*edges.shape, 3), dtype=np.uint8)
+                    preview[edges > 0] = [34, 197, 94]  # BGR = hijau #22C55E
+                    h, w = preview.shape[:2]
+                    rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
+                    qimg = QImage(rgb.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
+                    pix = QPixmap.fromImage(qimg)
+                else:
+                    pix = QPixmap(str(master_path))
             else:
                 pix = QPixmap(str(master_path))
             self._teach_page.set_master_status(
@@ -1466,6 +1477,15 @@ class MainWindow(QMainWindow):
         if lang != self._tr.language:
             self._tr.language = lang
             self._retranslate_ui()
+
+        # Toggle debug logging
+        show_debug = settings.get("show_debug", False)
+        import logging
+        root = logging.getLogger()
+        for h in root.handlers:
+            if isinstance(h, logging.StreamHandler):
+                h.setLevel(logging.DEBUG if show_debug else logging.INFO)
+        logger.info("Log debug: %s", "AKTIF" if show_debug else "NONAKTIF")
 
     def _on_tab_changed(self, index: int):
         page_names = ["Run", "Teach", "History", "Settings", "Diagnostics", "Akun"]

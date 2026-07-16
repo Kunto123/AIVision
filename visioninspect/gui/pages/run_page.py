@@ -117,23 +117,11 @@ class RunPage(QWidget):
         main_layout.addWidget(left_panel, 3)
 
         # === Right Panel: Judgement + Counters ===
-        # Wrapped in a QScrollArea (defensive — matches TEACH/SETTINGS pattern) so
-        # this card stack can't reintroduce the overlap bug if content grows later.
         right_panel = QFrame()
         right_panel.setObjectName("cardPanel")
-        right_outer = QVBoxLayout(right_panel)
-        right_outer.setContentsMargins(0, 0, 0, 0)
-
-        right_scroll = QScrollArea()
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setFrameShape(QFrame.NoFrame)
-        right_outer.addWidget(right_scroll)
-
-        right_content = QWidget()
-        right_layout = QVBoxLayout(right_content)
+        right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(16, 16, 16, 16)
-        right_layout.setSpacing(16)
-        right_scroll.setWidget(right_content)
+        right_layout.setSpacing(12)
 
         # Judgement big display
         self._judgement_label = QLabel("—")

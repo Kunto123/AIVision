@@ -62,7 +62,7 @@ class SimpleThresholdTrainer:
         self._report(30, "Menghitung mean & std...")
         mean = np.mean(imgs, axis=0)
         std = np.std(imgs, axis=0)
-        std = np.clip(std, 0.01, None)  # avoid division by zero
+        std = np.clip(std, 0.05, None)  # min floor 0.05 (~13 level pixel) — toleran terhadap fluktuasi exposure
 
         self._report(50, "Mengevaluasi threshold...")
 

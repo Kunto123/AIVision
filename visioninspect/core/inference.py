@@ -117,6 +117,7 @@ class InferenceEngine:
 
         mean = np.load(str(mean_path))
         std = np.load(str(std_path))
+        std = np.clip(std, 0.05, None)  # safety floor — toleransi fluktuasi exposure
         self._input_size = mean.shape[0]
 
         with self._lock:

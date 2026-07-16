@@ -214,52 +214,38 @@ class TrainingPipeline:
         export_dir = output_dir / "openvino"
         export_dir.mkdir(parents=True, exist_ok=True)
 
+        ov_export_ok = False
         try:
             from anomalib.deploy import ExportType
-            # Anomalib 2.5.0: Engine.export() instead of OpenVINOExporter
-            # Coba export dengan dynamo=True (default) dulu
-            try:
-                export_path = engine.export(
-                    model=model,
-                    export_type=ExportType.OPENVINO,
-                    export_root=str(export_dir),
-                )
-                logger.info("OpenVINO export selesai (dynamo=True): %s", export_dir)
-            except Exception as e_dynamo:
-                logger.warning("OpenVINO export dynamo=True gagal: %s", e_dynamo)
-                # Fallback: export dengan dynamo=False (ONNX export lama)
-                try:
-                    export_path = engine.export(
-                        model=model,
-                        export_type=ExportType.OPENVINO,
-                        export_root=str(export_dir),
-                        dynamo=False,
-                    )
-                    logger.info("OpenVINO export selesai (dynamo=False): %s", export_dir)
-                except Exception as e_onnx:
-                    logger.warning("OpenVINO export dynamo=False juga gagal: %s", e_onnx)
-                    raise  # lempar ke handler luar
+            export_path = engine.export(
+                model=model,
+                export_type=ExportType.OPENVINO,
+                export_root=str(export_dir),
+            )
+            logger.info("OpenVINO export selesai: %s", export_dir)
+            ov_export_ok = True
         except Exception as e:
             logger.warning("OpenVINO export gagal: %s", e)
-            # Fallback: save PyTorch checkpoint via Lightning Trainer
-            export_dir = output_dir / "torch"
-            export_dir.mkdir(parents=True, exist_ok=True)
+
+        if not ov_export_ok:
+            # Fallback: train SimpleThreshold model (mean/std) — pasti bisa dipake inference
+            self._report(75, "OpenVINO gagal, fallback ke SimpleThreshold...")
             try:
-                ckpt_path = str(export_dir / "model.ckpt")
-                engine.trainer.save_checkpoint(ckpt_path)
-                logger.info("Fallback checkpoint saved: %s", ckpt_path)
+                from visioninspect.core.simple_train import SimpleThresholdTrainer
+                st_trainer = SimpleThresholdTrainer(
+                    input_size=self._config.input_size)
+                st_trainer.set_progress_callback(self._progress_callback)
+                st_result = st_trainer.train(
+                    ok_dir=ok_dir, ng_dir=ng_dir, output_dir=output_dir)
+                logger.info("SimpleThreshold fallback selesai, threshold=%.4f",
+                            st_result["threshold"])
+                # Override export_path biar save_template_model nemu
+                export_dir = Path(st_result["export_path"])
+                threshold = st_result["threshold"]
             except Exception as e2:
-                logger.error("Save checkpoint juga gagal: %s", e2)
-                # Last resort: state_dict saja
-                try:
-                    import torch
-                    torch.save(model.state_dict(), export_dir / "model_state.pt")
-                    logger.info("State dict saved as last resort")
-                except Exception as e3:
-                    raise TrainingError(
-                        f"Export OpenVINO gagal: {e}. "
-                        f"Save checkpoint gagal: {e2}. "
-                        f"Save state_dict gagal: {e3}")
+                raise TrainingError(
+                    f"OpenVINO export gagal: {e}. "
+                    f"SimpleThreshold fallback juga gagal: {e2}")
 
         if self._cancelled:
             raise TrainingError("Training dibatalkan")

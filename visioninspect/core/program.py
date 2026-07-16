@@ -325,7 +325,7 @@ class ProgramManager:
             if src_str:
                 src = Path(src_str)
                 if src.exists() and src.is_dir():
-                    for subdir in ["openvino", "openvino_int8", "simple_model"]:
+                    for subdir in ["openvino", "openvino_int8", "simple_model", "torch"]:
                         sub_src = src / subdir
                         if sub_src.exists() and sub_src.is_dir():
                             shutil.copytree(sub_src, model_dir / subdir,

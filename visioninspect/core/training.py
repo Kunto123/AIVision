@@ -217,12 +217,28 @@ class TrainingPipeline:
         try:
             from anomalib.deploy import ExportType
             # Anomalib 2.5.0: Engine.export() instead of OpenVINOExporter
-            export_path = engine.export(
-                model=model,
-                export_type=ExportType.OPENVINO,
-                export_root=str(export_dir),
-            )
-            logger.info("OpenVINO export selesai: %s", export_dir)
+            # Coba export dengan dynamo=True (default) dulu
+            try:
+                export_path = engine.export(
+                    model=model,
+                    export_type=ExportType.OPENVINO,
+                    export_root=str(export_dir),
+                )
+                logger.info("OpenVINO export selesai (dynamo=True): %s", export_dir)
+            except Exception as e_dynamo:
+                logger.warning("OpenVINO export dynamo=True gagal: %s", e_dynamo)
+                # Fallback: export dengan dynamo=False (ONNX export lama)
+                try:
+                    export_path = engine.export(
+                        model=model,
+                        export_type=ExportType.OPENVINO,
+                        export_root=str(export_dir),
+                        dynamo=False,
+                    )
+                    logger.info("OpenVINO export selesai (dynamo=False): %s", export_dir)
+                except Exception as e_onnx:
+                    logger.warning("OpenVINO export dynamo=False juga gagal: %s", e_onnx)
+                    raise  # lempar ke handler luar
         except Exception as e:
             logger.warning("OpenVINO export gagal: %s", e)
             # Fallback: save PyTorch checkpoint via Lightning Trainer

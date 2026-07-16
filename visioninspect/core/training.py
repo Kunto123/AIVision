@@ -163,18 +163,21 @@ class TrainingPipeline:
 
         self._report(20, "Memulai training...")
 
-        # Engine
-        try:
-            engine = Engine(
-                task="classification",  # or "segmentation" depending on model
-                image_metrics=["F1Score", "AUROC"],
-                pixel_metrics=None,
-                accelerator="cpu",
-                devices=1,
-                max_epochs=1,  # PatchCore is one-shot, EfficientAd needs epochs
-            )
+        # Engine — default_root_dir di temp untuk hindari symlink issue di FAT32/exFAT
+        import tempfile as _tf
+        _train_work_dir = _tf.mkdtemp(prefix="visioninspect_")
+        engine = Engine(
+            task="classification",  # or "segmentation" depending on model
+            image_metrics=["F1Score", "AUROC"],
+            pixel_metrics=None,
+            accelerator="cpu",
+            devices=1,
+            max_epochs=1,  # PatchCore is one-shot, EfficientAd needs epochs
+            default_root_dir=_train_work_dir,
+        )
 
-            # Fit
+        # Fit
+        try:
             engine.fit(model=model, datamodule=datamodule)
         except Exception as e:
             raise TrainingError(f"Training gagal: {e}")

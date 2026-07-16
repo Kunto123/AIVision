@@ -41,18 +41,40 @@ pip install -r requirements.txt
 
 ### Download Pretrained Weights (Offline)
 
-Anomalib membutuhkan backbone pretrained (resnet18, wide_resnet50_2). Untuk offline:
+Anomalib (via `TimmFeatureExtractor`) membutuhkan backbone pretrained dari HuggingFace Hub.
+Untuk offline deployment, download weights di PC development lalu copy ke edge PC.
 
 ```bash
-# Di PC dengan internet, jalankan:
-python -c "
-import torch
-torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True)
-torch.hub.load('pytorch/vision:v0.10.0', 'wide_resnet50_2', pretrained=True)
-"
+# Di PC development (ada internet), jalankan dari root proyek:
+source .vision/bin/activate
+python tools/bundling_weights.py
 
-# Copy cache dari ~/.cache/torch/hub/ ke PC target
+# Hasil: cache tersimpan di ~/.cache/huggingface/hub/
+# Copy folder ini ke PC target:
+#   ~/.cache/huggingface/  →  PC target di path yang sama
 ```
+
+Atau gunakan script bundle otomatis:
+```bash
+# Di PC development:
+tools/prepare_offline_bundle.bat    # Windows
+
+# Hasil: folder offline_bundle/ — siap di-copy ke USB
+```
+
+### Offline Deployment (Edge PC — tanpa internet)
+
+```bash
+# Di edge PC, dari folder hasil bundle:
+install_offline\install.bat
+
+# Atau manual:
+python -m venv .vision
+.vision\Scripts\python.exe -m pip install --no-index --find-links=offline_bundle\wheels -r offline_bundle\requirements.txt
+# Copy folder offline_bundle\hf_cache\* ke %USERPROFILE%\.cache\huggingface\
+```
+
+Setelah itu jalankan via `run.bat` (yang sudah otomatis set `HF_HUB_OFFLINE=1`).
 
 ## Menjalankan
 

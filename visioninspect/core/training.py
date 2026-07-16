@@ -105,6 +105,8 @@ class TrainingPipeline:
             from anomalib.models import Patchcore, EfficientAd
             from anomalib.engine import Engine
             from anomalib.deploy import ExportType
+            from anomalib import TaskType
+            from anomalib.data import Folder
             logger.info("Anomalib imported successfully")
         except ImportError as e:
             logger.error("Anomalib import failed: %s", e)
@@ -142,13 +144,15 @@ class TrainingPipeline:
         try:
             import torch  # noqa: F401 - needed by Anomalib
             datamodule = Folder(
-                root=ok_dir.parent,  # parent folder containing 'ok' and optionally 'ng'
+                name="visioninspect",
+                task=TaskType.CLASSIFICATION,
+                root=ok_dir.parent,
                 normal_dir=ok_dir.name,
                 abnormal_dir=ng_dir.name if ng_dir else None,
                 image_size=(self._config.input_size, self._config.input_size),
                 train_batch_size=16,
                 eval_batch_size=16,
-                num_workers=0,  # CPU-only, avoid multiprocessing issues
+                num_workers=0,
             )
             datamodule.setup()
         except Exception as e:

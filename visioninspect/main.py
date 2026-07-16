@@ -13,6 +13,14 @@ _pkg_root = Path(__file__).resolve().parent
 if str(_pkg_root) not in sys.path:
     sys.path.insert(0, str(_pkg_root))
 
+# Early import torch (sebelum PySide6/cv2/openvino) untuk menghindari konflik
+# TLS-slot exhaustion di Windows (WinError 1114). Lihat debug:
+# https://github.com/pytorch/pytorch/issues/110488
+try:
+    import torch  # noqa: F401
+except Exception:
+    pass
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
@@ -100,6 +108,8 @@ def main():
         backup_count=config.get("logging.backup_count", 5),
     )
     logger = get_logger("app")
+
+    logger.info("Python interpreter: %s", sys.executable)
 
     # --- Translator ---
     translator = Translator(language=config.get("language", "id"))

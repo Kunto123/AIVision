@@ -152,6 +152,9 @@ class MainWindow(QMainWindow):
             if isinstance(h, logging.StreamHandler):
                 h.setLevel(logging.DEBUG if show_debug else logging.INFO)
 
+        # Update runtime status indicator
+        QTimer.singleShot(500, self._update_runtime_status)
+
         # Initial history load
         QTimer.singleShot(1000, self._refresh_history)
 
@@ -1255,6 +1258,8 @@ class MainWindow(QMainWindow):
             self._run_page.set_model_info(tmpl_name, False)
             logger.info("No model for template: %s", self._active_template)
 
+        self._update_runtime_status()
+
     def _on_clear_template(self):
         """Hapus template aktif dengan konfirmasi."""
         if not self._active_template:
@@ -1661,6 +1666,27 @@ class MainWindow(QMainWindow):
         """Borderless full screen juga — untuk admin tabs."""
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.showFullScreen()
+
+    def _update_runtime_status(self):
+        """Update inference runtime indicator in Settings page."""
+        has_ov = self._inference_engine._use_ov if hasattr(self._inference_engine, '_use_ov') else False
+        has_torch = False
+        try:
+            import torch  # noqa: F401
+            has_torch = True
+        except Exception:
+            pass
+
+        if has_ov and self._inference_engine._model is not None:
+            active = "openvino"
+        elif self._inference_engine._simple_loaded:
+            active = "simple"
+        elif has_torch:
+            active = "anomalib"
+        else:
+            active = ""
+
+        self._settings_page.set_runtime_status(has_ov, has_torch, active)
 
     def _retranslate_ui(self):
         self._tabs.setTabText(0, self._tr.tr("nav_run"))

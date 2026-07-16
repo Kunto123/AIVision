@@ -158,6 +158,15 @@ class SettingsPage(QWidget):
         self._model_backbone = _add_combo_row(model_layout, "Backbone:", ["resnet18", "wide_resnet50_2"])
         self._model_input_size = _add_spin_row(model_layout, "Input Size:", 64, 512, 256)
 
+        # Inference runtime indicator
+        runtime_row = QHBoxLayout()
+        runtime_row.addWidget(QLabel("Inference Runtime:"))
+        self._runtime_label = QLabel("—")
+        self._runtime_label.setStyleSheet("font-weight: bold; padding: 2px 8px; border-radius: 3px;")
+        runtime_row.addWidget(self._runtime_label)
+        runtime_row.addStretch()
+        model_layout.addLayout(runtime_row)
+
         main_layout.addWidget(model_group)
 
         # === History / Retention ===
@@ -329,6 +338,36 @@ class SettingsPage(QWidget):
     def get_cycle_delay_ms(self) -> int:
         """Get cycle delay from config (ms). 0 = no delay."""
         return self._config.get("inference.cycle_delay_ms", 1000)
+
+    def set_runtime_status(self, has_openvino: bool, has_torch: bool,
+                           active_runtime: str = ""):
+        """Update inference runtime indicator in Model settings."""
+        parts = []
+        color = "#9FB3C8"
+        if has_openvino:
+            parts.append("OpenVINO ✅")
+        else:
+            parts.append("OpenVINO ❌")
+        if has_torch:
+            parts.append("PyTorch ✅")
+        else:
+            parts.append("PyTorch ❌")
+        text = " | ".join(parts)
+
+        if active_runtime == "openvino":
+            text += " | Active: OpenVINO"
+            color = "#22C55E"
+        elif active_runtime == "simple":
+            text += " | Active: SimpleThreshold"
+            color = "#F59E0B"
+        elif active_runtime == "anomalib":
+            text += " | Active: Anomalib"
+            color = "#22C55E"
+
+        self._runtime_label.setText(text)
+        self._runtime_label.setStyleSheet(
+            f"font-weight: bold; padding: 2px 8px; border-radius: 3px; color: {color};"
+            f"background-color: #1A2A44;")
 
     def _load_settings(self) -> None:
         """Load settings from config into UI widgets."""

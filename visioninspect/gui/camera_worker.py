@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import numpy.typing as npt
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QMetaObject, QObject, QThread, QTimer, Qt, Signal, Slot, Q_ARG
 from PySide6.QtGui import QImage, QPixmap
 
 from visioninspect.core.camera import CameraDevice, CameraConfig, CameraError, CameraState
@@ -37,25 +37,34 @@ class CameraWorker(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._camera: Optional[CameraDevice] = None
-        self._timer: Optional[QTimer] = None  # Dibuat nanti di _init_timer()
+        # Timer created in __init__ BEFORE moveToThread — child akan ikut
+        # ke CameraThread saat moveToThread dipanggil.
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._grab_frame)
         self._target_fps = 30
         self._running = False
         self._device_index = 0
 
-    # ---- Private: buat timer di thread yang benar ----
+    # ---- Private: start/stop timer (timer sudah dibuat di __init__) ----
 
-    def _init_timer(self):
-        """Buat QTimer. HARUS dipanggil dari thread tempat worker berada."""
-        if self._timer is None:
-            self._timer = QTimer(self)
-            self._timer.timeout.connect(self._grab_frame)
-            logger.debug("QTimer created in thread: %s", self.thread().objectName())
+    def _ensure_timer_running(self):
+        """Start timer at target interval. Aman dipanggil dari thread mana pun
+        karena QTimer sudah dibuat bersama parent di __init__ (sebelum moveToThread)."""
+        if not self._timer.isActive():
+            interval = max(16, int(1000 / self._target_fps))
+            self._timer.start(interval)
 
     # ---- Public API ----
 
     @Slot(int)
     def start_camera(self, device_index: int = 0):
-        """Open kamera dan mulai polling frame."""
+        """Open kamera dan mulai polling frame.
+        Aman dipanggil dari thread mana pun — self-dispatch ke CameraThread."""
+        if self.thread() is not QThread.currentThread():
+            QMetaObject.invokeMethod(
+                self, "start_camera", Qt.QueuedConnection,
+                Q_ARG(int, device_index))
+            return
         if self._running:
             self.stop_camera()
             QTimer.singleShot(200, lambda: self._do_start(device_index))
@@ -63,7 +72,7 @@ class CameraWorker(QObject):
         self._do_start(device_index)
 
     def _do_start(self, device_index: int):
-        """Internal: benar-benar start kamera."""
+        """Internal: benar-benar start kamera. HARUS di CameraThread."""
         self._device_index = device_index
 
         try:
@@ -71,11 +80,8 @@ class CameraWorker(QObject):
             self._camera = CameraDevice(config)
             self._camera.open()
 
-            # Buat timer di thread ini (CameraThread)
-            self._init_timer()
-
-            interval = max(16, int(1000 / self._target_fps))
-            self._timer.start(interval)
+            # Timer sudah dibuat di __init__, tinggal start
+            self._ensure_timer_running()
             self._running = True
 
             self.camera_started.emit()
@@ -92,7 +98,10 @@ class CameraWorker(QObject):
 
     @Slot()
     def stop_camera(self):
-        """Hentikan kamera dan polling."""
+        """Hentikan kamera dan polling. Aman dipanggil dari thread mana pun."""
+        if self.thread() is not QThread.currentThread():
+            QMetaObject.invokeMethod(self, "stop_camera", Qt.BlockingQueuedConnection)
+            return
         if self._timer:
             self._timer.stop()
         self._running = False
@@ -105,7 +114,13 @@ class CameraWorker(QObject):
 
     @Slot(int)
     def set_device(self, device_index: int):
-        """Ganti device kamera (restart jika sedang running)."""
+        """Ganti device kamera (restart jika sedang running).
+        Aman dipanggil dari thread mana pun."""
+        if self.thread() is not QThread.currentThread():
+            QMetaObject.invokeMethod(
+                self, "set_device", Qt.QueuedConnection,
+                Q_ARG(int, device_index))
+            return
         was_running = self._running
         if was_running:
             self.stop_camera()
@@ -115,7 +130,11 @@ class CameraWorker(QObject):
 
     @Slot()
     def toggle_camera(self):
-        """Start/stop toggle."""
+        """Start/stop toggle. Aman dipanggil dari thread mana pun."""
+        if self.thread() is not QThread.currentThread():
+            QMetaObject.invokeMethod(
+                self, "toggle_camera", Qt.QueuedConnection)
+            return
         if self._running:
             self.stop_camera()
         else:

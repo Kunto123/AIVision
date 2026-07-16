@@ -21,10 +21,21 @@ logger = get_logger("inference")
 
 try:
     import openvino as ov
-    HAS_OPENVINO = True
+    # OpenVINO 2025+ API (Core moved to top-level)
+    try:
+        _OV_CORE = ov.Core
+        HAS_OPENVINO = True
+    except AttributeError:
+        from openvino import Core as _OV_CORE
+        HAS_OPENVINO = True
 except ImportError:
     HAS_OPENVINO = False
+    _OV_CORE = None
     logger.warning("OpenVINO not installed. Inference will be unavailable.")
+except OSError as e:
+    HAS_OPENVINO = False
+    _OV_CORE = None
+    logger.warning("OpenVINO DLL load failed (kemungkinan interpreter/arsitektur salah): %s", e)
 
 
 @dataclass
@@ -55,7 +66,7 @@ class InferenceEngine:
         self._model_path: Optional[Path] = None
         self._threshold: float = 0.5
         self._use_ov = HAS_OPENVINO
-        self._core: Optional[ov.Core] = None
+        self._core: Optional[_OV_CORE] = None
 
         # Simple model data (fallback without PyTorch)
         self._simple_mean: Optional[npt.NDArray] = None
@@ -68,7 +79,7 @@ class InferenceEngine:
 
         if self._use_ov:
             try:
-                self._core = ov.Core()
+                self._core = _OV_CORE()
                 logger.info("OpenVINO core initialized. Available devices: %s",
                             self._core.available_devices)
             except Exception as e:

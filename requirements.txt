@@ -20,6 +20,7 @@ pandas<3.0                         # cegah Enum comparison bug pandas 3.0
 # ===== OpenVINO Inference =====
 openvino>=2024.0
 onnx>=1.16.0                       # antisipasi export OpenVINO
+onnxscript                         # wajib untuk OpenVINO export via ONNX
 
 # ===== Serial / PLC =====
 pyserial>=3.5,<4.0

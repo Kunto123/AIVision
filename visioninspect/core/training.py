@@ -225,14 +225,25 @@ class TrainingPipeline:
             logger.info("OpenVINO export selesai: %s", export_dir)
         except Exception as e:
             logger.warning("OpenVINO export gagal: %s", e)
-            # Fallback: save PyTorch model
+            # Fallback: save PyTorch checkpoint via Lightning Trainer
             export_dir = output_dir / "torch"
             export_dir.mkdir(parents=True, exist_ok=True)
             try:
-                engine.save(checkpoint=export_dir / "model.pt")
+                ckpt_path = str(export_dir / "model.ckpt")
+                engine.trainer.save_checkpoint(ckpt_path)
+                logger.info("Fallback checkpoint saved: %s", ckpt_path)
             except Exception as e2:
-                logger.error("Save model juga gagal: %s", e2)
-                raise TrainingError(f"Export model gagal: {e}. Save juga gagal: {e2}")
+                logger.error("Save checkpoint juga gagal: %s", e2)
+                # Last resort: state_dict saja
+                try:
+                    import torch
+                    torch.save(model.state_dict(), export_dir / "model_state.pt")
+                    logger.info("State dict saved as last resort")
+                except Exception as e3:
+                    raise TrainingError(
+                        f"Export OpenVINO gagal: {e}. "
+                        f"Save checkpoint gagal: {e2}. "
+                        f"Save state_dict gagal: {e3}")
 
         if self._cancelled:
             raise TrainingError("Training dibatalkan")

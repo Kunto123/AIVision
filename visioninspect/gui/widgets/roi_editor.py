@@ -1,7 +1,7 @@
 """
 VisionInspect - Multi-ROI Editor Widget
 Widget untuk menggambar banyak Region of Interest (ROI) di atas live preview.
-Fitur: add, select, resize, move, delete, toggle aktif/nonaktif.
+Fitur: add, select, resize, move, delete, toggle, zoom (Ctrl+±0), pan (drag+scroll).
 """
 
 import math
@@ -9,11 +9,12 @@ from typing import List, Optional
 from uuid import uuid4
 
 from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QBrush, QPixmap, QMouseEvent, QKeyEvent
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QBrush, QPixmap, QMouseEvent, QKeyEvent, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
 
 ROI_MIN_SIZE = 32
+PAN_CLICK_THRESHOLD = 5  # px — batas antara klik vs drag untuk pan
 
 
 class ROIData:
@@ -57,8 +58,9 @@ class ROIData:
 
 class ROIEditor(QWidget):
     """
-    Editor multi-ROI. Drag untuk add/move/resize rectangle.
+    Editor multi-ROI. Drag untuk move/resize rectangle.
     Click untuk select. Delete untuk hapus. Toggle enabled/disabled.
+    Zoom: Ctrl++ / Ctrl+- / Ctrl+0.  Pan: drag di area kosong + scroll wheel.
     """
 
     rois_changed = Signal()  # emitted when ROIs are modified
@@ -86,12 +88,22 @@ class ROIEditor(QWidget):
         self._drag_start_img = None
         self._roi_drag_start = None
 
-        # Image geometry
+        # Image geometry (recomputed each paintEvent)
         self._img_rect = QRectF()
         self._scale_x = 1.0
         self._scale_y = 1.0
         self._offset_x = 0
         self._offset_y = 0
+
+        # — Zoom + Pan —
+        self._zoom = 1.0
+        self._pan_dx = 0.0   # pan offset in widget pixels (applied on top of centered image)
+        self._pan_dy = 0.0
+        self._panning = False
+        self._pan_start_pos = None   # QPointF — mouse press position for pan
+        self._pan_start_dx = 0.0
+        self._pan_start_dy = 0.0
+        self._click_start = None     # QPointF — for click-vs-drag detection
 
         self.setMinimumSize(320, 240)
         self.setMouseTracking(True)
@@ -100,7 +112,15 @@ class ROIEditor(QWidget):
     # ---- Public API ----
 
     def set_pixmap(self, pixmap: QPixmap):
+        # Only reset zoom/pan when image dimensions actually change
+        # (camera frames at same resolution keep current zoom/pan)
+        old_w = self._pixmap.width() if self._pixmap and not self._pixmap.isNull() else 0
+        old_h = self._pixmap.height() if self._pixmap and not self._pixmap.isNull() else 0
+        new_w = pixmap.width() if pixmap and not pixmap.isNull() else 0
+        new_h = pixmap.height() if pixmap and not pixmap.isNull() else 0
         self._pixmap = pixmap
+        if old_w != new_w or old_h != new_h:
+            self._reset_view()
         self.update()
 
     def set_rois(self, rois: List[ROIData]):
@@ -160,9 +180,16 @@ class ROIEditor(QWidget):
         self.rois_changed.emit()
         self.update()
 
-    # ---- Mapping ----
+    def _reset_view(self):
+        """Reset zoom and pan to default (called when image changes)."""
+        self._zoom = 1.0
+        self._pan_dx = 0.0
+        self._pan_dy = 0.0
+
+    # ---- Mapping (image <-> widget coords) ----
 
     def _map_to_image(self, pos) -> tuple:
+        """Map widget position to image pixel coordinates (accounting for zoom+pan)."""
         if self._pixmap is None or self._pixmap.isNull():
             return (0, 0)
         x = int((pos.x() - self._offset_x) / self._scale_x)
@@ -170,6 +197,7 @@ class ROIEditor(QWidget):
         return (x, y)
 
     def _roi_to_widget(self, roi: ROIData) -> QRectF:
+        """Map ROI image coordinates to widget rectangle (accounting for zoom+pan)."""
         rx = roi.x * self._scale_x + self._offset_x
         ry = roi.y * self._scale_y + self._offset_y
         rw = roi.width * self._scale_x
@@ -207,6 +235,28 @@ class ROIEditor(QWidget):
                 return ri
         return -1
 
+    def _clamp_pan(self):
+        """Clamp pan offset so image doesn't go too far off-screen."""
+        if not self._pixmap or self._pixmap.isNull():
+            self._pan_dx = 0.0
+            self._pan_dy = 0.0
+            return
+        display_w = self._compute_display_size()[0]
+        display_h = self._compute_display_size()[1]
+        margin_x = max(display_w * 0.5, 50)
+        margin_y = max(display_h * 0.5, 50)
+        self._pan_dx = max(-margin_x, min(margin_x, self._pan_dx))
+        self._pan_dy = max(-margin_y, min(margin_y, self._pan_dy))
+
+    def _compute_display_size(self) -> tuple:
+        """Return (display_width, display_height) in widget pixels at current zoom."""
+        if not self._pixmap or self._pixmap.isNull():
+            return (0, 0)
+        base_w = self._pixmap.width()
+        base_h = self._pixmap.height()
+        fit = min(self.width() / base_w, self.height() / base_h)
+        return (int(base_w * fit * self._zoom), int(base_h * fit * self._zoom))
+
     # ---- Events ----
 
     def paintEvent(self, event):
@@ -216,19 +266,28 @@ class ROIEditor(QWidget):
         w = self.width()
         h = self.height()
 
-        # Draw image
+        # Draw image with zoom + pan support
         if self._pixmap and not self._pixmap.isNull():
-            scaled = self._pixmap.scaled(
-                w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self._img_rect = QRectF(
-                (w - scaled.width()) / 2, (h - scaled.height()) / 2,
-                scaled.width(), scaled.height())
-            painter.drawPixmap(self._img_rect.topLeft(), scaled)
+            base_w = self._pixmap.width()
+            base_h = self._pixmap.height()
+            fit_scale = min(w / base_w, h / base_h)
+            display_w = int(base_w * fit_scale * self._zoom)
+            display_h = int(base_h * fit_scale * self._zoom)
 
-            self._scale_x = scaled.width() / self._pixmap.width()
-            self._scale_y = scaled.height() / self._pixmap.height()
-            self._offset_x = self._img_rect.x()
-            self._offset_y = self._img_rect.y()
+            # Center image, then apply pan offset
+            self._clamp_pan()
+            ox = (w - display_w) // 2 + int(self._pan_dx)
+            oy = (h - display_h) // 2 + int(self._pan_dy)
+
+            self._img_rect = QRectF(ox, oy, display_w, display_h)
+            scaled = self._pixmap.scaled(
+                display_w, display_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            painter.drawPixmap(ox, oy, scaled)
+
+            self._scale_x = display_w / base_w
+            self._scale_y = display_h / base_h
+            self._offset_x = ox
+            self._offset_y = oy
         else:
             painter.fillRect(0, 0, w, h, QColor("#0A0F1A"))
             painter.setPen(QColor("#9FB3C8"))
@@ -259,25 +318,17 @@ class ROIEditor(QWidget):
             label = f"{roi.label} {'✓' if roi.enabled else '✗'}"
             painter.drawText(int(rect.x()), int(rect.y()) - 6, label)
 
-            # Handles (selected only)
-            if is_selected:
-                pen_h = QPen(handle_c, 2)
-                painter.setPen(pen_h)
-                painter.setBrush(handle_c)
-                for h_rect in self._get_handles(roi):
-                    painter.drawEllipse(h_rect)
-
-                # Grid inside
-                if rect.width() > 30 and rect.height() > 30:
-                    pen_g = QPen(QColor(255, 255, 255, 50), 1, Qt.DashLine)
-                    painter.setPen(pen_g)
-                    for gi in range(1, 3):
-                        gx = rect.x() + rect.width() * gi / 3
-                        painter.drawLine(int(gx), int(rect.y()),
-                                         int(gx), int(rect.bottom()))
-                        gy = rect.y() + rect.height() * gi / 3
-                        painter.drawLine(int(rect.x()), int(gy),
-                                         int(rect.right()), int(gy))
+            # Grid inside (selected only)
+            if is_selected and rect.width() > 30 and rect.height() > 30:
+                pen_g = QPen(QColor(255, 255, 255, 50), 1, Qt.DashLine)
+                painter.setPen(pen_g)
+                for gi in range(1, 3):
+                    gx = rect.x() + rect.width() * gi / 3
+                    painter.drawLine(int(gx), int(rect.y()),
+                                     int(gx), int(rect.bottom()))
+                    gy = rect.y() + rect.height() * gi / 3
+                    painter.drawLine(int(rect.x()), int(gy),
+                                     int(rect.right()), int(gy))
 
         painter.end()
 
@@ -287,7 +338,7 @@ class ROIEditor(QWidget):
         pos = event.position()
         btn = event.button()
 
-        # Check handles first
+        # Check handles first (resize)
         ri, hi = self._hit_test_handles(pos)
         if ri >= 0:
             self._selected_idx = ri
@@ -299,7 +350,7 @@ class ROIEditor(QWidget):
             self.update()
             return
 
-        # Check body
+        # Check ROI body (drag-move or toggle)
         ri = self._hit_test_roi(pos)
         if ri >= 0:
             self._selected_idx = ri
@@ -314,22 +365,25 @@ class ROIEditor(QWidget):
             self.update()
             return
 
-        # Click empty — add new ROI at click position
+        # Click empty area — start pan (drag) or add ROI (click)
         if btn == Qt.LeftButton:
-            # If max_rois is set and reached, replace (clear all first)
-            if self._max_rois is not None and len(self._rois) >= self._max_rois:
-                self._rois.clear()
-                self._selected_idx = -1
-            img_pos = self._map_to_image(pos)
-            self.add_roi(img_pos[0], img_pos[1], ROI_MIN_SIZE, ROI_MIN_SIZE)
-            self._resizing = True
-            self._resize_handle = 3  # BR
-            self._drag_start_img = img_pos
-            r = self._rois[-1]
-            self._roi_drag_start = (r.x, r.y, r.width, r.height)
+            self._click_start = pos
+            self._panning = True
+            self._pan_start_pos = pos
+            self._pan_start_dx = self._pan_dx
+            self._pan_start_dy = self._pan_dy
 
     def mouseMoveEvent(self, event: QMouseEvent):
         pos = event.position()
+
+        if self._panning:
+            # Pan the view (drag on empty area)
+            dx = pos.x() - self._pan_start_pos.x()
+            dy = pos.y() - self._pan_start_pos.y()
+            self._pan_dx = self._pan_start_dx - dx
+            self._pan_dy = self._pan_start_dy - dy
+            self.update()
+            return
 
         if self._resizing and self._selected_idx >= 0:
             roi = self._rois[self._selected_idx]
@@ -367,15 +421,58 @@ class ROIEditor(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self._panning:
+            self._panning = False
+            # If it was a short click (no significant drag) — add ROI at click pos
+            if self._click_start is not None:
+                dist = (event.position() - self._click_start).manhattanLength()
+                if dist < PAN_CLICK_THRESHOLD:
+                    pos = self._click_start
+                    # If max_rois is set and reached, replace (clear all first)
+                    if self._max_rois is not None and len(self._rois) >= self._max_rois:
+                        self._rois.clear()
+                        self._selected_idx = -1
+                    img_pos = self._map_to_image(pos)
+                    self.add_roi(img_pos[0], img_pos[1], ROI_MIN_SIZE, ROI_MIN_SIZE)
+            self._click_start = None
+            return
+
         if self._dragging or self._resizing:
             self._dragging = False
             self._resizing = False
             self.rois_changed.emit()
+
+    def wheelEvent(self, event: QWheelEvent):
+        """Scroll wheel / touchpad panning when zoomed."""
+        if self._pixmap is None or self._pixmap.isNull():
+            return
+        # Use angle delta for smooth scrolling
+        delta = event.angleDelta()
+        if event.modifiers() & Qt.ShiftModifier:
+            # Shift + scroll = horizontal pan
+            self._pan_dx -= delta.y() * 0.5
+        else:
+            # Vertical pan
+            self._pan_dy += delta.y() * 0.5
+        # Horizontal from touchpad (angleDelta.x())
+        self._pan_dx -= delta.x() * 0.5
+        self.update()
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key_Delete or event.key() == Qt.Key_Backspace:
             self.delete_selected_roi()
         elif event.key() == Qt.Key_Space:
             self.toggle_selected_roi()
+        elif event.key() == Qt.Key_Plus and (event.modifiers() & Qt.ControlModifier):
+            self._zoom = min(5.0, self._zoom * 1.25)
+            self.update()
+        elif event.key() == Qt.Key_Minus and (event.modifiers() & Qt.ControlModifier):
+            self._zoom = max(0.2, self._zoom / 1.25)
+            self.update()
+        elif event.key() == Qt.Key_0 and (event.modifiers() & Qt.ControlModifier):
+            self._zoom = 1.0
+            self._pan_dx = 0.0
+            self._pan_dy = 0.0
+            self.update()
         else:
             super().keyPressEvent(event)

@@ -106,6 +106,10 @@ class MainWindow(QMainWindow):
         self._import_files: list = []
         self._import_index = 0
         self._is_import_mode = False
+        self._import_current_image = None  # numpy array, cache untuk hindari double-read
+        self._import_cancelled = False
+        self._import_ok_count = 0  # accumulated counts untuk batch config update
+        self._import_ng_count = 0
 
         # Counters
         self._inspection_count = 0
@@ -301,9 +305,11 @@ class MainWindow(QMainWindow):
         if is_admin:
             self._account_page.refresh()
             self._tabs.setCurrentIndex(1)  # Start on TEACH for admin
+            QTimer.singleShot(0, self._go_windowed)
         else:
             self._tabs.setCurrentIndex(0)  # Start on RUN for operator
             self._reset_counters()          # Fresh counters for operator
+            QTimer.singleShot(0, self._go_fullscreen)
 
         # Update user display in status bar
         uname = self._current_user.get("display_name", self._current_user.get("username", ""))
@@ -328,6 +334,7 @@ class MainWindow(QMainWindow):
         self._teach_page.get_capture_ng_button().clicked.connect(
             lambda: self._on_capture("ng"))
         self._teach_page.get_import_button().clicked.connect(self._on_import_images)
+        self._teach_page.import_cancelled.connect(self._on_cancel_import)
 
         # TEACH: Train button
         self._teach_page.get_train_button().clicked.connect(self._on_train)
@@ -463,16 +470,16 @@ class MainWindow(QMainWindow):
                 qp.setFont(font)
                 for i, roi_rect in enumerate(self._current_all_rois):
                     x, y, w, h = roi_rect
-                    # Green border for ROIs (same style as ROI editor)
+                    # Green border only — no fill, no badge
                     pen = QPen(QColor("#22C55E"), 2)
                     qp.setPen(pen)
+                    qp.setBrush(Qt.NoBrush)
                     qp.drawRect(x, y, w, h)
-                    # Small semi-transparent label
-                    qp.setPen(Qt.NoPen)
-                    qp.setBrush(QColor(34, 197, 94, 180))
-                    qp.drawRect(x, y - 16 if y >= 16 else y, 50, 16)
-                    qp.setPen(QColor("#FFFFFF"))
-                    qp.drawText(x + 3, y - 4 if y >= 16 else y + 11, f"ROI{i+1}")
+                    # Label text langsung di atas gambar, tanpa background fill
+                    label_x = x + 3
+                    label_y = y - 4 if y >= 16 else y + 13
+                    qp.setPen(QColor("#22C55E"))
+                    qp.drawText(label_x, label_y, f"ROI{i+1}")
                 qp.end()
             except Exception as e:
                 logger.warning("ROI overlay draw error: %s", e)
@@ -1031,6 +1038,10 @@ class MainWindow(QMainWindow):
         self._import_files = files
         self._import_index = 0
         self._is_import_mode = True
+        self._import_cancelled = False
+        self._import_current_image = None
+        self._import_ok_count = 0
+        self._import_ng_count = 0
 
         self._teach_page.show_import_mode(True)
         self._show_import_image()
@@ -1038,7 +1049,10 @@ class MainWindow(QMainWindow):
     # ---- Import Review Helpers ----
 
     def _show_import_image(self):
-        """Show current import image in the ROI editor."""
+        """Show current import image in the ROI editor and cache it to avoid double-read."""
+        if self._import_cancelled:
+            self._exit_import_mode()
+            return
         if self._import_index >= len(self._import_files):
             self._exit_import_mode()
             return
@@ -1051,6 +1065,14 @@ class MainWindow(QMainWindow):
             self._show_import_image()
             return
 
+        # Cache the image to avoid re-reading from disk on save
+        self._import_current_image = img
+
+        # Update progress bar
+        total = len(self._import_files)
+        progress = int((self._import_index * 100) / total) if total > 0 else 0
+        self._teach_page.set_import_progress(progress)
+
         # Convert BGR → RGB → QPixmap and show in ROI editor
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
@@ -1058,37 +1080,80 @@ class MainWindow(QMainWindow):
         pixmap = QPixmap.fromImage(qimg)
         self._teach_page.set_preview(pixmap)
 
-        # Update import progress
+        # Update import progress info
         current = self._import_index + 1
         total = len(self._import_files)
         self._teach_page.set_import_status(current, total)
         self.set_status(f"Import: {current}/{total}", 2000)
 
     def _save_current_import_image(self, label: str):
-        """Save the current import image under 'ok' or 'ng' and advance."""
+        """Save the current import image under 'ok' or 'ng' and advance.
+        Uses cached numpy array from _show_import_image to avoid re-reading disk.
+        Accumulates counts in memory for batch config update."""
+        if self._import_cancelled:
+            self._exit_import_mode()
+            return
         if self._import_index >= len(self._import_files):
             self._exit_import_mode()
             return
 
-        path = self._import_files[self._import_index]
-        img = cv2.imread(path)
+        img = self._import_current_image
         if img is not None:
+            path = self._import_files[self._import_index]
+            # Save to disk (batch mode — count diakumulasi dan ditulis sekali di akhir)
             self._pm.save_template_image(
-                self._active_program, self._active_template, img, label)
+                self._active_program, self._active_template, img, label,
+                update_count=False)
+            # Accumulate count in memory
+            if label == "ok":
+                self._import_ok_count += 1
+            else:
+                self._import_ng_count += 1
             logger.info("Import saved %s as %s", Path(path).name, label)
         else:
-            logger.warning("Import: could not read %s", path)
+            logger.warning("Import: cached image missing for index %d", self._import_index)
+
+        # Clear cache for this image
+        self._import_current_image = None
 
         # Advance to next image
         self._import_index += 1
         self._show_import_image()
 
+    def _on_cancel_import(self):
+        """Cancel the current import session."""
+        logger.info("Import cancelled by user at index %d/%d",
+                     self._import_index, len(self._import_files))
+        self._import_cancelled = True
+        self._import_current_image = None
+        self._exit_import_mode()
+
     def _exit_import_mode(self):
-        """Exit import review mode and restore normal UI."""
+        """Exit import review mode, write batched config, restore normal UI."""
+        # Write accumulated counts to config (batch update)
+        if self._import_ok_count > 0 or self._import_ng_count > 0:
+            try:
+                tmpl_cfg = self._pm.get_template_config(
+                    self._active_program, self._active_template)
+                if self._import_ok_count > 0:
+                    tmpl_cfg["num_ok"] = tmpl_cfg.get("num_ok", 0) + self._import_ok_count
+                if self._import_ng_count > 0:
+                    tmpl_cfg["num_ng"] = tmpl_cfg.get("num_ng", 0) + self._import_ng_count
+                self._pm.update_template_config(
+                    self._active_program, self._active_template, tmpl_cfg)
+                logger.info("Batch config update: +%d OK, +%d NG",
+                            self._import_ok_count, self._import_ng_count)
+            except Exception as e:
+                logger.warning("Batch config update error: %s", e)
+
         total = len(self._import_files)
         self._is_import_mode = False
         self._import_files = []
         self._import_index = 0
+        self._import_current_image = None
+        self._import_cancelled = False
+        self._import_ok_count = 0
+        self._import_ng_count = 0
 
         self._teach_page.show_import_mode(False)
         self._refresh_template_ui()
@@ -1098,7 +1163,10 @@ class MainWindow(QMainWindow):
         if not self._camera_worker or not self._camera_worker.is_running:
             self._teach_page.set_preview_text("Import selesai")
 
-        self.set_status(f"Import selesai ({total} gambar diproses)", 3000)
+        if self._import_cancelled:
+            self.set_status("Import dibatalkan", 3000)
+        else:
+            self.set_status(f"Import selesai ({total} gambar diproses)", 3000)
 
     def _on_add_template(self):
         """Create a new template with default ROI."""
@@ -1547,6 +1615,12 @@ class MainWindow(QMainWindow):
         name = page_names[index] if index < len(page_names) else f"Tab {index}"
         logger.debug("Switched to %s tab", name)
 
+        # Full screen on RUN tab, windowed on others
+        if index == 0:
+            QTimer.singleShot(0, self._go_fullscreen)
+        else:
+            QTimer.singleShot(0, self._go_windowed)
+
         # Refresh teach preview
         if index == 1:
             self._refresh_template_ui()
@@ -1566,6 +1640,27 @@ class MainWindow(QMainWindow):
             "<p>Built with Anomalib + OpenVINO + PySide6</p>"
             "<p>100% lokal, CPU-only, offline.</p>"
         )
+
+    def keyPressEvent(self, event):
+        """Esc untuk konfirmasi exit saat borderless full screen."""
+        if event.key() == Qt.Key_Escape:
+            reply = QMessageBox.question(
+                self, "Keluar", "Yakin ingin keluar aplikasi?",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.close()
+        else:
+            super().keyPressEvent(event)
+
+    def _go_fullscreen(self):
+        """Borderless full screen — no title bar, no taskbar."""
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.showFullScreen()
+
+    def _go_windowed(self):
+        """Borderless full screen juga — untuk admin tabs."""
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.showFullScreen()
 
     def _retranslate_ui(self):
         self._tabs.setTabText(0, self._tr.tr("nav_run"))

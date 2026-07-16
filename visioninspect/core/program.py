@@ -245,7 +245,8 @@ class ProgramManager:
     # =====================================================================
 
     def save_template_image(self, program: str, template_id: str,
-                             image: Any, label: str) -> Path:
+                             image: Any, label: str,
+                             update_count: bool = True) -> Path:
         """
         Save an image to the template's image directory.
         label = "ok" or "ng"
@@ -260,13 +261,16 @@ class ProgramManager:
 
         cv2.imwrite(str(dest), image)
 
-        # Update count
-        cfg = self.get_template_config(program, template_id)
-        if label == "ok":
-            cfg["num_ok"] = cfg.get("num_ok", 0) + 1
+        # Update count (skip saat import batch — diakumulasi dan ditulis sekali di akhir)
+        if update_count:
+            cfg = self.get_template_config(program, template_id)
+            if label == "ok":
+                cfg["num_ok"] = cfg.get("num_ok", 0) + 1
+            else:
+                cfg["num_ng"] = cfg.get("num_ng", 0) + 1
+            self.update_template_config(program, template_id, cfg)
         else:
-            cfg["num_ng"] = cfg.get("num_ng", 0) + 1
-        self.update_template_config(program, template_id, cfg)
+            logger.debug("Image saved (batch mode, count deferred): %s", dest)
 
         logger.debug("Image saved: %s", dest)
         return dest

@@ -37,6 +37,7 @@ class TeachPage(QWidget):
 
     image_deleted = Signal(str)
     thumbnail_clicked = Signal(str)
+    import_cancelled = Signal()
 
     def __init__(self, translator: Translator, parent=None):
         super().__init__(parent)
@@ -121,7 +122,10 @@ class TeachPage(QWidget):
         capture_row.addWidget(self._import_btn)
         left_layout.addLayout(capture_row)
 
-        # Import status
+        # Import status — baris dengan progress + cancel
+        import_row = QHBoxLayout()
+        import_row.setSpacing(6)
+
         self._import_status_label = QLabel("")
         self._import_status_label.setObjectName("secondaryText")
         self._import_status_label.setAlignment(Qt.AlignCenter)
@@ -129,7 +133,29 @@ class TeachPage(QWidget):
             "color: #F59E0B; font-weight: bold; padding: 4px; "
             "background-color: #1A2A44; border-radius: 4px;")
         self._import_status_label.hide()
-        left_layout.addWidget(self._import_status_label)
+        import_row.addWidget(self._import_status_label, 1)
+
+        self._import_progress_bar = QProgressBar()
+        self._import_progress_bar.setRange(0, 100)
+        self._import_progress_bar.setValue(0)
+        self._import_progress_bar.setTextVisible(True)
+        self._import_progress_bar.setMaximumHeight(18)
+        self._import_progress_bar.setFormat("")
+        self._import_progress_bar.hide()
+        import_row.addWidget(self._import_progress_bar)
+
+        self._cancel_import_btn = QPushButton("✕ Batal")
+        self._cancel_import_btn.setFixedWidth(70)
+        self._cancel_import_btn.setFixedHeight(26)
+        self._cancel_import_btn.setStyleSheet(
+            "font-size: 11px; padding: 0 6px; border: 1px solid #EF4444;"
+            " border-radius: 3px; background: #1A2A44; color: #EF4444;")
+        self._cancel_import_btn.setToolTip("Batalkan import dan kembali ke mode normal")
+        self._cancel_import_btn.hide()
+        self._cancel_import_btn.clicked.connect(self.import_cancelled.emit)
+        import_row.addWidget(self._cancel_import_btn)
+
+        left_layout.addLayout(import_row)
 
         # ── Preview area: 3 columns — QC Region | Daftar ROI | Gate Part ──
         preview_row = QHBoxLayout()
@@ -513,15 +539,26 @@ class TeachPage(QWidget):
             self._capture_ng_btn.setText("❌ Simpan NG")
             self._import_btn.hide()
             self._import_status_label.show()
+            self._import_progress_bar.show()
+            self._import_progress_bar.setValue(0)
+            self._cancel_import_btn.show()
         else:
             self._capture_ok_btn.setText("✅ Capture OK")
             self._capture_ng_btn.setText("❌ Capture NG")
             self._import_btn.show()
             self._import_status_label.hide()
+            self._import_progress_bar.hide()
+            self._cancel_import_btn.hide()
 
     @Slot()
     def set_import_status(self, current: int, total: int):
         self._import_status_label.setText(f"📁 Import: {current}/{total} — pilih OK atau NG")
+
+    @Slot()
+    def set_import_progress(self, value: int):
+        """Set progress bar percentage (0-100)."""
+        self._import_progress_bar.setValue(value)
+        self._import_progress_bar.setFormat(f"{value}%")
 
     # ---- Part Check ----
 

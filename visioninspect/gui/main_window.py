@@ -1513,7 +1513,13 @@ class MainWindow(QMainWindow):
     # ---- Training ----
 
     def _on_train(self):
-        """Start training for active template via TrainingWorker."""
+        """Start training for active template.
+
+        Auto-routing:
+          - PyTorch available → TrainingWorker (QThread, normal flow)
+          - PyTorch blocked (Windows policy) + WSL available → training via WSL
+          - Neither → SimpleThreshold fallback (existing)
+        """
         if not self._active_template:
             self.set_status("Pilih template dulu!", 3000)
             return
@@ -1525,14 +1531,21 @@ class MainWindow(QMainWindow):
                                 "Minimal 1 gambar OK diperlukan untuk training.")
             return
 
-        # Pre-check torch availability (Windows DLL issue) — warning only
+        # Cek torch
+        import importlib
         torch_ok = True
         try:
             import torch  # noqa: F401
         except Exception:
             torch_ok = False
 
+        # ── Jika torch diblokir Windows policy, coba WSL ──
         if not torch_ok:
+            import shutil
+            wsl_path = shutil.which("wsl.exe")
+            if wsl_path:
+                self._train_via_wsl()
+                return
             logger.warning("PyTorch not available — using simple training mode")
 
         self._teach_page.set_training_progress(0, "Memulai training...")
@@ -1543,6 +1556,71 @@ class MainWindow(QMainWindow):
         # Emit signal — worker di QThread akan menjalankan training
         self.start_training_signal.emit(
             self._active_program, self._active_template)
+
+    # ---- Training via WSL (fallback saat PyTorch diblokir Windows) ----
+
+    def _train_via_wsl(self):
+        """Launch training in WSL where PyTorch can load, then reload model."""
+        import subprocess
+        import threading
+
+        # Path conversion: C:\Proj → /mnt/c/Proj
+        proj = Path(__file__).resolve().parent.parent.parent
+        drive = proj.drive[0].lower()
+        wsl_proj = f"/mnt/{drive}{str(proj)[2:]}".replace("\\", "/")
+
+        prog = self._active_program
+        tmpl = self._active_template
+
+        self._teach_page.set_training_progress(5, "🧠 Meluncurkan WSL...")
+        self._teach_page.get_train_button().setEnabled(False)
+        self.set_status("Training via WSL (PyTorch di Linux)...", 0)
+        logger.info("Training via WSL: %s %s (path=%s)", prog, tmpl, wsl_proj)
+
+        def _run_wsl():
+            try:
+                cmd = [
+                    "wsl.exe", "-e", "bash", "-c",
+                    f"cd '{wsl_proj}' && "
+                    f".venv/bin/python tools/train_cli.py "
+                    f"--program '{prog}' --template '{tmpl}'"
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                # Log output for debugging
+                for line in result.stdout.splitlines():
+                    logger.info("[WSL] %s", line)
+                if result.stderr:
+                    for line in result.stderr.splitlines():
+                        logger.warning("[WSL] %s", line)
+
+                if result.returncode == 0:
+                    logger.info("WSL training selesai")
+                    # Refresh model di main thread via QTimer
+                    QTimer.singleShot(0, self._on_wsl_train_done)
+                else:
+                    err = result.stderr.strip() or f"exit code {result.returncode}"
+                    QTimer.singleShot(0, lambda: self._on_training_error(
+                        f"WSL training gagal: {err}"))
+            except subprocess.TimeoutExpired:
+                QTimer.singleShot(0, lambda: self._on_training_error(
+                    "WSL training timeout (600s)"))
+            except FileNotFoundError:
+                QTimer.singleShot(0, lambda: self._on_training_error(
+                    "wsl.exe tidak ditemukan. Install WSL dulu."))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._on_training_error(str(e)))
+
+        thread = threading.Thread(target=_run_wsl, daemon=True, name="wsl-train")
+        thread.start()
+
+    def _on_wsl_train_done(self):
+        """WSL training berhasil — reload model + refresh UI."""
+        self._teach_page.set_training_done()
+        self._teach_page.get_train_button().setEnabled(True)
+        self._refresh_template_ui()
+        self._load_template_model()
+        self.set_status("✅ Training via WSL selesai! Model dimuat.", 5000)
+        logger.info("WSL training selesai, model reloaded")
 
     def _on_training_progress(self, percent: int, message: str):
         """Update progress bar."""

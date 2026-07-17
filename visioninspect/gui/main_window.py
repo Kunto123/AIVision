@@ -7,6 +7,8 @@ Mengelola CameraWorker, inferensi, ProgramManager, dan komponen global.
 import os
 import sys
 import time
+import json
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -406,6 +408,9 @@ class MainWindow(QMainWindow):
             lambda: self._on_correct_history("NG"))
         self._history_page.get_rebuild_button().clicked.connect(self._on_rebuild_from_history)
 
+        # HISTORY: Tuning
+        self._history_page.tuning_requested.connect(self._on_tuning_requested)
+
         # HISTORY: Selection changed
         self._history_page.get_table().itemSelectionChanged.connect(
             self._on_history_selection_changed)
@@ -706,6 +711,9 @@ class MainWindow(QMainWindow):
                     self._ng_interval_active = True
                     # Show NG immediately on display (counter hanya bertambah via timer tick)
                     self._run_page.update_judgement("NG", worst_score)
+                    # Save frame untuk tuning
+                    self._save_inspection_frame(frame, "NG", worst_score,
+                                                 roi_results, avg_latency)
                 else:
                     # Timer already running — update display (worse score)
                     self._run_page.update_judgement("NG", worst_score)
@@ -735,14 +743,24 @@ class MainWindow(QMainWindow):
             if raw_judgement == "OK":
                 self._inference_save_counter += 1
                 if self._inference_save_counter % 30 == 0:
+                    img_path = self._save_inspection_frame(
+                        frame, "OK", worst_score, roi_results, avg_latency)
+                    roi_region = json.dumps([{
+                        "x": r["roi"][0], "y": r["roi"][1],
+                        "width": r["roi"][2], "height": r["roi"][3],
+                        "score": r["score"], "judgement": r["judgement"],
+                    } for r in roi_results])
                     self._db.add_inspection({
                         "program": self._active_program,
                         "score": worst_score,
                         "judgement": "OK",
                         "threshold": self._inference_engine.threshold,
                         "latency_ms": avg_latency,
-                        "image_path": "",
-                        "metadata": {"num_rois": len(roi_results)},
+                        "image_path": img_path or "",
+                        "roi_region": roi_region,
+                        'metadata': {'num_rois': len(roi_results),
+                                      'template': self._active_template,
+                                      'template_name': self._active_partname},
                     })
                     # Push OK ke PostgreSQL (throttled)
                     _op = (self._current_user.get("display_name")
@@ -757,6 +775,50 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             logger.warning("Inference error: %s", e)
+
+    # ---- Save Inspection Frame (untuk Tuning) ----
+
+    def _save_inspection_frame(self, frame, judgement: str, score: float,
+                                roi_results: list, latency: float) -> str:
+        """Save frame + per-ROI data to disk for Tuning mode.
+
+        Returns image_path string, or empty string on failure.
+        """
+        try:
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            img_dir = self._data_dir / "inspection_images"
+            img_dir.mkdir(parents=True, exist_ok=True)
+            fname = f"{ts}_{uuid.uuid4().hex[:8]}.png"
+            dest = img_dir / fname
+            cv2.imwrite(str(dest), frame)
+
+            # Save per-ROI metadata alongside
+            meta = {
+                "timestamp": ts,
+                "program": self._active_program,
+                "template": self._active_template,
+                "template_name": self._active_partname,
+                "judgement": judgement,
+                "score": score,
+                "threshold": self._inference_engine.threshold,
+                "latency_ms": latency,
+                "operator": (self._current_user.get("display_name")
+                             or self._current_user.get("username", "")
+                            ) if self._current_user else "",
+                "rois": [{
+                    "x": r["roi"][0], "y": r["roi"][1],
+                    "width": r["roi"][2], "height": r["roi"][3],
+                    "score": r["score"], "judgement": r["judgement"],
+                } for r in roi_results],
+            }
+            meta_path = dest.with_suffix(".json")
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+
+            return str(dest)
+        except Exception as e:
+            logger.warning("Save inspection frame error: %s", e)
+            return ""
 
     # ---- NG Interval Timer ----
 
@@ -1526,11 +1588,12 @@ class MainWindow(QMainWindow):
     # ---- Redefinition (History Corrections) ----
 
     def _on_history_selection_changed(self):
-        """Enable/disable correction buttons based on selection."""
+        """Enable/disable correction + tuning buttons based on selection."""
         data = self._history_page.get_selected_row_data()
         has_selection = data is not None
         self._history_page.get_correct_ok_button().setEnabled(has_selection)
         self._history_page.get_correct_ng_button().setEnabled(has_selection)
+        self._history_page.get_tuning_button().setEnabled(has_selection)
 
     def _on_correct_history(self, correct_judgement: str):
         """Mark selected history entry as correction."""
@@ -1557,6 +1620,139 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error("Correction DB error: %s", e)
             self.set_status(f"Gagal menyimpan koreksi: {e}", 5000)
+
+    # ---- Tuning (Per-ROI Correction + Additional Learning) ----
+
+    def _on_tuning_requested(self, entry_id: int):
+        """Open Tuning dialog for a history entry, apply per-ROI corrections.
+
+        CRITICAL: Tuning always runs on the SAME template that produced the
+        inference result — NOT the currently active template. This prevents
+        mixing training data between models (model A trained on ROI crops
+        from model B's inference).
+
+        Flow:
+          1. Load entry from DB → extract template_id from metadata
+          2. Activate that template (switches active model if needed)
+          3. Load saved image + per-ROI data from disk
+          4. Show TuningDialog — user clicks ROI, registers OK/NG
+          5. On save: crop corrected ROIs → save to template → retrain
+        """
+        # Fetch full entry from DB (need metadata + image_path + roi_region)
+        entries = self._db.get_history(limit=1, offset=0)
+        entry = None
+        for e in entries:
+            if int(e["id"]) == entry_id:
+                entry = e
+                break
+        if not entry:
+            self.set_status(f"Entry #{entry_id} tidak ditemukan", 3000)
+            return
+
+        img_path = entry.get("image_path", "")
+        roi_region_str = entry.get("roi_region", "")
+        if not img_path or not Path(img_path).exists():
+            self.set_status(f"Gambar untuk entry #{entry_id} tidak tersimpan. "
+                            "Gunakan Capture di TEACH untuk menyimpan gambar.", 4000)
+            return
+
+        # ── Extract & activate the ORIGINAL template ──
+        metadata = entry.get("metadata", "")
+        tmpl_id = ""
+        if metadata:
+            try:
+                meta = json.loads(metadata) if isinstance(metadata, str) else metadata
+                tmpl_id = meta.get("template", "")
+            except (json.JSONDecodeError, TypeError):
+                tmpl_id = ""
+
+        if tmpl_id and tmpl_id != self._active_template:
+            # Verify template still exists
+            templates = self._pm.list_templates(self._active_program)
+            if any(t["id"] == tmpl_id for t in templates):
+                logger.info("Tuning: switching to original template %s", tmpl_id)
+                self._activate_template(tmpl_id)
+            else:
+                logger.warning("Tuning: original template %s not found, using current", tmpl_id)
+
+        # Parse per-ROI data
+        rois_data = []
+        if roi_region_str:
+            try:
+                rois_data = json.loads(roi_region_str) if isinstance(roi_region_str, str) else roi_region_str
+            except (json.JSONDecodeError, TypeError):
+                rois_data = []
+
+        if not rois_data:
+            self.set_status(f"Tidak ada data ROI untuk entry #{entry_id}", 3000)
+            return
+
+        # Load image
+        import cv2
+        img = cv2.imread(str(img_path))
+        if img is None:
+            self.set_status(f"Gagal memuat gambar: {img_path}", 3000)
+            return
+
+        # Open TuningDialog
+        from visioninspect.gui.dialogs.tuning_dialog import TuningDialog
+        dialog = TuningDialog(img_path, img, rois_data, self)
+        if not dialog.exec():
+            self.set_status("Tuning dibatalkan", 3000)
+            return
+
+        # ── Process corrections ──
+        corrections = dialog.get_corrections()
+        if not corrections:
+            self.set_status("Tidak ada koreksi yang dilakukan", 3000)
+            return
+
+        logger.info("Tuning: %d ROI correction(s) for entry #%d on template '%s'",
+                     len(corrections), entry_id, self._active_template)
+
+        # Save each corrected ROI crop to the (now-active) template's training dir
+        saved_count = 0
+        for corr in corrections:
+            roi_rect = (corr["x"], corr["y"], corr["width"], corr["height"])
+            new_label = corr["corrected_to"].lower()  # "ok" or "ng"
+            if new_label not in ("ok", "ng"):
+                continue
+
+            # Crop ROI from image
+            x, y, w, h = roi_rect
+            h_img, w_img = img.shape[:2]
+            x = max(0, min(x, w_img - 1))
+            y = max(0, min(y, h_img - 1))
+            w = max(1, min(w, w_img - x))
+            h = max(1, min(h, h_img - y))
+            crop = img[y:y + h, x:x + w].copy()
+
+            # Save to template's training images
+            try:
+                self._pm.save_template_image(
+                    self._active_program, self._active_template,
+                    crop, new_label, update_count=True)
+                saved_count += 1
+                logger.info("Tuning: cropped ROI %s → %s on template %s (%d×%d)",
+                            corr.get("label", "?"), new_label,
+                            self._active_template, w, h)
+            except Exception as e:
+                logger.warning("Tuning: gagal simpan ROI crop: %s", e)
+
+        # ── Additional Learning: retrain on this specific template ──
+        if saved_count > 0:
+            ok_count = self._pm.count_template_images(
+                self._active_program, self._active_template, "ok")
+            if ok_count >= 1:
+                self.set_status(f"🧠 Additional Learning: {saved_count} ROI(s) + {ok_count} OK total",
+                                2000)
+                # Trigger training for this specific template
+                self._on_train()
+            else:
+                self.set_status(f"✅ {saved_count} ROI(s) disimpan. Butuh minimal 1 OK untuk training.",
+                                4000)
+        else:
+            self.set_status("Tidak ada ROI yang berhasil disimpan", 3000)
 
     def _on_rebuild_from_history(self):
         """Rebuild model using corrections data."""
@@ -1668,6 +1864,24 @@ class MainWindow(QMainWindow):
                 h.setLevel(logging.DEBUG if show_debug else logging.INFO)
         logger.info("Log debug: %s", "AKTIF" if show_debug else "NONAKTIF")
 
+        # Re-init PostgreSQL dengan config dari UI (bukan read-back dari file)
+        pg_cfg = settings.get("postgresql", {})
+        self._pg = self._pg.__class__(pg_cfg)
+        if pg_cfg.get("enabled"):
+            try:
+                conn = self._pg._connect()
+                conn.close()
+                self._settings_page.set_pg_status(True, pg_cfg.get("host", ""))
+                logger.info("PostgreSQL terhubung: %s@%s:%d/%s",
+                            pg_cfg.get("user"), pg_cfg.get("host"),
+                            pg_cfg.get("port"), pg_cfg.get("dbname"))
+            except Exception as e:
+                err = str(e).split(":")[-1].strip()[:60]
+                self._settings_page.set_pg_status(False, err)
+                logger.warning("PostgreSQL connection failed: %s", e)
+        else:
+            self._settings_page.set_pg_status(False, "Tidak diaktifkan")
+
     def _on_tab_changed(self, index: int):
         page_names = ["Run", "Teach", "History", "Settings", "Diagnostics", "Akun"]
         name = page_names[index] if index < len(page_names) else f"Tab {index}"
@@ -1740,6 +1954,18 @@ class MainWindow(QMainWindow):
             active = ""
 
         self._settings_page.set_runtime_status(has_ov, has_torch, active)
+
+        # Update PostgreSQL connection status (gunakan self._pg langsung)
+        if self._pg.is_enabled:
+            try:
+                conn = self._pg._connect()
+                conn.close()
+                pg_cfg = self._config.get("postgresql", {})
+                self._settings_page.set_pg_status(True, pg_cfg.get("host", ""))
+            except Exception as e:
+                self._settings_page.set_pg_status(False, str(e).split(":")[-1].strip()[:60])
+        else:
+            self._settings_page.set_pg_status(False, "Tidak diaktifkan")
 
     def _retranslate_ui(self):
         self._tabs.setTabText(0, self._tr.tr("nav_run"))

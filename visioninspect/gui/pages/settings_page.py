@@ -190,6 +190,74 @@ class SettingsPage(QWidget):
 
         main_layout.addWidget(flask_group)
 
+        # === PostgreSQL Settings ===
+        pg_group = QGroupBox("🐘 PostgreSQL")
+        pg_layout = QVBoxLayout(pg_group)
+
+        self._pg_enabled = QCheckBox("Enable PostgreSQL")
+        self._pg_enabled.setToolTip(
+            "Aktifkan koneksi ke PostgreSQL untuk autentikasi dan push inspeksi.\n"
+            "Nonaktifkan untuk tetap pakai SQLite lokal.")
+        pg_layout.addWidget(self._pg_enabled)
+
+        pg_host_row = QHBoxLayout()
+        pg_host_row.addWidget(QLabel("Host:"))
+        self._pg_host = QLineEdit("localhost")
+        self._pg_host.setMinimumHeight(28)
+        pg_host_row.addWidget(self._pg_host, 1)
+        pg_host_row.addWidget(QLabel("Port:"))
+        self._pg_port = QSpinBox()
+        self._pg_port.setRange(1, 65535)
+        self._pg_port.setValue(5432)
+        self._pg_port.setFixedWidth(80)
+        pg_host_row.addWidget(self._pg_port)
+        pg_layout.addLayout(pg_host_row)
+
+        dbname_row = QHBoxLayout()
+        dbname_row.addWidget(QLabel("Database:"))
+        self._pg_dbname = QLineEdit("visioninspect")
+        self._pg_dbname.setMinimumHeight(28)
+        dbname_row.addWidget(self._pg_dbname, 1)
+        pg_layout.addLayout(dbname_row)
+
+        user_row = QHBoxLayout()
+        user_row.addWidget(QLabel("User:"))
+        self._pg_user = QLineEdit("postgres")
+        self._pg_user.setMinimumHeight(28)
+        user_row.addWidget(self._pg_user, 1)
+        user_row.addWidget(QLabel("Password:"))
+        self._pg_password = QLineEdit()
+        self._pg_password.setEchoMode(QLineEdit.Password)
+        self._pg_password.setMinimumHeight(28)
+        user_row.addWidget(self._pg_password, 1)
+        pg_layout.addLayout(user_row)
+
+        # Connection status + test button
+        status_row = QHBoxLayout()
+        self._pg_status_label = QLabel("⏹ Tidak aktif")
+        self._pg_status_label.setStyleSheet(
+            "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
+            "color: #9FB3C8; background-color: #1A2A44;")
+        status_row.addWidget(self._pg_status_label, 1)
+
+        self._pg_test_btn = QPushButton("🔌 Test Koneksi")
+        self._pg_test_btn.setFixedHeight(28)
+        self._pg_test_btn.setStyleSheet(
+            "font-size: 11px; padding: 0 10px; border: 1px solid #233A57; "
+            "border-radius: 3px; background: #1A2A44; color: #E2E8F0;")
+        self._pg_test_btn.clicked.connect(self._on_test_pg_connection)
+        status_row.addWidget(self._pg_test_btn)
+        pg_layout.addLayout(status_row)
+
+        pg_help = QLabel(
+            "Password hash menggunakan SHA-256 + pepper (sama dengan SQLite).\n"
+            "RFID UID di-hash sebelum disimpan. Aktifkan setelah config diisi.")
+        pg_help.setObjectName("secondaryText")
+        pg_help.setWordWrap(True)
+        pg_layout.addWidget(pg_help)
+
+        main_layout.addWidget(pg_group)
+
         # === NG Detection Settings ===
         ng_group = QGroupBox("🔴 NG Detection")
         ng_form = QVBoxLayout(ng_group)
@@ -315,9 +383,19 @@ class SettingsPage(QWidget):
                 "max_history_entries": self._max_entries.value(),
                 "save_ok_sample_percent": self._ok_sample_pct.value(),
             },
-            "flask_api": {
-                "enabled": self._flask_enabled.isChecked(),
-                "port": self._flask_port.value(),
+            'flask_api': {
+                'enabled': self._flask_enabled.isChecked(),
+                'port': self._flask_port.value(),
+            },
+            'postgresql': {
+                'enabled': self._pg_enabled.isChecked(),
+                'host': self._pg_host.text(),
+                'port': self._pg_port.value(),
+                'dbname': self._pg_dbname.text(),
+                'user': self._pg_user.text(),
+                'password': self._pg_password.text(),
+                'sslmode': 'prefer',
+                'connect_timeout': 10,
             },
             "language": "id" if self._lang_combo.currentIndex() == 0 else "en",
             "ng_debounce_ms": self._ng_delay_spin.value(),
@@ -369,6 +447,52 @@ class SettingsPage(QWidget):
             f"font-weight: bold; padding: 2px 8px; border-radius: 3px; color: {color};"
             f"background-color: #1A2A44;")
 
+    # ---- PostgreSQL Status ----
+
+    def set_pg_status(self, connected: bool, detail: str = ""):
+        """Update PostgreSQL connection status indicator."""
+        if connected:
+            self._pg_status_label.setText(f"🟢 Terhubung{(' — ' + detail) if detail else ''}")
+            self._pg_status_label.setStyleSheet(
+                "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
+                "color: #22C55E; background-color: #1A2A44;")
+        else:
+            text = detail or "Tidak terhubung"
+            self._pg_status_label.setText(f"🔴 {text}")
+            self._pg_status_label.setStyleSheet(
+                "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
+                "color: #EF4444; background-color: #1A2A44;")
+
+    def _on_test_pg_connection(self):
+        """Test PostgreSQL connection with current form values."""
+        self._pg_status_label.setText("⏳ Menguji koneksi...")
+        self._pg_status_label.setStyleSheet(
+            "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
+            "color: #F59E0B; background-color: #1A2A44;")
+
+        cfg = {
+            "enabled": self._pg_enabled.isChecked(),
+            "host": self._pg_host.text(),
+            "port": self._pg_port.value(),
+            "dbname": self._pg_dbname.text(),
+            "user": self._pg_user.text(),
+            "password": self._pg_password.text(),
+            "sslmode": "prefer",
+            "connect_timeout": 5,
+        }
+        try:
+            from visioninspect.storage.postgres_db import PostgresDB
+            pg = PostgresDB(cfg)
+            if not pg.is_enabled:
+                self.set_pg_status(False, "PostgreSQL tidak diaktifkan")
+                return
+            # Quick connect test
+            conn = pg._connect()
+            conn.close()
+            self.set_pg_status(True, cfg["host"])
+        except Exception as e:
+            self.set_pg_status(False, str(e).split(":")[-1].strip()[:60])
+
     def _load_settings(self) -> None:
         """Load settings from config into UI widgets."""
         # Camera
@@ -418,6 +542,14 @@ class SettingsPage(QWidget):
         # Flask
         self._flask_enabled.setChecked(self._config.get("flask_api.enabled", False))
         self._flask_port.setValue(self._config.get("flask_api.port", 5000))
+
+        # PostgreSQL
+        self._pg_enabled.setChecked(self._config.get("postgresql.enabled", False))
+        self._pg_host.setText(self._config.get("postgresql.host", "localhost"))
+        self._pg_port.setValue(self._config.get("postgresql.port", 5432))
+        self._pg_dbname.setText(self._config.get("postgresql.dbname", "visioninspect"))
+        self._pg_user.setText(self._config.get("postgresql.user", "postgres"))
+        self._pg_password.setText(self._config.get("postgresql.password", ""))
 
         # Language
         lang = self._config.get("language", "id")

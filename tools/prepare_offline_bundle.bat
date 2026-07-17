@@ -50,8 +50,19 @@ if %ERRORLEVEL% neq 0 (
 )
 echo ✅ Wheels selesai
 
-REM 3. Download backbone weights via timm (HuggingFace cache)
-echo [2/3] Downloading backbone weights (timm/HuggingFace)...
+REM 3b. Install wheels ke venv (biar bundling_weights bisa import timm, torch, dll)
+echo [2/3] Installing wheels to venv...
+"%VENV_DIR%\Scripts\python.exe" -m pip install ^
+    --no-index ^
+    --find-links="%BUNDLE_DIR%\wheels" ^
+    -r "%PROJECT_DIR%\requirements.txt"
+if %ERRORLEVEL% neq 0 (
+    echo ⚠️  Install ke venv ada error, lanjut...
+)
+echo ✅ Dependencies terinstall di venv
+
+REM 4. Download backbone weights via timm (HuggingFace cache)
+echo [3/4] Downloading backbone weights (timm/HuggingFace)...
 "%VENV_DIR%\Scripts\python.exe" "%PROJECT_DIR%\tools\bundling_weights.py" ^
     --bundle "%BUNDLE_DIR%"
 if %ERRORLEVEL% neq 0 (
@@ -60,13 +71,13 @@ if %ERRORLEVEL% neq 0 (
 )
 echo ✅ Backbone weights selesai
 
-REM 4. Copy install script ke bundle
-echo [3/3] Copying install script...
+REM 5. Copy install script ke bundle
+echo [4/4] Copying install script...
 copy "%PROJECT_DIR%\tools\install_offline.bat" "%BUNDLE_DIR%\install.bat" >nul
 copy "%PROJECT_DIR%\requirements.txt" "%BUNDLE_DIR%\requirements.txt" >nul
 echo ✅ Install script copied
 
-REM 5. Ringkasan
+REM 6. Ringkasan
 echo.
 echo === Bundle siap! ===
 echo.

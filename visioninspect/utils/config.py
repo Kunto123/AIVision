@@ -131,6 +131,18 @@ class Config:
 
         # Active program
         "active_program": "",
+
+        # PostgreSQL
+        "postgresql": {
+            "enabled": False,
+            "host": "localhost",
+            "port": 5432,
+            "dbname": "visioninspect",
+            "user": "postgres",
+            "password": "",
+            "sslmode": "prefer",
+            "connect_timeout": 10,
+        },
     }
 
     def __init__(self, config_path: Optional[Path] = None):

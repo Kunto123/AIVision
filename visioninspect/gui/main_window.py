@@ -74,7 +74,10 @@ class MainWindow(QMainWindow):
 
         # Database (shared instance for history, counters, corrections, users)
         from visioninspect.storage.db import Database
+        from visioninspect.storage.postgres_db import PostgresDB
         self._db = Database(data_dir / "database.db")
+        # PostgreSQL connection (optional — enabled via config)
+        self._pg = PostgresDB(self._config.get_all())
 
         # Authentication state
         self._current_user: Optional[dict] = None
@@ -134,6 +137,12 @@ class MainWindow(QMainWindow):
         self._last_part_ready = False
         self._pc_active_for_overlay = False
         self._last_gate_roi: Optional[dict] = None
+        # Part check score untuk push ke PG
+        self._last_part_check_score = 1.0
+        # Worst score terakhir untuk NG tick
+        self._last_worst_score = 0.0
+        # Part name untuk push ke PG (di-set saat ganti template)
+        self._active_partname = ""
 
         self._setup_window()
         self._setup_tabs()
@@ -186,7 +195,8 @@ class MainWindow(QMainWindow):
         self._history_page = HistoryPage(self._tr)
         self._settings_page = SettingsPage(self._tr, self._config)
         self._diagnostics_page = DiagnosticsPage(self._tr)
-        self._account_page = AccountPage(self._db)
+        auth_db = self._pg if self._pg.is_enabled else self._db
+        self._account_page = AccountPage(auth_db)
 
         self._tabs.addTab(self._run_page, self._tr.tr("nav_run"))
         self._tabs.addTab(self._teach_page, self._tr.tr("nav_teach"))
@@ -260,7 +270,8 @@ class MainWindow(QMainWindow):
 
     def _show_login(self):
         """Show login dialog, apply role visibility after success."""
-        dialog = LoginDialog(self._db, self)
+        auth_db = self._pg if self._pg.is_enabled else self._db
+        dialog = LoginDialog(auth_db, self)
         if dialog.exec():
             self._current_user = dialog.user
             self._user_role = dialog.role
@@ -608,6 +619,18 @@ class MainWindow(QMainWindow):
                 self._run_page.set_waiting_for_part()
                 return
             self._last_part_ready = True
+            # Capture part check score untuk PG push
+            m = pc_result.method
+            if m == 'color' and pc_result.color_score is not None:
+                self._last_part_check_score = pc_result.color_score
+            elif m == 'edge' and pc_result.edge_score is not None:
+                self._last_part_check_score = pc_result.edge_score
+            elif m == 'both':
+                cs = pc_result.color_score if pc_result.color_score is not None else 1.0
+                es = pc_result.edge_score if pc_result.edge_score is not None else 1.0
+                self._last_part_check_score = max(cs, es)
+            else:
+                self._last_part_check_score = 0.0
         elif pc_state == "incomplete":
             # Fail-safe: part check enabled but not fully configured
             # Block QC to prevent false NG 1.000 on empty scene
@@ -655,6 +678,7 @@ class MainWindow(QMainWindow):
                     overall_ng = True
 
             raw_judgement = "NG" if overall_ng else "OK"
+            self._last_worst_score = worst_score
 
             # Always update latency and ROI info (informational)
             avg_latency = total_latency / len(roi_results) if roi_results else 0.0
@@ -720,6 +744,16 @@ class MainWindow(QMainWindow):
                         "image_path": "",
                         "metadata": {"num_rois": len(roi_results)},
                     })
+                    # Push OK ke PostgreSQL (throttled)
+                    _op = (self._current_user.get("display_name")
+                           or self._current_user.get("username", "")
+                          ) if self._current_user else ""
+                    self._pg.push_inspection(
+                        partname=self._active_partname or self._active_program,
+                        mpcheck=_op,
+                        data1=self._last_part_check_score,
+                        data2=worst_score,
+                    )
 
         except Exception as e:
             logger.warning("Inference error: %s", e)
@@ -730,6 +764,16 @@ class MainWindow(QMainWindow):
         """Interval timer tick — NG still ongoing, count another NG."""
         self._inspection_ng += 1
         self._run_page.update_counters(self._inspection_ok, self._inspection_ng)
+        # Push NG ke PostgreSQL (setiap tick = satu inspeksi NG)
+        _op = (self._current_user.get("display_name")
+               or self._current_user.get("username", "")
+              ) if self._current_user else ""
+        self._pg.push_inspection(
+            partname=self._active_partname or self._active_program,
+            mpcheck=_op,
+            data1=self._last_part_check_score,
+            data2=self._last_worst_score,
+        )
         # Timer auto-restarts (QTimer with interval keeps firing)
 
     def _on_cycle_delay_tick(self):
@@ -1210,6 +1254,12 @@ class MainWindow(QMainWindow):
         self._last_part_ready = False
         self._pc_active_for_overlay = False
         self._last_gate_roi = None
+        self._last_part_check_score = 1.0
+        self._last_worst_score = 0.0
+        # Cache part name for PG push
+        tmpl_cfg = self._pm.get_template_config(
+            self._active_program, self._active_template)
+        self._active_partname = tmpl_cfg.get("name", self._active_template)
         self._refresh_template_ui()
         self._load_template_model()
         self._reset_counters()
@@ -1560,18 +1610,21 @@ class MainWindow(QMainWindow):
             self._on_train()
 
     def _refresh_history(self):
-        """Refresh history page from database."""
+        """Refresh history page from database (PostgreSQL first if enabled)."""
         try:
-            entries = self._db.get_history(program=self._active_program, limit=100)
+            if self._pg.is_enabled:
+                entries = self._pg.get_history(limit=100)
+            else:
+                entries = self._db.get_history(program=self._active_program, limit=100)
             self._history_page.clear()
             for e in entries:
                 self._history_page.add_entry(
-                    entry_id=e["id"],
-                    timestamp=e["timestamp"],
-                    program=e["program"],
-                    score=e["score"],
-                    judgement=e["judgement"],
-                    image_path=e.get("image_path", ""),
+                    entry_id=int(e["id"]),
+                    timestamp=str(e.get("timestamp", "")),
+                    program=str(e.get("program", "")),
+                    score=float(e.get("score", 0.0)),
+                    judgement=str(e.get("judgement", "")),
+                    image_path=str(e.get("image_path", "")),
                     corrected=bool(e.get("corrected", 0)),
                 )
             self._history_page.set_status(f"{len(entries)} entries")

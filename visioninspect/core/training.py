@@ -288,7 +288,7 @@ class TrainingPipeline:
         return {
             "threshold": threshold,
             "model_path": str(export_dir),
-            "export_path": str(export_dir),
+            "export_path": str(output_dir),  # parent dir agar save_template_model temukan subfolder
             "int8_path": str(int8_path) if int8_path else "",
             "ok_scores": ok_scores,
             "ng_scores": ng_scores,

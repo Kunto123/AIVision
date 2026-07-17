@@ -12,7 +12,8 @@ numpy>=1.24,<2.0.0
 
 # ===== Anomaly Detection (Anomalib) =====
 anomalib[core]>=1.1,<2.0          # extra [core] wajib — sediakan imgaug, av, open-clip-torch, dll
-scikit-learn>=1.3,<2.0            # transitive dep Anomalib, kadang tidak ke-pull di Python 3.14
+scikit-learn>=1.3,<2.0            # transitive dep Anomalib, kadang tidak ke-pull
+requests>=2.28,<3.0               # transitive dep Anomalib/HuggingFace
 torch>=2.1,<3.0
 torchvision>=0.16,<1.0
 python-dotenv                      # wajib, anomalib eager-import semua model backend

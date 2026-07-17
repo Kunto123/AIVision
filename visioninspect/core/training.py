@@ -216,13 +216,19 @@ class TrainingPipeline:
 
         ov_export_ok = False
         try:
-            from anomalib.deploy import ExportType
-            export_path = engine.export(
-                model=model,
-                export_type=ExportType.OPENVINO,
-                export_root=str(export_dir),
-            )
-            logger.info("OpenVINO export selesai: %s", export_dir)
+            import torch
+            import openvino as ov
+
+            # Bypass Anomalib engine.export() — langsung torch → OpenVINO
+            # (engine.export() gagal karena torch.export.export() tidak
+            #  support model PatchCore di PyTorch 2.6+)
+            model.eval()
+            dummy = torch.randn(1, 3, self._config.input_size,
+                                self._config.input_size)
+            ov_model = ov.convert_model(model, example_input=dummy)
+            ov_xml = export_dir / "model.xml"
+            ov.save_model(ov_model, str(ov_xml))
+            logger.info("OpenVINO export selesai (direct): %s", ov_xml)
             ov_export_ok = True
         except Exception as e:
             logger.warning("OpenVINO export gagal: %s", e)
@@ -282,6 +288,7 @@ class TrainingPipeline:
         return {
             "threshold": threshold,
             "model_path": str(export_dir),
+            "export_path": str(export_dir),
             "int8_path": str(int8_path) if int8_path else "",
             "ok_scores": ok_scores,
             "ng_scores": ng_scores,

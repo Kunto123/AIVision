@@ -1583,7 +1583,8 @@ class MainWindow(QMainWindow):
                     "wsl.exe", "-e", "bash", "-c",
                     f"cd '{wsl_proj}' && "
                     f"if ! python3 -m venv --help >/dev/null 2>&1; then echo 'NEED_PYTHON3_VENV'; exit 1; fi && "
-                    f"if [ ! -d .venv ]; then python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt; fi && "
+                    f"if [ ! -f .venv/bin/pip ]; then rm -rf .venv && python3 -m venv .venv; fi && "
+                    f".venv/bin/pip install -q -r requirements.txt && "
                     f".venv/bin/python tools/train_cli.py "
                     f"--program '{prog}' --template '{tmpl}'"
                 ]

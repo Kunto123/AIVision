@@ -8,19 +8,40 @@ REM   tools\prepare_offline_bundle.bat
 setlocal
 set PROJECT_DIR=%~dp0..
 set BUNDLE_DIR=%PROJECT_DIR%\offline_bundle
+set VENV_DIR=%PROJECT_DIR%\.vision
 
 echo === VisionInspect — Prepare Offline Bundle ===
 echo Project    : %PROJECT_DIR%
 echo Bundle dir : %BUNDLE_DIR%
 echo.
 
-REM 1. Buat folder bundle
+REM 1. Setup virtual environment jika belum ada
+if not exist "%VENV_DIR%\Scripts\python.exe" (
+    echo [0/3] Virtual env belum ada, membuat .vision...
+    python --version >nul 2>&1
+    if %ERRORLEVEL% neq 0 (
+        echo ❌ Python tidak ditemukan di PATH. Install Python 3.10+ dulu.
+        pause
+        exit /b 1
+    )
+    python -m venv "%VENV_DIR%"
+    if %ERRORLEVEL% neq 0 (
+        echo ❌ Gagal membuat virtual environment.
+        pause
+        exit /b %ERRORLEVEL%
+    )
+    echo ✅ Virtual environment dibuat
+) else (
+    echo [0/3] Virtual environment sudah ada, skip
+)
+
+REM 2. Buat folder bundle
 if not exist "%BUNDLE_DIR%" mkdir "%BUNDLE_DIR%"
 if not exist "%BUNDLE_DIR%\wheels" mkdir "%BUNDLE_DIR%\wheels"
 
-REM 2. Download semua wheel (termasuk transitive dependencies)
+REM 3. Download semua wheel (termasuk transitive dependencies)
 echo [1/3] Downloading wheels from PyPI...
-"%PROJECT_DIR%\.vision\Scripts\python.exe" -m pip download ^
+"%VENV_DIR%\Scripts\python.exe" -m pip download ^
     -r "%PROJECT_DIR%\requirements.txt" ^
     -d "%BUNDLE_DIR%\wheels"
 if %ERRORLEVEL% neq 0 (
@@ -31,7 +52,7 @@ echo ✅ Wheels selesai
 
 REM 3. Download backbone weights via timm (HuggingFace cache)
 echo [2/3] Downloading backbone weights (timm/HuggingFace)...
-"%PROJECT_DIR%\.vision\Scripts\python.exe" "%PROJECT_DIR%\tools\bundling_weights.py" ^
+"%VENV_DIR%\Scripts\python.exe" "%PROJECT_DIR%\tools\bundling_weights.py" ^
     --bundle "%BUNDLE_DIR%"
 if %ERRORLEVEL% neq 0 (
     echo ❌ Weight download gagal

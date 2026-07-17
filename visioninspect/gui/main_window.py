@@ -1582,6 +1582,7 @@ class MainWindow(QMainWindow):
                 cmd = [
                     "wsl.exe", "-e", "bash", "-c",
                     f"cd '{wsl_proj}' && "
+                    f"if [ ! -d .venv ]; then python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt; fi && "
                     f".venv/bin/python tools/train_cli.py "
                     f"--program '{prog}' --template '{tmpl}'"
                 ]

@@ -1582,24 +1582,32 @@ class MainWindow(QMainWindow):
                 cmd = [
                     "wsl.exe", "-e", "bash", "-c",
                     f"cd '{wsl_proj}' && "
+                    f"if ! python3 -m venv --help >/dev/null 2>&1; then echo 'NEED_PYTHON3_VENV'; exit 1; fi && "
                     f"if [ ! -d .venv ]; then python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt; fi && "
                     f".venv/bin/python tools/train_cli.py "
                     f"--program '{prog}' --template '{tmpl}'"
                 ]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-                # Log output for debugging
-                for line in result.stdout.splitlines():
-                    logger.info("[WSL] %s", line)
-                if result.stderr:
-                    for line in result.stderr.splitlines():
-                        logger.warning("[WSL] %s", line)
+                out = result.stdout + result.stderr
 
                 if result.returncode == 0:
                     logger.info("WSL training selesai")
-                    # Refresh model di main thread via QTimer
                     QTimer.singleShot(0, self._on_wsl_train_done)
+                elif "NEED_PYTHON3_VENV" in out:
+                    QTimer.singleShot(0, lambda: self._on_training_error(
+                        "WSL butuh python3-venv.\n\n"
+                        "Jalankan di WSL:\n"
+                        "  sudo apt install python3-venv\n\n"
+                        "Lalu coba TRAIN lagi."))
+                elif "ensurepip" in out or "python3-venv" in out:
+                    QTimer.singleShot(0, lambda: self._on_training_error(
+                        "WSL butuh python3-venv.\n\n"
+                        "Jalankan di WSL:\n"
+                        "  sudo apt install python3-venv\n\n"
+                        "Lalu coba TRAIN lagi."))
                 else:
-                    err = result.stderr.strip() or f"exit code {result.returncode}"
+                    err = (result.stderr.strip()[:200]
+                           or f"exit code {result.returncode}")
                     QTimer.singleShot(0, lambda: self._on_training_error(
                         f"WSL training gagal: {err}"))
             except subprocess.TimeoutExpired:

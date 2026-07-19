@@ -170,10 +170,15 @@ class PostgresDB:
 
                 if fetch:
                     rows = cur.fetchall()
+                    conn.commit()
                     return [dict(r) for r in rows]
 
                 if fetch_one:
                     row = cur.fetchone()
+                    # WAJIB commit: INSERT ... RETURNING id memakai fetch_one
+                    # (push_inspection, add_user). Tanpa ini baris di-rollback
+                    # saat koneksi ditutup (autocommit=False) → DB tetap kosong.
+                    conn.commit()
                     return dict(row) if row else None
 
                 conn.commit()
@@ -190,6 +195,76 @@ class PostgresDB:
                     conn.close()
                 except Exception:
                     pass
+
+    # ── Readiness ────────────────────────────────────────────────────
+
+    def ensure_ready(self) -> bool:
+        """Pastikan DB siap pakai setelah terhubung.
+
+        Verifikasi (dan buat bila belum ada) tabel yang dibutuhkan, lalu seed
+        admin default bila tabel user kosong. Dipanggil setelah koneksi
+        berhasil (startup & simpan settings) agar kegagalan push/login tidak
+        terjadi diam-diam. Returns True bila DB siap.
+        """
+        if not self._enabled:
+            return False
+        try:
+            # 1) Buat tabel bila belum ada (IF NOT EXISTS = no-op bila sudah ada,
+            #    jadi skema produksi yang sudah ada tidak diubah).
+            self._execute("""
+                CREATE TABLE IF NOT EXISTS qc_user_accounts (
+                    id BIGSERIAL PRIMARY KEY,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'operator',
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ,
+                    updated_at TIMESTAMPTZ,
+                    last_login_at TIMESTAMPTZ,
+                    rfid_uid_hash TEXT,
+                    rfid_uid_last4 TEXT,
+                    rfid_bound_at TIMESTAMPTZ
+                )""")
+            self._execute("""
+                CREATE TABLE IF NOT EXISTS qc_inspection_push (
+                    id BIGSERIAL PRIMARY KEY,
+                    partname TEXT,
+                    datecheckmc TIMESTAMPTZ,
+                    mpcheck TEXT,
+                    data1 DOUBLE PRECISION,
+                    data2 DOUBLE PRECISION,
+                    line TEXT
+                )""")
+
+            # 2) Verifikasi tabel benar-benar ada
+            missing = []
+            for t in ("qc_user_accounts", "qc_inspection_push"):
+                row = self._execute("SELECT to_regclass(%s) AS reg", (t,),
+                                    fetch_one=True)
+                if not row or not row.get("reg"):
+                    missing.append(t)
+            if missing:
+                logger.error("PostgreSQL BELUM siap — tabel hilang: %s", missing)
+                return False
+
+            # 3) Seed admin default bila belum ada user (agar selalu bisa login)
+            cnt = self._execute("SELECT COUNT(*) AS c FROM qc_user_accounts",
+                                fetch_one=True)
+            if cnt and int(cnt.get("c", 0)) == 0:
+                now = _now()
+                self._execute(
+                    """INSERT INTO qc_user_accounts
+                       (username, password_hash, role, is_active, created_at, updated_at)
+                       VALUES (%s, %s, 'admin', TRUE, %s, %s)""",
+                    ("admin", _hash_password("admin"), now, now))
+                logger.info("Seed admin default (admin/admin) ke qc_user_accounts")
+
+            logger.info("PostgreSQL SIAP: tabel qc_user_accounts & "
+                        "qc_inspection_push OK")
+            return True
+        except Exception as e:
+            logger.error("PostgreSQL ensure_ready gagal: %s", e)
+            return False
 
     # ── Authentication ──────────────────────────────────────────────
 

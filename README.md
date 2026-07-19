@@ -2,6 +2,35 @@
 
 **VisionInspect** adalah aplikasi desktop untuk inspeksi visual industri berbasis AI yang berjalan **100% lokal di satu PC tanpa GPU**. Menggunakan **Anomalib** (PatchCore/EfficientAd) sebagai fondasi model dan **OpenVINO** untuk inferensi CPU real-time, dengan GUI PySide6 yang responsif.
 
+## Quick Start (PC Baru — dengan internet)
+
+```batch
+:: 1. Clone project
+git clone <repo-url> VisionInspect
+cd VisionInspect
+
+:: 2. Setup otomatis (buat venv + install semua dependencies)
+setup.bat
+
+:: 3. Download pretrained weights untuk backbone model
+.vision\Scripts\python.exe tools\bundling_weights.py
+
+:: 4. Jalankan aplikasi
+run.bat
+```
+
+> ⚠️ **PENTING**: Jangan gunakan `py` launcher! Selalu gunakan `.vision\Scripts\python.exe` atau aktivasi venv dulu:
+> ```batch
+> .vision\Scripts\activate
+> python tools\bundling_weights.py
+> ```
+
+### Kalau Tidak Punya Internet (Offline Deployment)
+
+Lihat [Offline Deployment](#offline-deployment) untuk panduan lengkap.
+
+---
+
 ## Fitur Utama
 
 - 🔍 **Teaching few-shot**: Cukup 10–30 gambar OK untuk membuat model inspeksi
@@ -26,14 +55,18 @@
 
 ## Instalasi Cepat
 
+Lihat [Quick Start](#quick-start-pc-baru--dengan-internet) di atas untuk langkah cepat.
+
+Atau manual:
+
 ```bash
 # 1. Clone atau extract project
-cd VisionInspector
+cd VisionInspect
 
 # 2. Buat virtual environment
 python -m venv .vision
-source .vision/bin/activate  # Linux/WSL
-# .vision\Scripts\activate   # Windows
+# Windows: .vision\Scripts\activate
+# Linux/WSL: source .vision/bin/activate
 
 # 3. Install dependencies
 pip install -r requirements.txt
@@ -66,7 +99,7 @@ tools/prepare_offline_bundle.bat    # Windows
 
 ```bash
 # Di edge PC, dari folder hasil bundle:
-install_offline\install.bat
+offline_bundle\install.bat
 
 # Atau manual:
 python -m venv .vision

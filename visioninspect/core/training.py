@@ -101,6 +101,26 @@ class TrainingPipeline:
         # Try Anomalib import
         try:
             import torch  # noqa: F401 — check torch is loadable first
+
+            # ── Patch create_versioned_dir SEBELUM Engine di-import ──
+            # Engine.fit() → _setup_workspace(versioned_dir=True) →
+            # create_versioned_dir() → symlink_to() → WinError 1314 di Windows.
+            # Karena engine.py lakukan `from anomalib.utils.path import create_versioned_dir`
+            # di module level, kita harus patch di source module SEBELUM engine di-import.
+            import anomalib.utils.path as _anom_path
+
+            def _safe_versioned_dir(root_dir):
+                """Buat folder 'latest' biasa, tanpa symlink (anti-WinError 1314)."""
+                root_dir = Path(root_dir).resolve()
+                root_dir.mkdir(parents=True, exist_ok=True)
+                latest = root_dir / "latest"
+                latest.mkdir(parents=True, exist_ok=True)
+                return latest
+
+            _anom_path.create_versioned_dir = _safe_versioned_dir
+
+            # Sekarang import Engine — dia akan mengambil create_versioned_dir
+            # yang sudah di-patch dari namespace anomalib.utils.path
             from anomalib.data import Folder
             from anomalib.models import Patchcore, EfficientAd
             from anomalib.engine import Engine
@@ -163,7 +183,8 @@ class TrainingPipeline:
 
         self._report(20, "Memulai training...")
 
-        # Engine — default_root_dir di temp untuk hindari symlink issue di FAT32/exFAT
+        # Engine — default_root_dir di temp, matikan checkpointing versi
+        # (Lightning bikin symlink v0→latest yg error di Windows tanpa privilege)
         import tempfile as _tf
         _train_work_dir = _tf.mkdtemp(prefix="visioninspect_")
         engine = Engine(
@@ -174,6 +195,8 @@ class TrainingPipeline:
             devices=1,
             max_epochs=1,  # PatchCore is one-shot, EfficientAd needs epochs
             default_root_dir=_train_work_dir,
+            #enable_checkpointing=False,  # cegah symlink v0→latest (WinError 1314)
+            logger=False,              # TensorBoard logger jg bikin symlink yg sama
         )
 
         # Fit
@@ -226,6 +249,9 @@ class TrainingPipeline:
             dummy = torch.randn(1, 3, self._config.input_size,
                                 self._config.input_size)
             ov_model = ov.convert_model(model, example_input=dummy)
+            # Pin input ke static [1,3,H,W] — convert_model menghasilkan
+            # shape dinamis (?,3,?,?) yang bikin .shape throw di load time.
+            ov_model.reshape([1, 3, self._config.input_size, self._config.input_size])
             ov_xml = export_dir / "model.xml"
             ov.save_model(ov_model, str(ov_xml))
             logger.info("OpenVINO export selesai (direct): %s", ov_xml)
@@ -267,6 +293,38 @@ class TrainingPipeline:
             except Exception as e:
                 logger.warning("INT8 quantization failed: %s", e)
 
+        # ── Kalibrasi normalisasi skor ──────────────────────────────────────
+        # Skor PatchCore mentah tidak berada di [0,1] (mis. OK ~21). Hitung
+        # score_ref (titik pisah OK vs NG) dari model OpenVINO, simpan ke
+        # norm.json di samping model.xml, dan normalisasi skor histogram
+        # (score_ref → 0.5) agar sebanding dgn threshold saat inferensi.
+        score_ref = None
+        if ov_export_ok and (export_dir / "model.xml").exists():
+            self._report(92, "Kalibrasi skor...")
+            try:
+                ok_raw = self._score_images_openvino(export_dir / "model.xml", ok_images)
+                ng_raw = (self._score_images_openvino(export_dir / "model.xml", ng_images)
+                          if ng_images else [])
+                score_ref = self._compute_score_ref(ok_raw, ng_raw)
+                norm_payload = {"score_ref": score_ref,
+                                "input_size": self._config.input_size}
+                # norm.json ikut tercopy ke template bersama folder 'openvino'
+                with open(export_dir / "norm.json", "w") as f:
+                    json.dump(norm_payload, f, indent=2)
+                if int8_path:
+                    try:
+                        with open(Path(int8_path).parent / "norm.json", "w") as f:
+                            json.dump(norm_payload, f, indent=2)
+                    except Exception:
+                        pass
+                # Normalisasi skor untuk histogram (0.5 = ambang)
+                ok_scores = [self._normalize_score(s, score_ref) for s in ok_raw]
+                ng_scores = [self._normalize_score(s, score_ref) for s in ng_raw]
+                logger.info("Kalibrasi skor: score_ref=%.4f (OK n=%d, NG n=%d)",
+                            score_ref, len(ok_raw), len(ng_raw))
+            except Exception as e:
+                logger.warning("Kalibrasi skor gagal: %s", e)
+
         # Save metadata
         metadata = {
             "algorithm": self._config.algorithm,
@@ -274,6 +332,7 @@ class TrainingPipeline:
             "input_size": self._config.input_size,
             "threshold": threshold,
             "threshold_mode": self._config.threshold_mode,
+            "score_ref": score_ref,
             "num_ok": len(ok_images),
             "num_ng": len(ng_images),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -287,6 +346,7 @@ class TrainingPipeline:
 
         return {
             "threshold": threshold,
+            "score_ref": score_ref,
             "model_path": str(export_dir),
             "export_path": str(output_dir),  # parent dir agar save_template_model temukan subfolder
             "int8_path": str(int8_path) if int8_path else "",
@@ -294,6 +354,77 @@ class TrainingPipeline:
             "ng_scores": ng_scores,
             "metadata": metadata,
         }
+
+    # ---- Score Normalization / Calibration ----
+
+    @staticmethod
+    def _normalize_score(raw: float, score_ref: Optional[float]) -> float:
+        """Map skor mentah → [0,1] dgn score_ref sbg titik tengah (0.5)."""
+        if not score_ref or score_ref <= 0:
+            return max(0.0, min(1.0, float(raw)))
+        return max(0.0, min(1.0, 0.5 * float(raw) / score_ref))
+
+    def _score_images_openvino(self, xml_path: Path, image_paths) -> list:
+        """Jalankan model OpenVINO pada tiap gambar → ambil pred_score mentah."""
+        import cv2
+        import numpy as np
+        import openvino as ov
+
+        core = ov.Core()
+        cm = core.compile_model(core.read_model(str(xml_path)), "CPU")
+        ps_port = None
+        for port in cm.outputs:
+            try:
+                if "pred_score" in port.get_names():
+                    ps_port = port
+                    break
+            except Exception:
+                pass
+        size = self._config.input_size
+        scores = []
+        for p in image_paths:
+            img = cv2.imread(str(p))
+            if img is None:
+                continue
+            img = cv2.resize(img, (size, size))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            t = (img.astype(np.float32) / 255.0).transpose(2, 0, 1)[None]
+            res = cm({0: t})
+            if ps_port is not None:
+                raw = float(np.asarray(res[ps_port]).reshape(-1)[0])
+            else:
+                # fallback: cari output 1D, atau max output pertama
+                raw = None
+                for val in res.values():
+                    arr = np.asarray(val)
+                    if arr.ndim <= 1:
+                        raw = float(arr.reshape(-1)[0])
+                        break
+                if raw is None:
+                    raw = float(np.max(np.asarray(list(res.values())[0])))
+            scores.append(raw)
+        return scores
+
+    @staticmethod
+    def _compute_score_ref(ok_raw, ng_raw) -> float:
+        """Titik pisah OK vs NG (skor mentah); dipetakan ke normalized 0.5.
+
+        Dgn NG: titik tengah antara ekor atas OK & ekor bawah NG.
+        Tanpa NG: sedikit di atas sebaran OK (mean + 3σ).
+        """
+        import numpy as np
+        ok = np.asarray([s for s in ok_raw if np.isfinite(s)], dtype=float)
+        ng = np.asarray([s for s in ng_raw if np.isfinite(s)], dtype=float)
+        if ok.size == 0:
+            return float(ng.mean()) if ng.size else 1.0
+        if ng.size:
+            hi_ok = float(np.percentile(ok, 95))
+            lo_ng = float(np.percentile(ng, 5))
+            ref = ((hi_ok + lo_ng) / 2.0 if lo_ng > hi_ok
+                   else float(ok.mean() + 3.0 * (ok.std() + 1e-6)))
+        else:
+            ref = float(ok.mean() + 3.0 * (ok.std() + 1e-6))
+        return max(ref, 1e-6)
 
     # ---- Score Collection for Histogram ----
 
@@ -307,6 +438,7 @@ class TrainingPipeline:
         ng_scores = []
 
         try:
+            import cv2
             import torch
             model.eval()
 
@@ -361,15 +493,11 @@ class TrainingPipeline:
         if self._config.threshold_mode == "manual":
             return self._config.manual_threshold
 
-        # Adaptive: use statistics from OK data + margin
-        try:
-            from anomalib.utils.metrics import F1AdaptiveThreshold
-            # Try F1-adaptive if NG data available
-            f1_thresh = F1AdaptiveThreshold(default_value=0.5)
-            # This needs predictions - simplified for now
-            return 0.5
-        except ImportError:
-            return 0.5
+        # Adaptive calibration belum diimplementasikan penuh — pakai default
+        # netral 0.5. Threshold final umumnya di-tuning manual lewat slider,
+        # yang kini tersimpan permanen ke config template (lihat
+        # MainWindow._on_threshold_released).
+        return 0.5
 
     # ---- INT8 Quantization ----
 
@@ -379,7 +507,7 @@ class TrainingPipeline:
         Requires representative dataset.
         """
         try:
-            import nncf
+            import nncf  # type: ignore[import-not-found]  # dependency opsional (INT8)
             import openvino as ov
 
             core = ov.Core()

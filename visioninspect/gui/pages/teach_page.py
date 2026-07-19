@@ -157,11 +157,15 @@ class TeachPage(QWidget):
 
         left_layout.addLayout(import_row)
 
-        # ── Preview area: 3 columns — QC Region | Daftar ROI | Gate Part ──
-        preview_row = QHBoxLayout()
-        preview_row.setSpacing(8)
+        # ── Preview area: QC + Gate (top row) | Daftar ROI (bottom, full width) ──
+        preview_outer = QVBoxLayout()
+        preview_outer.setSpacing(8)
 
-        # Col 1: QC Region
+        # Top row: QC Region (left) | Gate Part 1 (right)
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+
+        # QC Region
         qc_box = QVBoxLayout()
         qc_box.setSpacing(2)
         qc_label = QLabel("🔍 QC Region")
@@ -170,20 +174,9 @@ class TeachPage(QWidget):
         self._roi_editor = ROIEditor()
         self._roi_editor.setMinimumSize(240, 200)
         qc_box.addWidget(self._roi_editor, 1)
-        preview_row.addLayout(qc_box, 3)
+        top_row.addLayout(qc_box, 1)
 
-        # Col 2: Daftar ROI
-        rp_box = QVBoxLayout()
-        rp_box.setSpacing(2)
-        rp_label = QLabel("📍 Daftar ROI")
-        rp_label.setObjectName("secondaryText")
-        rp_box.addWidget(rp_label)
-        self._roi_panel = ROIListPanel()
-        self._roi_panel.setMinimumWidth(140)
-        rp_box.addWidget(self._roi_panel, 1)
-        preview_row.addLayout(rp_box, 1)
-
-        # Col 3: Gate Part
+        # Gate Part 1
         gate_box = QVBoxLayout()
         gate_box.setSpacing(2)
         gate_label = QLabel("🧩 Gate Part 1")
@@ -195,13 +188,22 @@ class TeachPage(QWidget):
         self._gate_roi_editor.setToolTip(
             "Gambar 1 kotak di area yang harus terisi part")
         gate_box.addWidget(self._gate_roi_editor, 1)
-        gate_hint = QLabel("🎯 Klik & tarik (maks 1)")
-        gate_hint.setObjectName("secondaryText")
-        gate_hint.setAlignment(Qt.AlignCenter)
-        gate_box.addWidget(gate_hint)
-        preview_row.addLayout(gate_box, 2)
+        top_row.addLayout(gate_box, 1)
 
-        left_layout.addLayout(preview_row, 1)
+        preview_outer.addLayout(top_row, 3)
+
+        # Bottom row: Daftar ROI (full width)
+        rp_box = QVBoxLayout()
+        rp_box.setSpacing(2)
+        rp_label = QLabel("📍 Daftar ROI")
+        rp_label.setObjectName("secondaryText")
+        rp_box.addWidget(rp_label)
+        self._roi_panel = ROIListPanel()
+        self._roi_panel.setMinimumWidth(140)
+        rp_box.addWidget(self._roi_panel, 1)
+        preview_outer.addLayout(rp_box, 2)
+
+        left_layout.addLayout(preview_outer, 1)
 
         # Gallery
         gallery_layout = QHBoxLayout()
@@ -563,15 +565,32 @@ class TeachPage(QWidget):
     # ---- Part Check ----
 
     def set_part_check_config(self, cfg: dict):
-        self._pc_enabled_cb.setChecked(cfg.get("enabled", False))
-        m = cfg.get("method", "both")
-        idx = self._pc_method_combo.findData(m)
-        if idx >= 0:
-            self._pc_method_combo.setCurrentIndex(idx)
-        self._pc_color_th_spin.setValue(cfg.get("color_threshold", 0.35))
-        self._pc_edge_th_spin.setValue(cfg.get("edge_threshold", 0.5))
-        self._pc_canny_low_spin.setValue(cfg.get("canny_low", 50))
-        self._pc_canny_high_spin.setValue(cfg.get("canny_high", 150))
+        # Blokir sinyal selama load programatik. Tanpa ini, setChecked/setCurrentIndex
+        # memicu slot penyimpan config (di main_window) yang membaca nilai spinbox yang
+        # BELUM di-load → menimpa config di disk dgn default → setting kereset saat rerun.
+        _widgets = [
+            self._pc_enabled_cb, self._pc_method_combo,
+            self._pc_color_th_spin, self._pc_edge_th_spin,
+            self._pc_canny_low_spin, self._pc_canny_high_spin,
+        ]
+        for _w in _widgets:
+            _w.blockSignals(True)
+        try:
+            self._pc_enabled_cb.setChecked(cfg.get("enabled", False))
+            m = cfg.get("method", "both")
+            idx = self._pc_method_combo.findData(m)
+            if idx >= 0:
+                self._pc_method_combo.setCurrentIndex(idx)
+            self._pc_color_th_spin.setValue(cfg.get("color_threshold", 0.35))
+            self._pc_edge_th_spin.setValue(cfg.get("edge_threshold", 0.5))
+            self._pc_canny_low_spin.setValue(cfg.get("canny_low", 50))
+            self._pc_canny_high_spin.setValue(cfg.get("canny_high", 150))
+        finally:
+            for _w in _widgets:
+                _w.blockSignals(False)
+        # Sinyal diblokir di atas, jadi update visibilitas (biasanya dipicu
+        # currentIndexChanged combo) dipanggil manual di sini.
+        self._update_pc_field_visibility()
 
     def set_gate_roi(self, rois: list):
         objs = [ROIData.from_dict(r) for r in rois] if rois else []

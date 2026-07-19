@@ -5,7 +5,7 @@ Event filter untuk keyboard wedge RFID reader.
 """
 
 from PySide6.QtCore import Qt, QTimer, QEvent
-from PySide6.QtGui import QKeyEvent, QPixmap
+from PySide6.QtGui import QKeyEvent, QPixmap, QGuiApplication
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -38,30 +38,51 @@ class LoginDialog(QDialog):
         self._rfid_timer.timeout.connect(self._flush_rfid_buffer)
 
         self.setWindowTitle("VisionInspect — Login")
-        self.setFixedSize(400, 430)
         self.setModal(True)
         self.setWindowFlags(
             self.windowFlags() & ~Qt.WindowContextHelpButtonHint
             | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        # Full screen: tutupi seluruh layar agar view aplikasi tidak
+        # terlihat/dipakai sebelum login berhasil.
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            self.setGeometry(screen.geometry())
+        self.setStyleSheet("QDialog { background: #0A0F1A; }")
 
         self._setup_ui()
         self.installEventFilter(self)
 
+    def showEvent(self, event):
+        """Pastikan tampil full screen saat dialog dibuka."""
+        super().showEvent(event)
+        self.showFullScreen()
+
     def _setup_ui(self):
-        # Outer container with shadow
-        outer = QFrame(self)
+        # Halaman full-screen: card login di-tengah-kan via layout + stretch
+        page = QVBoxLayout(self)
+        page.setContentsMargins(0, 0, 0, 0)
+        page.addStretch(1)
+        center_row = QHBoxLayout()
+        center_row.addStretch(1)
+
+        # Outer container (card) with shadow — ukuran tetap
+        outer = QFrame()
         outer.setObjectName("cardPanel")
         outer.setStyleSheet("""
             #cardPanel { background: #0F1A2E; border: 1px solid #233A57;
                          border-radius: 12px; }
         """)
-        outer.setGeometry(20, 20, 360, 390)
+        outer.setFixedSize(400, 430)
         shadow = QGraphicsDropShadowEffect()
         shadow.setBlurRadius(30)
         shadow.setColor(Qt.black)
         shadow.setOffset(0, 4)
         outer.setGraphicsEffect(shadow)
+
+        center_row.addWidget(outer)
+        center_row.addStretch(1)
+        page.addLayout(center_row)
+        page.addStretch(1)
 
         layout = QVBoxLayout(outer)
         layout.setContentsMargins(28, 20, 28, 20)
@@ -178,7 +199,19 @@ class LoginDialog(QDialog):
             self._user = user
             self.accept()
         else:
-            QMessageBox.warning(self, "Login Gagal", "Username atau password salah!")
+            # Bedakan koneksi DB gagal vs kredensial salah. Backend PostgreSQL
+            # mengembalikan None untuk KEDUANYA, sehingga koneksi gagal dulu
+            # tampil sbg "password salah" yang membingungkan.
+            msg = "Username atau password salah!"
+            connect = getattr(self._db, "_connect", None)
+            if callable(connect):
+                try:
+                    conn = connect()
+                    conn.close()
+                except Exception:
+                    msg = ("Koneksi database (PostgreSQL) gagal.\n"
+                           "Periksa pengaturan di tab Settings.")
+            QMessageBox.warning(self, "Login Gagal", msg)
             self._password_input.clear()
             self._password_input.setFocus()
 

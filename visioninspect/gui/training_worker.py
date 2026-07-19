@@ -215,6 +215,18 @@ class TrainingWorker(QObject):
             output_dir=output_dir,
         )
 
+        # Kalibrasi normalisasi skor PER-ROI (skor PatchCore mentah beda skala
+        # tiap ROI; 1 ref global tak cukup untuk multi-ROI). Tulis norm.json ke
+        # output_dir SEBELUM disalin ke template oleh save_template_model.
+        try:
+            norm_ok, norm_ng = self._calibrate_per_roi(
+                program, template_id, tmpl_cfg, output_dir)
+            if norm_ok or norm_ng:
+                result["ok_scores"] = norm_ok
+                result["ng_scores"] = norm_ng
+        except Exception as e:
+            logger.warning("Kalibrasi per-ROI gagal: %s", e)
+
         # Save model to template
         self.progress.emit(95, "Menyimpan model ke template...")
         version = self._pm.save_template_model(program, template_id, result)
@@ -224,6 +236,74 @@ class TrainingWorker(QObject):
 
         logger.info("Training selesai: template=%s, version=%d", template_id, version)
         self.finished.emit(result)
+
+    def _calibrate_per_roi(self, program, template_id, tmpl_cfg, output_dir):
+        """Hitung score_ref per ROI & tulis norm.json.
+
+        Skor PatchCore mentah punya skala berbeda tiap ROI, jadi 1 ref global
+        salah untuk multi-ROI (bisa lewatkan semua NG). Untuk tiap ROI: crop
+        gambar OK/NG asli ke ROI itu → skor via model OpenVINO → hitung ref.
+        Returns (norm_ok_scores, norm_ng_scores) untuk histogram (dinormalisasi
+        per ROI, 0.5 = ambang), atau ([], []) bila tak bisa dikalibrasi.
+        """
+        import tempfile
+        import json
+        import shutil
+
+        rois = self._get_enabled_rois(tmpl_cfg)
+        model_xml = output_dir / "openvino" / "model.xml"
+        if not rois or not model_xml.exists() or self._pipeline is None:
+            return [], []
+
+        tmpl_dir = self._pm._get_template_dir(program) / template_id
+        ok_src = tmpl_dir / "images" / "ok"
+        ng_src = tmpl_dir / "images" / "ng"
+        input_size = tmpl_cfg.get("input_size", 256)
+
+        per_roi = {}
+        norm_ok, norm_ng = [], []
+        global_ok, global_ng = [], []
+        for roi in rois:
+            okd = Path(tempfile.mkdtemp(prefix="vi_cal_ok_"))
+            ngd = Path(tempfile.mkdtemp(prefix="vi_cal_ng_"))
+            try:
+                _crop_images_to_rois(ok_src, [roi], okd, input_size)
+                if ng_src.exists():
+                    _crop_images_to_rois(ng_src, [roi], ngd, input_size)
+                ok_imgs = sorted(okd.glob("*.png"))
+                ng_imgs = sorted(ngd.glob("*.png"))
+                ok_raw = self._pipeline._score_images_openvino(model_xml, ok_imgs)
+                ng_raw = (self._pipeline._score_images_openvino(model_xml, ng_imgs)
+                          if ng_imgs else [])
+                if not ok_raw:
+                    continue
+                ref = self._pipeline._compute_score_ref(ok_raw, ng_raw)
+                per_roi[roi.get("uid", "default")] = ref
+                norm_ok += [self._pipeline._normalize_score(s, ref) for s in ok_raw]
+                norm_ng += [self._pipeline._normalize_score(s, ref) for s in ng_raw]
+                global_ok += ok_raw
+                global_ng += ng_raw
+            finally:
+                shutil.rmtree(okd, ignore_errors=True)
+                shutil.rmtree(ngd, ignore_errors=True)
+
+        if not per_roi:
+            return [], []
+
+        global_ref = self._pipeline._compute_score_ref(global_ok, global_ng)
+        payload = {"score_ref": global_ref, "input_size": input_size,
+                   "per_roi": per_roi}
+        for sub in ("openvino", "openvino_int8"):
+            d = output_dir / sub
+            if d.exists():
+                try:
+                    with open(d / "norm.json", "w") as f:
+                        json.dump(payload, f, indent=2)
+                except Exception as e:
+                    logger.warning("Gagal tulis norm.json (%s): %s", sub, e)
+        logger.info("Kalibrasi per-ROI: %s (global_ref=%.3f)",
+                    {k: round(v, 3) for k, v in per_roi.items()}, global_ref)
+        return norm_ok, norm_ng
 
     def _on_progress(self, percent: int, message: str):
         """Forward progress callback from pipeline."""

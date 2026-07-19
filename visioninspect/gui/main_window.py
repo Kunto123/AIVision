@@ -9,6 +9,7 @@ import sys
 import time
 import json
 import uuid
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -78,8 +79,13 @@ class MainWindow(QMainWindow):
         from visioninspect.storage.db import Database
         from visioninspect.storage.postgres_db import PostgresDB
         self._db = Database(data_dir / "database.db")
-        # PostgreSQL connection (optional — enabled via config)
-        self._pg = PostgresDB(self._config.get_all())
+        # PostgreSQL connection (optional — enabled via config).
+        # WAJIB sub-dict "postgresql" (PostgresDB baca config["enabled"]/["host"]/dst);
+        # get_all() meneruskan config penuh -> "enabled" tak ketemu -> keliru nonaktif.
+        self._pg = PostgresDB(self._config.get("postgresql", {}))
+        if self._pg.is_enabled:
+            # Pastikan DB siap pakai (tabel ada, admin ter-seed) begitu terhubung
+            self._pg.ensure_ready()
 
         # Authentication state
         self._current_user: Optional[dict] = None
@@ -103,6 +109,7 @@ class MainWindow(QMainWindow):
         self._inference_engine = InferenceEngine(input_size=256)
         self._current_roi: Optional[tuple] = None
         self._current_all_rois: list = []
+        self._current_all_roi_uids: list = []
         self._heatmap_enabled = False
         self._last_frame: Optional[object] = None
         self._last_heatmap: Optional[object] = None
@@ -169,8 +176,9 @@ class MainWindow(QMainWindow):
         # Initial history load
         QTimer.singleShot(1000, self._refresh_history)
 
-        # Show login dialog (blocks until login or cancel)
-        QTimer.singleShot(100, self._show_login)
+        # Show login dialog segera (full screen, blocks until login/cancel).
+        # Kamera & inferensi baru mulai setelah login (lihat _show_login).
+        QTimer.singleShot(0, self._show_login)
 
         logger.info("MainWindow initialized")
 
@@ -278,6 +286,11 @@ class MainWindow(QMainWindow):
             self._current_user = dialog.user
             self._user_role = dialog.role
             self._apply_role_visibility()
+            # Mulai kamera & inferensi SETELAH login berhasil (view hanya
+            # berjalan setelah user login).
+            if self._camera_worker and not self._camera_worker.is_running:
+                dev = getattr(self, "_pending_camera_device", 0)
+                QTimer.singleShot(300, lambda: self._camera_worker.start_camera(dev))
             self.set_status(
                 f"Selamat datang, {dialog.display_name} ({dialog.role})", 3000)
             logger.info("Login: %s (role=%s)", dialog.username, dialog.role)
@@ -299,6 +312,11 @@ class MainWindow(QMainWindow):
         self._user_role = "operator"
         self._logout_btn.setVisible(False)
         self._user_label.setText("👤 —")
+
+        # Hentikan kamera & inferensi selama logout — view berhenti berjalan
+        # sampai user login lagi.
+        if self._camera_worker and self._camera_worker.is_running:
+            self._camera_worker.stop_camera()
 
         # Show login dialog again
         self._show_login()
@@ -374,8 +392,11 @@ class MainWindow(QMainWindow):
         self._teach_page.get_roi_panel().roi_delete_requested.connect(self._on_roi_delete)
         self._teach_page.get_roi_panel().roi_toggle_all.connect(self._on_roi_toggle_all)
 
-        # TEACH: Threshold slider → live update inference threshold
+        # TEACH: Threshold slider → live update inference threshold,
+        # lalu simpan permanen ke config template saat slider dilepas
+        # (sliderReleased, bukan tiap tick, agar tidak menulis file terus-menerus)
         self._teach_page.get_threshold_slider().valueChanged.connect(self._on_threshold_slider)
+        self._teach_page.get_threshold_slider().sliderReleased.connect(self._on_threshold_released)
 
         # TEACH: Image deleted from gallery
         self._teach_page.image_deleted.connect(self._on_gallery_image_deleted)
@@ -438,8 +459,9 @@ class MainWindow(QMainWindow):
         self._camera_worker.status_message.connect(self._on_camera_status)
         self._camera_worker.frame_raw.connect(self._on_frame_for_inference)
 
-        device = self._config.get("camera.device_index", 0)
-        QTimer.singleShot(500, lambda: self._camera_worker.start_camera(device))
+        # Kamera TIDAK auto-start di sini — baru dijalankan setelah login
+        # berhasil (lihat _show_login), agar view tidak berjalan sebelum login.
+        self._pending_camera_device = self._config.get("camera.device_index", 0)
 
     def _toggle_camera(self):
         if self._camera_worker:
@@ -662,10 +684,12 @@ class MainWindow(QMainWindow):
             total_latency = 0.0
             roi_results = []
 
-            for roi_rect in self._current_all_rois:
+            for idx, roi_rect in enumerate(self._current_all_rois):
                 roi_dict = {
                     "x": roi_rect[0], "y": roi_rect[1],
                     "width": roi_rect[2], "height": roi_rect[3],
+                    "uid": (self._current_all_roi_uids[idx]
+                            if idx < len(self._current_all_roi_uids) else None),
                 }
                 result = self._inference_engine.infer(frame, roi=roi_dict)
                 roi_results.append({
@@ -684,6 +708,12 @@ class MainWindow(QMainWindow):
 
             raw_judgement = "NG" if overall_ng else "OK"
             self._last_worst_score = worst_score
+
+            # Push SETIAP hasil inferensi ke PostgreSQL (OK & NG).
+            # partname = nama template, mpcheck = nama operator (lihat helper).
+            # Non-blocking (daemon thread) agar koneksi DB tidak membekukan
+            # thread GUI saat frame-rate tinggi.
+            self._push_inspection_async(worst_score)
 
             # Always update latency and ROI info (informational)
             avg_latency = total_latency / len(roi_results) if roi_results else 0.0
@@ -739,7 +769,7 @@ class MainWindow(QMainWindow):
                 self._inference_engine.latency_p95_ms,
             )
 
-            # Save OK to history (throttled)
+            # Simpan gambar + riwayat SQLite di-throttle (mahal) tiap 30 frame OK
             if raw_judgement == "OK":
                 self._inference_save_counter += 1
                 if self._inference_save_counter % 30 == 0:
@@ -762,19 +792,38 @@ class MainWindow(QMainWindow):
                                       'template': self._active_template,
                                       'template_name': self._active_partname},
                     })
-                    # Push OK ke PostgreSQL (throttled)
-                    _op = (self._current_user.get("display_name")
-                           or self._current_user.get("username", "")
-                          ) if self._current_user else ""
-                    self._pg.push_inspection(
-                        partname=self._active_partname or self._active_program,
-                        mpcheck=_op,
-                        data1=self._last_part_check_score,
-                        data2=worst_score,
-                    )
 
         except Exception as e:
             logger.warning("Inference error: %s", e)
+
+    def _push_inspection_async(self, score: float) -> None:
+        """Push satu hasil inferensi ke PostgreSQL tanpa blok thread GUI.
+
+        Mapping kolom qc_inspection_push:
+          partname = nama template (bukan id)
+          mpcheck  = nama akun operator yang login (bukan OK/NG)
+          data1    = part-ready confidence
+          data2    = anomaly score
+
+        push_inspection membuka koneksi baru tiap panggil; menjalankannya
+        langsung di thread GUI (per frame) bisa membekukan UI. Jadi dijalankan
+        fire-and-forget di daemon thread. Aman karena tiap push memakai koneksi
+        sendiri (tanpa shared state).
+        """
+        if not self._pg.is_enabled:
+            return
+        partname = self._active_partname or self._active_program  # nama template
+        operator = ""
+        if self._current_user:
+            operator = (self._current_user.get("display_name")
+                        or self._current_user.get("username", ""))
+        data1 = self._last_part_check_score
+        threading.Thread(
+            target=self._pg.push_inspection,
+            kwargs=dict(partname=partname, mpcheck=operator,
+                        data1=data1, data2=score),
+            daemon=True,
+        ).start()
 
     # ---- Save Inspection Frame (untuk Tuning) ----
 
@@ -826,16 +875,9 @@ class MainWindow(QMainWindow):
         """Interval timer tick — NG still ongoing, count another NG."""
         self._inspection_ng += 1
         self._run_page.update_counters(self._inspection_ok, self._inspection_ng)
-        # Push NG ke PostgreSQL (setiap tick = satu inspeksi NG)
-        _op = (self._current_user.get("display_name")
-               or self._current_user.get("username", "")
-              ) if self._current_user else ""
-        self._pg.push_inspection(
-            partname=self._active_partname or self._active_program,
-            mpcheck=_op,
-            data1=self._last_part_check_score,
-            data2=self._last_worst_score,
-        )
+        # Catatan: push ke PostgreSQL sekarang dilakukan per inferensi di
+        # _on_frame_for_inference (setiap hasil OK & NG), jadi tick ini hanya
+        # menambah counter agar tidak dobel-push.
         # Timer auto-restarts (QTimer with interval keeps firing)
 
     def _on_cycle_delay_tick(self):
@@ -1002,6 +1044,15 @@ class MainWindow(QMainWindow):
                     self._active_template = templates[0]["id"]
                     self._pm.set_active_template(self._active_program, self._active_template)
 
+        # Cache nama template untuk push PostgreSQL (partname). Saat startup
+        # _active_template di-set langsung tanpa lewat _activate_template, jadi
+        # _active_partname harus di-isi di sini — kalau tidak, push memakai
+        # fallback nama program ("Default") alih-alih nama template.
+        if self._active_template:
+            _tc = self._pm.get_template_config(
+                self._active_program, self._active_template)
+            self._active_partname = _tc.get("name", self._active_template)
+
         self._refresh_template_ui()
         self._load_template_model()
         self._program_label.setText(f"Program: {self._active_program}")
@@ -1070,9 +1121,11 @@ class MainWindow(QMainWindow):
             if enabled:
                 self._current_roi = enabled[0].rect()
                 self._current_all_rois = [r.rect() for r in enabled]
+                self._current_all_roi_uids = [r.uid for r in enabled]
             else:
                 self._current_roi = None
                 self._current_all_rois = []
+                self._current_all_roi_uids = []
 
             # Gallery thumbnails
             self._teach_page.clear_galleries()
@@ -1463,9 +1516,11 @@ class MainWindow(QMainWindow):
         if enabled:
             self._current_roi = enabled[0].rect()
             self._current_all_rois = [r.rect() for r in enabled]
+            self._current_all_roi_uids = [r.uid for r in enabled]
         else:
             self._current_roi = None
             self._current_all_rois = []
+            self._current_all_roi_uids = []
         self.set_status(f"{len(rois)} ROI ({len(enabled)} aktif)", 3000)
 
     def _reset_counters(self):
@@ -1510,6 +1565,27 @@ class MainWindow(QMainWindow):
         self._inference_engine.threshold = threshold
         self.set_status(f"Threshold: {threshold:.3f}", 2000)
 
+    def _on_threshold_released(self):
+        """Persist manually-tuned threshold to template config on slider release.
+
+        Tanpa ini, geseran slider hanya mengubah engine live dan hilang saat
+        restart (config hanya di-set saat training). Disimpan on-release agar
+        tidak menulis file tiap tick geseran.
+        """
+        if not self._active_template:
+            return
+        threshold = self._teach_page.get_threshold_slider().value() / 1000.0
+        try:
+            self._pm.update_template_config(
+                self._active_program, self._active_template,
+                {"threshold": threshold})
+            self._inference_engine.threshold = threshold
+            self.set_status(f"Threshold {threshold:.3f} tersimpan", 3000)
+            logger.info("Threshold manual disimpan: %.3f (template=%s)",
+                        threshold, self._active_template)
+        except Exception as e:
+            logger.warning("Gagal simpan threshold: %s", e)
+
     # ---- Training ----
 
     def _on_train(self):
@@ -1552,6 +1628,13 @@ class MainWindow(QMainWindow):
         self._teach_page.get_train_button().setEnabled(False)
         logger.info("Training dimulai: program=%s, template=%s",
                      self._active_program, self._active_template)
+
+        # Lepaskan model yang sedang dimuat agar file-nya (model.bin di-mmap
+        # OpenVINO) tidak terkunci saat ditimpa hasil training baru
+        # (WinError 32). Model di-reload otomatis di _on_training_finished.
+        import gc
+        self._inference_engine.unload_model()
+        gc.collect()
 
         # Emit signal — worker di QThread akan menjalankan training
         self.start_training_signal.emit(
@@ -1959,6 +2042,8 @@ class MainWindow(QMainWindow):
             try:
                 conn = self._pg._connect()
                 conn.close()
+                # Pastikan tabel siap pakai setelah koneksi berhasil
+                self._pg.ensure_ready()
                 self._settings_page.set_pg_status(True, pg_cfg.get("host", ""))
                 logger.info("PostgreSQL terhubung: %s@%s:%d/%s",
                             pg_cfg.get("user"), pg_cfg.get("host"),

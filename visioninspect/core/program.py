@@ -310,13 +310,28 @@ class ProgramManager:
 
         model_dir = (self._get_template_dir(program) / template_id / "model")
 
-        # Clear old model
+        # Clear old model. On Windows the previous model.bin may still be
+        # mmap'd by OpenVINO for a moment (WinError 32); retry with a GC pass
+        # so any lingering handle is released before we delete.
         if model_dir.exists():
-            for child in model_dir.iterdir():
-                if child.is_dir():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
+            import gc
+
+            def _clear() -> None:
+                for child in model_dir.iterdir():
+                    if child.is_dir():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+
+            for attempt in range(4):
+                try:
+                    _clear()
+                    break
+                except PermissionError:
+                    if attempt == 3:
+                        raise
+                    gc.collect()
+                    time.sleep(0.5)
 
         # Copy specific subfolders only (openvino, openvino_int8)
         copied = False

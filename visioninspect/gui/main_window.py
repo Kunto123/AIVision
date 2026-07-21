@@ -1761,8 +1761,16 @@ class MainWindow(QMainWindow):
                         "  sudo apt install python3-venv\n\n"
                         "Lalu coba TRAIN lagi.")
                 else:
-                    err = (result.stderr.strip()[:200]
-                           or f"exit code {result.returncode}")
+                    full_out = out.strip()
+                    # Log lengkap ke file (lihat logs/app.log) untuk diagnosa
+                    # penuh. Untuk pesan di UI, ambil bagian EKOR output, bukan
+                    # awal — traceback/pesan error sebenarnya nyaris selalu di
+                    # baris-baris terakhir sebelum proses exit, sedangkan awal
+                    # output sering cuma notice rutin pip/apt (mis. "versi pip
+                    # baru tersedia") yang menutupi error aslinya kalau dipotong
+                    # dari depan.
+                    logger.error("WSL training gagal (output lengkap):\n%s", full_out)
+                    err = full_out[-600:] if full_out else f"exit code {result.returncode}"
                     self._wsl_train_error_signal.emit(f"WSL training gagal: {err}")
             except subprocess.TimeoutExpired:
                 self._wsl_train_error_signal.emit("WSL training timeout (600s)")

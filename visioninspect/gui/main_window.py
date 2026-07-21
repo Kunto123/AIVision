@@ -66,6 +66,7 @@ class MainWindow(QMainWindow):
     # cara yang benar.
     _wsl_train_done_signal = Signal()
     _wsl_train_error_signal = Signal(str)
+    _wsl_train_progress_signal = Signal(str)
 
     def __init__(self, config: Config, translator: Translator):
         super().__init__()
@@ -369,6 +370,7 @@ class MainWindow(QMainWindow):
         # see _train_via_wsl)
         self._wsl_train_done_signal.connect(self._on_wsl_train_done)
         self._wsl_train_error_signal.connect(self._on_training_error)
+        self._wsl_train_progress_signal.connect(self._on_wsl_train_progress)
 
         # Camera toggle
         self._run_page.get_camera_toggle_button().clicked.connect(self._toggle_camera)
@@ -1706,6 +1708,14 @@ class MainWindow(QMainWindow):
 
     # ---- Training via WSL (fallback saat PyTorch diblokir Windows) ----
 
+    # Batas waktu total pipeline WSL (venv setup + pip install requirements.txt
+    # + download dataset/pretrained-weights EfficientAd + training). 30 menit
+    # — jauh lebih longgar dari 600s sebelumnya, karena semua langkah itu bisa
+    # perlu unduhan besar (torch/anomalib/openvino + imagenette ~1.3GB +
+    # pretrained teacher weights) terutama di venv/percobaan pertama atau
+    # koneksi yang lambat/dibatasi kebijakan jaringan korporat.
+    _WSL_TRAIN_TIMEOUT_SEC = 1800
+
     def _train_via_wsl(self):
         """Launch training in WSL where PyTorch can load, then reload model."""
         import subprocess
@@ -1725,6 +1735,9 @@ class MainWindow(QMainWindow):
         logger.info("Training via WSL: %s %s (path=%s)", prog, tmpl, wsl_proj)
 
         def _run_wsl():
+            proc = None
+            timer = None
+            timed_out = {"flag": False}
             try:
                 cmd = [
                     "wsl.exe", "-e", "bash", "-c",
@@ -1735,33 +1748,61 @@ class MainWindow(QMainWindow):
                     f".venv/bin/python tools/train_cli.py "
                     f"--program '{prog}' --template '{tmpl}'"
                 ]
+                # Popen + baca stdout baris-per-baris (bukan subprocess.run yang
+                # menunggu diam sampai proses selesai total) — supaya tiap baris
+                # output WSL/pip/train_cli bisa langsung ditampilkan sebagai
+                # progress feedback, bukan layar diam sampai akhir.
                 # encoding eksplisit UTF-8 (bukan ikut locale default Windows
-                # yang kadang cp1252) — output WSL/bash selalu UTF-8, dan
-                # tanpa ini decoding bisa crash (UnicodeDecodeError) begitu
-                # ada karakter non-ASCII di output pip/apt. errors="replace"
-                # jaga-jaga kalau tetap ada byte yang tak valid.
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace", timeout=600)
-                out = result.stdout + result.stderr
+                # yang kadang cp1252) — tanpa ini decoding bisa crash begitu
+                # ada karakter non-ASCII di output pip/apt.
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace", bufsize=1)
 
-                if result.returncode == 0:
+                def _kill_on_timeout():
+                    timed_out["flag"] = True
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
+                # Timer terpisah dari loop baca output — sengaja begitu, karena
+                # kalau cuma cek elapsed-time di dalam loop `for line in
+                # proc.stdout`, proses yang diam lama TANPA output (mis. lagi
+                # download file besar tanpa progress bar per-baris) tidak akan
+                # pernah memicu pengecekan itu sampai ada baris baru masuk —
+                # timeout jadi tidak pernah kena walau sudah lama sekali diam.
+                timer = threading.Timer(self._WSL_TRAIN_TIMEOUT_SEC, _kill_on_timeout)
+                timer.daemon = True
+                timer.start()
+
+                lines = []
+                for raw_line in proc.stdout:
+                    line = raw_line.rstrip("\n")
+                    if line:
+                        lines.append(line)
+                        logger.info("[WSL] %s", line)
+                        self._wsl_train_progress_signal.emit(line)
+                returncode = proc.wait()
+                timer.cancel()
+
+                if timed_out["flag"]:
+                    self._wsl_train_error_signal.emit(
+                        f"WSL training timeout ({self._WSL_TRAIN_TIMEOUT_SEC}s)")
+                    return
+
+                out = "\n".join(lines)
+
+                if returncode == 0:
                     logger.info("WSL training selesai")
                     self._wsl_train_done_signal.emit()
-                elif "NEED_PYTHON3_VENV" in out:
-                    self._wsl_train_error_signal.emit(
-                        "WSL butuh python3-venv.\n\n"
-                        "Jalankan di WSL:\n"
-                        "  sudo apt install python3-venv\n\n"
-                        "Lalu coba TRAIN lagi.")
-                elif "ensurepip" in out or "python3-venv" in out:
+                elif "NEED_PYTHON3_VENV" in out or "ensurepip" in out:
                     self._wsl_train_error_signal.emit(
                         "WSL butuh python3-venv.\n\n"
                         "Jalankan di WSL:\n"
                         "  sudo apt install python3-venv\n\n"
                         "Lalu coba TRAIN lagi.")
                 else:
-                    full_out = out.strip()
                     # Log lengkap ke file (lihat logs/app.log) untuk diagnosa
                     # penuh. Untuk pesan di UI, ambil bagian EKOR output, bukan
                     # awal — traceback/pesan error sebenarnya nyaris selalu di
@@ -1769,19 +1810,29 @@ class MainWindow(QMainWindow):
                     # output sering cuma notice rutin pip/apt (mis. "versi pip
                     # baru tersedia") yang menutupi error aslinya kalau dipotong
                     # dari depan.
-                    logger.error("WSL training gagal (output lengkap):\n%s", full_out)
-                    err = full_out[-600:] if full_out else f"exit code {result.returncode}"
+                    logger.error("WSL training gagal (output lengkap):\n%s", out)
+                    err = out[-600:] if out else f"exit code {returncode}"
                     self._wsl_train_error_signal.emit(f"WSL training gagal: {err}")
-            except subprocess.TimeoutExpired:
-                self._wsl_train_error_signal.emit("WSL training timeout (600s)")
             except FileNotFoundError:
                 self._wsl_train_error_signal.emit(
                     "wsl.exe tidak ditemukan. Install WSL dulu.")
             except Exception as e:
                 self._wsl_train_error_signal.emit(str(e))
+            finally:
+                if timer is not None:
+                    timer.cancel()
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
 
         thread = threading.Thread(target=_run_wsl, daemon=True, name="wsl-train")
         thread.start()
+
+    def _on_wsl_train_progress(self, line: str):
+        """Tampilkan baris output WSL terbaru sebagai progress feedback, biar
+        pipeline yang panjang (venv setup / pip install / download dataset /
+        training) tidak kelihatan diam selama itu."""
+        display = line if len(line) <= 120 else line[:117] + "..."
+        self._teach_page.set_training_progress(10, f"🧠 WSL: {display}")
 
     def _on_wsl_train_done(self):
         """WSL training berhasil — reload model + refresh UI."""

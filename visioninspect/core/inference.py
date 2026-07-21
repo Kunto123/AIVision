@@ -255,10 +255,17 @@ class InferenceEngine:
 
     # ---- Inference ----
 
-    def infer(self, frame: npt.NDArray, roi: Optional[dict] = None) -> InferenceResult:
+    def infer(self, frame: npt.NDArray, roi: Optional[dict] = None,
+              track_latency: bool = True) -> InferenceResult:
         """
         Run inference on frame (or ROI-cropped region).
         Returns InferenceResult with score, judgement, heatmap.
+
+        track_latency=False skips updating the shared latency_avg_ms/p95_ms
+        rolling stats (used by the Diagnostics page for live RUN monitoring) —
+        set this when calling infer() outside the live inspection loop (e.g.
+        batch-testing static photos) so those runs don't skew production
+        latency stats.
         """
         start = time.perf_counter()
 
@@ -324,10 +331,11 @@ class InferenceEngine:
                 score = max(0.0, min(1.0, score))
                 judgement = "OK" if score < threshold else "NG"
                 elapsed = (time.perf_counter() - start) * 1000
-                with self._lock:
-                    self._latencies.append(elapsed)
-                    if len(self._latencies) > self._max_latency_samples:
-                        self._latencies.pop(0)
+                if track_latency:
+                    with self._lock:
+                        self._latencies.append(elapsed)
+                        if len(self._latencies) > self._max_latency_samples:
+                            self._latencies.pop(0)
                 return InferenceResult(
                     score=score, judgement=judgement, heatmap=None,
                     latency_ms=elapsed, threshold=threshold, roi_cropped=resized,
@@ -388,10 +396,11 @@ class InferenceEngine:
             elapsed = (time.perf_counter() - start) * 1000
 
             # Track latency
-            with self._lock:
-                self._latencies.append(elapsed)
-                if len(self._latencies) > self._max_latency_samples:
-                    self._latencies.pop(0)
+            if track_latency:
+                with self._lock:
+                    self._latencies.append(elapsed)
+                    if len(self._latencies) > self._max_latency_samples:
+                        self._latencies.pop(0)
 
             return InferenceResult(
                 score=score,

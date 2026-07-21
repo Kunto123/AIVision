@@ -134,6 +134,13 @@ class TeachPage(QWidget):
         self._import_btn = QPushButton("📁 Import")
         self._import_btn.setMinimumHeight(38)
         capture_row.addWidget(self._import_btn)
+
+        self._test_model_btn = QPushButton("🧪 Uji Model")
+        self._test_model_btn.setMinimumHeight(38)
+        self._test_model_btn.setToolTip(
+            "Uji model terhadap batch foto statis dari disk — sanity check "
+            "tanpa kamera live, hasil tidak disimpan ke riwayat inspeksi.")
+        capture_row.addWidget(self._test_model_btn)
         left_layout.addLayout(capture_row)
 
         # Import status — baris dengan progress + cancel
@@ -640,6 +647,7 @@ class TeachPage(QWidget):
             self._import_status_label.hide()
             self._import_progress_bar.hide()
             self._cancel_import_btn.hide()
+        self._test_model_btn.setEnabled(not active)
 
     @Slot()
     def set_import_status(self, current: int, total: int):
@@ -811,6 +819,7 @@ class TeachPage(QWidget):
     def get_capture_ok_button(self): return self._capture_ok_btn
     def get_capture_ng_button(self): return self._capture_ng_btn
     def get_import_button(self): return self._import_btn
+    def get_test_model_button(self): return self._test_model_btn
     def get_train_button(self): return self._train_btn
     def get_threshold_slider(self): return self._threshold_slider
     def get_progress_bar(self): return self._progress_bar

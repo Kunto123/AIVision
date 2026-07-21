@@ -385,6 +385,7 @@ class MainWindow(QMainWindow):
             lambda: self._on_capture("ng"))
         self._teach_page.get_import_button().clicked.connect(self._on_import_images)
         self._teach_page.import_cancelled.connect(self._on_cancel_import)
+        self._teach_page.get_test_model_button().clicked.connect(self._on_test_model)
 
         # TEACH: Train button
         self._teach_page.get_train_button().clicked.connect(self._on_train)
@@ -1393,6 +1394,122 @@ class MainWindow(QMainWindow):
             self.set_status("Import dibatalkan", 3000)
         else:
             self.set_status(f"Import selesai ({total} gambar diproses)", 3000)
+
+    # ---- Test Model (batch foto statis) ----
+
+    def _get_reference_resolution(self):
+        """Dimensi acuan (w, h) untuk cek resolusi foto uji — diambil dari
+        gambar OK asli template (dijamin sama dengan resolusi ROI digambar),
+        fallback ke config kamera kalau tidak ada gambar OK sama sekali."""
+        if self._active_template:
+            ok_images = self._pm.list_template_images(
+                self._active_program, self._active_template, "ok")
+            if ok_images:
+                img = cv2.imread(str(ok_images[0]))
+                if img is not None:
+                    h, w = img.shape[:2]
+                    return (w, h)
+        w = self._config.get("camera.resolution_width", 0)
+        h = self._config.get("camera.resolution_height", 0)
+        return (w, h) if w and h else None
+
+    def _on_test_model(self):
+        """Uji model terhadap batch foto statis dari disk — sanity check
+        read-only. Bypass Part Presence gate/NG-debounce/cycle-delay (semua
+        itu soal kamera live), dan TIDAK ditulis ke inspection_history/
+        counter/PLC — murni untuk admin melihat apakah model bekerja baik."""
+        if not self._inference_engine.is_loaded:
+            self.set_status("Model belum dimuat. Latih atau load model dulu.", 3000)
+            return
+        if not self._current_all_rois:
+            self.set_status("Tidak ada ROI aktif pada template ini.", 3000)
+            return
+
+        from PySide6.QtWidgets import QFileDialog
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Pilih foto untuk diuji", "",
+            "Images (*.png *.jpg *.jpeg *.bmp)")
+        if not files:
+            return
+
+        ref_dims = self._get_reference_resolution()
+
+        results = []
+        unreadable_count = 0
+        mismatch_count = 0
+        for path in files:
+            img = cv2.imread(path)
+            if img is None:
+                logger.warning("Test model: gagal baca file %s", path)
+                unreadable_count += 1
+                results.append({
+                    "path": path, "image": None, "overall_judgement": None,
+                    "worst_score": 0.0, "roi_results": [],
+                    "resolution_mismatch": False, "unreadable": True,
+                })
+                continue
+
+            h_img, w_img = img.shape[:2]
+            mismatch = bool(ref_dims and (w_img, h_img) != ref_dims)
+            if mismatch:
+                mismatch_count += 1
+
+            overall_ng = False
+            worst_score = 0.0
+            roi_results = []
+            for idx, roi_rect in enumerate(self._current_all_rois):
+                roi_dict = {
+                    "x": roi_rect[0], "y": roi_rect[1],
+                    "width": roi_rect[2], "height": roi_rect[3],
+                    "uid": (self._current_all_roi_uids[idx]
+                            if idx < len(self._current_all_roi_uids) else None),
+                }
+                result = self._inference_engine.infer(
+                    img, roi=roi_dict, track_latency=False)
+                roi_results.append({
+                    "roi": roi_rect,
+                    "uid": roi_dict["uid"],
+                    "label": f"ROI {idx + 1}",
+                    "score": result.score,
+                    "judgement": result.judgement,
+                    "latency_ms": result.latency_ms,
+                })
+                if result.score > worst_score:
+                    worst_score = result.score
+                if result.judgement == "NG":
+                    overall_ng = True
+
+            results.append({
+                "path": path, "image": img,
+                "overall_judgement": "NG" if overall_ng else "OK",
+                "worst_score": worst_score, "roi_results": roi_results,
+                "resolution_mismatch": mismatch, "unreadable": False,
+                "reference_dims": ref_dims, "actual_dims": (w_img, h_img),
+            })
+
+        valid = [r for r in results if not r["unreadable"]]
+        if not valid:
+            QMessageBox.warning(
+                self, "Uji Model",
+                f"Semua {len(files)} file gagal dibaca. Periksa format file.")
+            return
+
+        ok_count = sum(1 for r in valid if r["overall_judgement"] == "OK")
+        aggregate = {
+            "total": len(valid),
+            "ok_count": ok_count,
+            "ng_count": len(valid) - ok_count,
+            "pass_rate": (ok_count / len(valid) * 100.0) if valid else 0.0,
+            "unreadable_count": unreadable_count,
+            "mismatch_count": mismatch_count,
+        }
+
+        from visioninspect.gui.dialogs.model_test_dialog import ModelTestDialog
+        dialog = ModelTestDialog(
+            template_label=self._active_template, results=results,
+            aggregate=aggregate, threshold=self._inference_engine.threshold,
+            parent=self)
+        dialog.exec()
 
     def _on_add_template(self):
         """Create a new template with default ROI."""

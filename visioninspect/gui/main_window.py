@@ -58,6 +58,15 @@ class MainWindow(QMainWindow):
     # Signal untuk invoke training di QThread worker
     start_training_signal = Signal(str, str)
 
+    # Signals untuk kirim hasil training WSL dari background thread biasa
+    # (bukan QThread) balik ke GUI thread. QTimer.singleShot yang dipanggil
+    # dari thread tanpa Qt event loop tidak aman (bisa warning "Timers can
+    # only be used with threads started with QThread") — Signal.emit() lintas
+    # thread otomatis di-queue oleh Qt ke thread pemilik receiver, jadi ini
+    # cara yang benar.
+    _wsl_train_done_signal = Signal()
+    _wsl_train_error_signal = Signal(str)
+
     def __init__(self, config: Config, translator: Translator):
         super().__init__()
         self._config = config
@@ -355,6 +364,11 @@ class MainWindow(QMainWindow):
         # Settings
         self._settings_page.get_save_button().clicked.connect(self._on_settings_save)
         self._tabs.currentChanged.connect(self._on_tab_changed)
+
+        # WSL training results (emitted from a plain background thread —
+        # see _train_via_wsl)
+        self._wsl_train_done_signal.connect(self._on_wsl_train_done)
+        self._wsl_train_error_signal.connect(self._on_training_error)
 
         # Camera toggle
         self._run_page.get_camera_toggle_button().clicked.connect(self._toggle_camera)
@@ -1721,37 +1735,42 @@ class MainWindow(QMainWindow):
                     f".venv/bin/python tools/train_cli.py "
                     f"--program '{prog}' --template '{tmpl}'"
                 ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                # encoding eksplisit UTF-8 (bukan ikut locale default Windows
+                # yang kadang cp1252) — output WSL/bash selalu UTF-8, dan
+                # tanpa ini decoding bisa crash (UnicodeDecodeError) begitu
+                # ada karakter non-ASCII di output pip/apt. errors="replace"
+                # jaga-jaga kalau tetap ada byte yang tak valid.
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=600)
                 out = result.stdout + result.stderr
 
                 if result.returncode == 0:
                     logger.info("WSL training selesai")
-                    QTimer.singleShot(0, self._on_wsl_train_done)
+                    self._wsl_train_done_signal.emit()
                 elif "NEED_PYTHON3_VENV" in out:
-                    QTimer.singleShot(0, lambda: self._on_training_error(
+                    self._wsl_train_error_signal.emit(
                         "WSL butuh python3-venv.\n\n"
                         "Jalankan di WSL:\n"
                         "  sudo apt install python3-venv\n\n"
-                        "Lalu coba TRAIN lagi."))
+                        "Lalu coba TRAIN lagi.")
                 elif "ensurepip" in out or "python3-venv" in out:
-                    QTimer.singleShot(0, lambda: self._on_training_error(
+                    self._wsl_train_error_signal.emit(
                         "WSL butuh python3-venv.\n\n"
                         "Jalankan di WSL:\n"
                         "  sudo apt install python3-venv\n\n"
-                        "Lalu coba TRAIN lagi."))
+                        "Lalu coba TRAIN lagi.")
                 else:
                     err = (result.stderr.strip()[:200]
                            or f"exit code {result.returncode}")
-                    QTimer.singleShot(0, lambda: self._on_training_error(
-                        f"WSL training gagal: {err}"))
+                    self._wsl_train_error_signal.emit(f"WSL training gagal: {err}")
             except subprocess.TimeoutExpired:
-                QTimer.singleShot(0, lambda: self._on_training_error(
-                    "WSL training timeout (600s)"))
+                self._wsl_train_error_signal.emit("WSL training timeout (600s)")
             except FileNotFoundError:
-                QTimer.singleShot(0, lambda: self._on_training_error(
-                    "wsl.exe tidak ditemukan. Install WSL dulu."))
+                self._wsl_train_error_signal.emit(
+                    "wsl.exe tidak ditemukan. Install WSL dulu.")
             except Exception as e:
-                QTimer.singleShot(0, lambda: self._on_training_error(str(e)))
+                self._wsl_train_error_signal.emit(str(e))
 
         thread = threading.Thread(target=_run_wsl, daemon=True, name="wsl-train")
         thread.start()

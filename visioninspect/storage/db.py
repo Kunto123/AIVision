@@ -162,6 +162,13 @@ class Database:
         )
         return row_id
 
+    def get_history_entry(self, entry_id: int) -> Optional[Dict[str, Any]]:
+        """Get a single inspection history entry by id."""
+        cursor = self.conn.execute(
+            "SELECT * FROM inspection_history WHERE id = ?", (entry_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
     def get_history(
         self,
         program: Optional[str] = None,

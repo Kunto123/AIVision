@@ -197,6 +197,7 @@ class TrainingWorker(QObject):
             threshold_mode=tmpl_cfg.get("threshold_mode", "adaptive"),
             manual_threshold=tmpl_cfg.get("manual_threshold", 0.5),
             enable_int8=tmpl_cfg.get("enable_int8", True),
+            max_epochs=tmpl_cfg.get("max_epochs"),
         )
 
         # Create pipeline

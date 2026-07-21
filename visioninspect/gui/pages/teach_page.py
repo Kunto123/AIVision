@@ -35,9 +35,23 @@ from visioninspect.utils.i18n import Translator
 class TeachPage(QWidget):
     """Halaman TEACH — teaching dan training model dengan multi-template."""
 
+    # Preset backbone+coreset combos for PatchCore — pre-tested combinations so
+    # most users never have to reason about raw hyperparameters. "custom" is a
+    # separate, implicit 4th option (not listed here) for hand-tuned values via
+    # Mode Lanjutan.
+    TRAINING_PROFILES = {
+        "fast": {"label": "⚡ Cepat", "backbone": "resnet18",
+                 "coreset_sampling_ratio": 0.1},
+        "balanced": {"label": "⚖️ Seimbang", "backbone": "resnet18",
+                     "coreset_sampling_ratio": 0.25},
+        "accurate": {"label": "🎯 Detail Tinggi", "backbone": "wide_resnet50_2",
+                     "coreset_sampling_ratio": 0.25},
+    }
+
     image_deleted = Signal(str)
     thumbnail_clicked = Signal(str)
     import_cancelled = Signal()
+    training_config_changed = Signal()
 
     def __init__(self, translator: Translator, parent=None):
         super().__init__(parent)
@@ -275,6 +289,81 @@ class TeachPage(QWidget):
         self._version_label = QLabel("💾 Model: —")
         self._version_label.setObjectName("secondaryText")
         right_layout.addWidget(self._version_label)
+
+        # ── Training Profile ──
+        # Preset-driven so most users never touch raw hyperparameters directly;
+        # "Mode Lanjutan" reveals the underlying fields for full manual control.
+        profile_group = QGroupBox("🧠 Training Profile")
+        profile_outer = QVBoxLayout(profile_group)
+        profile_outer.setSpacing(6)
+        profile_outer.setContentsMargins(10, 8, 10, 10)
+
+        self._profile_combo = QComboBox()
+        for key, prof in self.TRAINING_PROFILES.items():
+            self._profile_combo.addItem(prof["label"], key)
+        self._profile_combo.addItem("🔧 Custom", "custom")
+        self._profile_combo.setToolTip(
+            "⚡ Cepat: resnet18, ringan & responsif — cocok kebanyakan part.\n"
+            "⚖️ Seimbang: resnet18 dengan memory bank lebih lengkap.\n"
+            "🎯 Detail Tinggi: wide_resnet50_2 — lebih akurat untuk detail halus, "
+            "tapi ~3-4x lebih berat/lambat di CPU.\n"
+            "🔧 Custom: atur manual lewat Mode Lanjutan."
+        )
+        self._profile_combo.currentIndexChanged.connect(self._on_profile_selected)
+        profile_outer.addWidget(self._profile_combo)
+
+        self._advanced_cb = QCheckBox("🔧 Mode Lanjutan")
+        self._advanced_cb.toggled.connect(self._on_advanced_toggled)
+        profile_outer.addWidget(self._advanced_cb)
+
+        self._advanced_widget = QWidget()
+        self._adv_form = QFormLayout(self._advanced_widget)
+        self._adv_form.setSpacing(6)
+        self._adv_form.setLabelAlignment(Qt.AlignLeft)
+        self._adv_form.setContentsMargins(0, 4, 0, 0)
+
+        self._algo_combo = QComboBox()
+        self._algo_combo.addItem("PatchCore", "patchcore")
+        self._algo_combo.addItem("EfficientAd", "efficientad")
+        self._algo_combo.currentIndexChanged.connect(self._on_advanced_field_changed)
+        self._algo_combo.currentIndexChanged.connect(self._update_epochs_visibility)
+        self._adv_form.addRow("Algorithm:", self._algo_combo)
+
+        self._backbone_combo = QComboBox()
+        self._backbone_combo.addItems(["resnet18", "wide_resnet50_2"])
+        self._backbone_combo.currentIndexChanged.connect(self._on_advanced_field_changed)
+        self._adv_form.addRow("Backbone:", self._backbone_combo)
+
+        self._coreset_spin = QDoubleSpinBox()
+        self._coreset_spin.setRange(0.01, 1.0)
+        self._coreset_spin.setSingleStep(0.05)
+        self._coreset_spin.setDecimals(2)
+        self._coreset_spin.setToolTip(
+            "Porsi fitur OK yang disimpan sebagai memory bank. Lebih besar = "
+            "lebih lengkap menangkap variasi (lighting, posisi) tapi lebih "
+            "berat/lambat. Default 0.1."
+        )
+        self._coreset_spin.valueChanged.connect(self._on_advanced_field_changed)
+        self._adv_form.addRow("Coreset Ratio:", self._coreset_spin)
+
+        # Epoch cuma bermakna untuk EfficientAd (network beneran di-training
+        # via backprop) — disembunyikan untuk PatchCore (one-shot, selalu 1
+        # epoch) lewat setRowVisible, bukan dihapus, biar gampang di-toggle.
+        self._epochs_spin = QSpinBox()
+        self._epochs_spin.setRange(1, 1000)
+        self._epochs_spin.setValue(100)
+        self._epochs_spin.setToolTip(
+            "Jumlah epoch training. Hanya berlaku untuk EfficientAd — "
+            "PatchCore selalu 1 epoch (one-shot, tidak butuh iterasi)."
+        )
+        self._epochs_spin.valueChanged.connect(self._on_advanced_field_changed)
+        self._adv_form.addRow("Epochs:", self._epochs_spin)
+
+        self._advanced_widget.setVisible(False)
+        profile_outer.addWidget(self._advanced_widget)
+        self._update_epochs_visibility()
+
+        right_layout.addWidget(profile_group)
 
         # Train button + progress stacked
         train_box = QVBoxLayout()
@@ -612,6 +701,101 @@ class TeachPage(QWidget):
         else:
             self._master_thumbnail.clear()
             self._master_thumbnail.setText("—")
+
+    # ---- Training Profile ----
+
+    def get_training_config(self) -> dict:
+        cfg = {
+            "algorithm": self._algo_combo.currentData(),
+            "backbone": self._backbone_combo.currentText(),
+            "coreset_sampling_ratio": round(self._coreset_spin.value(), 2),
+            "training_profile": self._profile_combo.currentData(),
+        }
+        # Cuma simpan override eksplisit untuk EfficientAd — PatchCore biar
+        # tetap pakai default 1 epoch dari TrainingConfig, bukan nilai yang
+        # kebetulan tersisa di spinbox yang sedang disembunyikan.
+        if self._algo_combo.currentData() == "efficientad":
+            cfg["max_epochs"] = self._epochs_spin.value()
+        return cfg
+
+    def set_training_config(self, cfg: dict):
+        # Blokir sinyal selama load programatik — sama alasannya dengan
+        # set_part_check_config di atas (hindari re-trigger handler penyimpan
+        # sebelum semua field selesai di-load).
+        _widgets = [self._profile_combo, self._algo_combo,
+                    self._backbone_combo, self._coreset_spin, self._epochs_spin]
+        for w in _widgets:
+            w.blockSignals(True)
+        try:
+            algorithm = cfg.get("algorithm", "patchcore")
+            backbone = cfg.get("backbone", "resnet18")
+            coreset = cfg.get("coreset_sampling_ratio", 0.1)
+
+            idx = self._algo_combo.findData(algorithm)
+            self._algo_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            idx = self._backbone_combo.findText(backbone)
+            self._backbone_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self._coreset_spin.setValue(coreset)
+            self._epochs_spin.setValue(cfg.get("max_epochs", 100))
+
+            profile = cfg.get("training_profile") or self._infer_profile(
+                algorithm, backbone, coreset)
+            idx = self._profile_combo.findData(profile)
+            self._profile_combo.setCurrentIndex(
+                idx if idx >= 0 else self._profile_combo.findData("custom"))
+        finally:
+            for w in _widgets:
+                w.blockSignals(False)
+        self._update_epochs_visibility()
+
+    def _infer_profile(self, algorithm: str, backbone: str, coreset_ratio: float) -> str:
+        """Guess which preset (if any) matches values loaded from an older
+        template config that predates the training_profile field."""
+        if algorithm == "patchcore":
+            for key, prof in self.TRAINING_PROFILES.items():
+                if (prof["backbone"] == backbone
+                        and abs(prof["coreset_sampling_ratio"] - coreset_ratio) < 1e-6):
+                    return key
+        return "custom"
+
+    def _on_profile_selected(self, _index: int):
+        key = self._profile_combo.currentData()
+        prof = self.TRAINING_PROFILES.get(key)
+        if not prof:
+            return  # "custom" selected — leave advanced fields as-is
+        _widgets = [self._algo_combo, self._backbone_combo, self._coreset_spin]
+        for w in _widgets:
+            w.blockSignals(True)
+        try:
+            self._algo_combo.setCurrentIndex(self._algo_combo.findData("patchcore"))
+            idx = self._backbone_combo.findText(prof["backbone"])
+            if idx >= 0:
+                self._backbone_combo.setCurrentIndex(idx)
+            self._coreset_spin.setValue(prof["coreset_sampling_ratio"])
+        finally:
+            for w in _widgets:
+                w.blockSignals(False)
+        self._update_epochs_visibility()
+        self.training_config_changed.emit()
+
+    def _on_advanced_field_changed(self, *_):
+        """User hand-edited a raw field — the current selection no longer
+        matches any preset, so reflect that in the profile combo."""
+        self._profile_combo.blockSignals(True)
+        idx = self._profile_combo.findData("custom")
+        if idx >= 0:
+            self._profile_combo.setCurrentIndex(idx)
+        self._profile_combo.blockSignals(False)
+        self.training_config_changed.emit()
+
+    def _on_advanced_toggled(self, checked: bool):
+        self._advanced_widget.setVisible(checked)
+
+    def _update_epochs_visibility(self, *_):
+        """Epoch cuma relevan untuk EfficientAd — PatchCore one-shot, selalu
+        1 epoch, jadi field-nya disembunyikan biar tidak membingungkan."""
+        is_efficientad = self._algo_combo.currentData() == "efficientad"
+        self._adv_form.setRowVisible(self._epochs_spin, is_efficientad)
 
     def _update_pc_field_visibility(self, *_):
         """Show only the threshold/canny rows relevant to the selected method."""

@@ -34,6 +34,7 @@ class TrainingConfig:
         manual_threshold: float = 0.5,
         threshold_margin_sigma: float = 3.0,
         enable_int8: bool = True,
+        max_epochs: Optional[int] = None,
     ):
         self.algorithm = algorithm
         self.backbone = backbone
@@ -43,6 +44,13 @@ class TrainingConfig:
         self.manual_threshold = manual_threshold
         self.threshold_margin_sigma = threshold_margin_sigma
         self.enable_int8 = enable_int8
+        # PatchCore is one-shot (memory-bank, no backprop) — 1 epoch is correct.
+        # EfficientAd trains an actual network via backprop and needs many more
+        # epochs to converge; None picks a sensible per-algorithm default.
+        if max_epochs is not None:
+            self.max_epochs = max_epochs
+        else:
+            self.max_epochs = 1 if algorithm == "patchcore" else 100
 
 
 class TrainingPipeline:
@@ -151,10 +159,11 @@ class TrainingPipeline:
                     coreset_sampling_ratio=self._config.coreset_sampling_ratio,
                 )
             elif self._config.algorithm == "efficientad":
-                model = EfficientAd(
-                    backbone=self._config.backbone,
-                    input_size=(self._config.input_size, self._config.input_size),
-                )
+                # EfficientAd doesn't take backbone/input_size — it uses its
+                # own fixed small teacher-student network (no swappable
+                # torchvision backbone like PatchCore); image size is
+                # controlled entirely by the datamodule below.
+                model = EfficientAd()
             else:
                 raise TrainingError(f"Unknown algorithm: {self._config.algorithm}")
         except Exception as e:
@@ -163,6 +172,10 @@ class TrainingPipeline:
         # Create datamodule
         try:
             import torch  # noqa: F401 - needed by Anomalib
+            # EfficientAd's teacher-student normalization stats are computed
+            # per-sample and require batch_size=1 (anomalib raises otherwise);
+            # PatchCore has no such constraint.
+            batch_size = 1 if self._config.algorithm == "efficientad" else 16
             datamodule = Folder(
                 name="visioninspect",
                 task=TaskType.CLASSIFICATION,
@@ -170,8 +183,8 @@ class TrainingPipeline:
                 normal_dir=ok_dir.name,
                 abnormal_dir=ng_dir.name if ng_dir else None,
                 image_size=(self._config.input_size, self._config.input_size),
-                train_batch_size=16,
-                eval_batch_size=16,
+                train_batch_size=batch_size,
+                eval_batch_size=batch_size,
                 num_workers=0,
             )
             datamodule.setup()
@@ -193,7 +206,7 @@ class TrainingPipeline:
             pixel_metrics=None,
             accelerator="cpu",
             devices=1,
-            max_epochs=1,  # PatchCore is one-shot, EfficientAd needs epochs
+            max_epochs=self._config.max_epochs,
             default_root_dir=_train_work_dir,
             #enable_checkpointing=False,  # cegah symlink v0→latest (WinError 1314)
             logger=False,              # TensorBoard logger jg bikin symlink yg sama

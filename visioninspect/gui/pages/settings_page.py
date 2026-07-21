@@ -154,6 +154,14 @@ class SettingsPage(QWidget):
         model_group = QGroupBox(self._tr.tr("settings_model"))
         model_layout = QVBoxLayout(model_group)
 
+        model_hint = QLabel(
+            "ℹ️ Default untuk template baru saja — tidak mengubah template yang "
+            "sudah ada. Untuk template yang sedang aktif, atur lewat "
+            "Training Profile di tab TEACH.")
+        model_hint.setWordWrap(True)
+        model_hint.setObjectName("secondaryText")
+        model_layout.addWidget(model_hint)
+
         self._model_algo = _add_combo_row(model_layout, "Algorithm:", ["PatchCore", "EfficientAd"])
         self._model_backbone = _add_combo_row(model_layout, "Backbone:", ["resnet18", "wide_resnet50_2"])
         self._model_input_size = _add_spin_row(model_layout, "Input Size:", 64, 512, 256)

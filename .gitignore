@@ -64,3 +64,17 @@ logs/
 tmp/
 temp/
 *.tmp
+.claude/
+
+# --- Anomalib/training auto-downloaded & generated artifacts ---
+# datasets/: EfficientAd's imagenette auxiliary dataset (auto-downloaded on
+#            first EfficientAd training run)
+# pre_trained/: EfficientAd pretrained teacher weights (auto-downloaded)
+# results/: Anomalib/Lightning default output dir (incl. its own symlink
+#           capability probe on Windows)
+datasets/
+pre_trained/
+results/
+
+# --- Offline deployment bundle (built by tools/prepare_offline_bundle.bat) ---
+offline_bundle/

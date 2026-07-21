@@ -289,7 +289,7 @@ class MainWindow(QMainWindow):
             # Mulai kamera & inferensi SETELAH login berhasil (view hanya
             # berjalan setelah user login).
             if self._camera_worker and not self._camera_worker.is_running:
-                dev = getattr(self, "_pending_camera_device", 0)
+                dev = self._config.get("camera.device_index", 0)
                 QTimer.singleShot(300, lambda: self._camera_worker.start_camera(dev))
             self.set_status(
                 f"Selamat datang, {dialog.display_name} ({dialog.role})", 3000)
@@ -422,6 +422,10 @@ class MainWindow(QMainWindow):
         pc.get_gate_roi_editor().rois_changed.connect(self._on_gate_roi_changed)
         pc.get_capture_master_button().clicked.connect(self._on_capture_master)
 
+        # TEACH: Training Profile signal
+        self._teach_page.training_config_changed.connect(
+            self._on_training_config_changed)
+
         # HISTORY: Correction buttons
         self._history_page.get_correct_ok_button().clicked.connect(
             lambda: self._on_correct_history("OK"))
@@ -461,7 +465,6 @@ class MainWindow(QMainWindow):
 
         # Kamera TIDAK auto-start di sini — baru dijalankan setelah login
         # berhasil (lihat _show_login), agar view tidak berjalan sebelum login.
-        self._pending_camera_device = self._config.get("camera.device_index", 0)
 
     def _toggle_camera(self):
         if self._camera_worker:
@@ -478,6 +481,7 @@ class MainWindow(QMainWindow):
         if self._camera_worker:
             self._camera_worker.set_device(device_index)
             self._config.set("camera.device_index", device_index)
+            self._config.save()
         # Sync both spinboxes (RunPage and SettingsPage)
         self._run_page.get_device_spin().blockSignals(True)
         self._run_page.get_device_spin().setValue(device_index)
@@ -907,6 +911,34 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.warning("Part check config save error: %s", e)
 
+    def _on_training_config_changed(self):
+        """Save Training Profile UI state (algorithm/backbone/coreset) to
+        template config. Training itself always rebuilds the model from all
+        images in the template's folder (see TrainingPipeline.train) — so
+        there's no incremental-learning corruption risk from switching
+        backbone. The only thing worth flagging is that the model file
+        currently on disk still reflects the OLD setting until the user
+        clicks TRAIN again."""
+        if not self._active_template:
+            return
+        updates = self._teach_page.get_training_config()
+        try:
+            old_cfg = self._pm.get_template_config(
+                self._active_program, self._active_template)
+            changed_deploy_relevant = (
+                old_cfg.get("trained")
+                and (old_cfg.get("backbone") != updates.get("backbone")
+                     or old_cfg.get("algorithm") != updates.get("algorithm")))
+            self._pm.update_template_config(
+                self._active_program, self._active_template, updates)
+            if changed_deploy_relevant:
+                self.set_status(
+                    "⚠️ Algorithm/Backbone diubah — klik TRAIN untuk "
+                    "menerapkan ke model (model saat ini masih pakai setting lama).",
+                    5000)
+        except Exception as e:
+            logger.warning("Training config save error: %s", e)
+
     def _on_gate_roi_changed(self):
         """Save gate ROI from editor to template config."""
         if not self._active_template:
@@ -1023,6 +1055,17 @@ class MainWindow(QMainWindow):
 
     # ---- Programs / Templates ----
 
+    def _new_template_defaults(self) -> dict:
+        """Config overrides seeded into a newly created template, sourced
+        from the global Settings 'Model' section. Settings no longer edits
+        existing templates directly — per-template tuning lives in the
+        Training Profile panel on the TEACH tab."""
+        return {
+            "algorithm": self._config.get("model.algorithm", "patchcore"),
+            "backbone": self._config.get("model.backbone", "resnet18"),
+            "input_size": self._config.get("model.input_size", 256),
+        }
+
     def _init_programs(self):
         """Load programs and create default if none exist."""
         programs = self._pm.list_programs()
@@ -1030,7 +1073,9 @@ class MainWindow(QMainWindow):
             prog = self._pm.create_program("Default")
             self._active_program = prog["name"]
             # Create default template
-            tmpl = self._pm.create_template(self._active_program, "Template 1")
+            tmpl = self._pm.create_template(
+                self._active_program, "Template 1",
+                config=self._new_template_defaults())
             self._active_template = tmpl["id"]
             self._pm.set_active_template(self._active_program, self._active_template)
         else:
@@ -1135,6 +1180,9 @@ class MainWindow(QMainWindow):
             # Part Presence Check UI
             self._refresh_part_check_ui()
             self._refresh_part_check_gate_cache()
+
+            # Training Profile UI
+            self._teach_page.set_training_config(tmpl_cfg)
 
     def _load_gallery_thumbnails(self, label: str):
         """Load thumbnail images from disk into gallery."""
@@ -1336,7 +1384,9 @@ class MainWindow(QMainWindow):
                                          "Nama template:")
         if ok and name.strip():
             try:
-                tmpl = self._pm.create_template(self._active_program, name.strip())
+                tmpl = self._pm.create_template(
+                    self._active_program, name.strip(),
+                    config=self._new_template_defaults())
                 self._active_template = tmpl["id"]
                 self._pm.set_active_template(self._active_program, self._active_template)
                 self._refresh_template_ui()
@@ -1810,12 +1860,7 @@ class MainWindow(QMainWindow):
           5. On save: crop corrected ROIs → save to template → retrain
         """
         # Fetch full entry from DB (need metadata + image_path + roi_region)
-        entries = self._db.get_history(limit=1, offset=0)
-        entry = None
-        for e in entries:
-            if int(e["id"]) == entry_id:
-                entry = e
-                break
+        entry = self._db.get_history_entry(entry_id)
         if not entry:
             self.set_status(f"Entry #{entry_id} tidak ditemukan", 3000)
             return

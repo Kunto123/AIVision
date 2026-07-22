@@ -50,16 +50,19 @@ def train(program: str, template_id: str):
     tmpl_dir = pm._get_template_dir(program) / template_id
     ok_dir = tmpl_dir / "images" / "ok"
     ng_dir = tmpl_dir / "images" / "ng"
+    # Gambar OK bisa dari foto legacy (images/ok) ATAU crop per-ROI hasil
+    # CaptureReviewDialog (images/ok_per_roi) — template yang semua datanya
+    # dicapture lewat review per-ROI (2+ ROI) akan punya images/ok kosong
+    # secara sah, jadi keduanya harus dihitung.
+    ok_per_roi_dir = tmpl_dir / "images" / "ok_per_roi"
+    ng_per_roi_dir = tmpl_dir / "images" / "ng_per_roi"
 
-    if not ok_dir.exists():
-        print("❌ Folder images/ok/ tidak ditemukan")
-        return False
-
-    ok_images = list(ok_dir.glob("*.png")) + list(ok_dir.glob("*.jpg"))
-    if not ok_images:
+    ok_images = (list(ok_dir.glob("*.png")) + list(ok_dir.glob("*.jpg"))) if ok_dir.exists() else []
+    ok_per_roi_images = list(ok_per_roi_dir.glob("*.png")) if ok_per_roi_dir.exists() else []
+    if not ok_images and not ok_per_roi_images:
         print("❌ Tidak ada gambar OK untuk training")
         return False
-    print(f"📸 OK images: {len(ok_images)}")
+    print(f"📸 OK images: {len(ok_images)} (+{len(ok_per_roi_images)} crop per-ROI)")
 
     ng_images = []
     if ng_dir.exists():
@@ -75,11 +78,26 @@ def train(program: str, template_id: str):
         print(f"✂️  Crop ke {len(rois)} ROI(s)...")
         ok_crop = Path(tempfile.mkdtemp(prefix="vi_ok_"))
         ng_crop = Path(tempfile.mkdtemp(prefix="vi_ng_"))
-        n_ok = _crop_images_to_rois(ok_dir, rois, ok_crop, input_size)
-        n_ng = _crop_images_to_rois(ng_dir, rois, ng_crop, input_size)
-        print(f"   {n_ok} OK crops, {n_ng} NG crops")
+        n_ok = _crop_images_to_rois(ok_dir, rois, ok_crop, input_size) if ok_images else 0
+        n_ng = _crop_images_to_rois(ng_dir, rois, ng_crop, input_size) if ng_images else 0
+
+        # Salin langsung crop per-ROI (sudah berbentuk crop jadi, JANGAN
+        # di-crop ulang) — lihat komentar yang sama di training_worker.py.
+        import shutil
+        n_ok_pr = n_ng_pr = 0
+        if ok_per_roi_dir.exists():
+            for f in ok_per_roi_dir.glob("*.png"):
+                shutil.copy2(f, ok_crop / f.name)
+                n_ok_pr += 1
+        if ng_per_roi_dir.exists():
+            for f in ng_per_roi_dir.glob("*.png"):
+                shutil.copy2(f, ng_crop / f.name)
+                n_ng_pr += 1
+        print(f"   {n_ok} OK crops + {n_ok_pr} per-ROI, "
+              f"{n_ng} NG crops + {n_ng_pr} per-ROI")
+
         ok_dir = ok_crop
-        ng_path = ng_crop if ng_images else None
+        ng_path = ng_crop if (ng_images or n_ng_pr) else None
     else:
         print("ℹ️  Tanpa ROI — training full-frame")
         ng_path = ng_dir if ng_images else None

@@ -122,8 +122,15 @@ class TrainingWorker(QObject):
         tmpl_dir = self._pm._get_template_dir(program) / template_id
         ok_dir = tmpl_dir / "images" / "ok"
         ng_dir = tmpl_dir / "images" / "ng"
+        ok_per_roi_dir = tmpl_dir / "images" / "ok_per_roi"
 
-        if not ok_dir.exists() or len(list(ok_dir.glob("*.png")) + list(ok_dir.glob("*.jpg"))) == 0:
+        # Gambar OK bisa berasal dari foto legacy (images/ok) ATAU dari crop
+        # per-ROI hasil CaptureReviewDialog (images/ok_per_roi) — template
+        # yang semua datanya dicapture lewat review per-ROI (2+ ROI) akan
+        # punya images/ok kosong secara sah, jadi keduanya harus dihitung.
+        ok_legacy_count = len(list(ok_dir.glob("*.png")) + list(ok_dir.glob("*.jpg"))) if ok_dir.exists() else 0
+        ok_per_roi_count = len(list(ok_per_roi_dir.glob("*.png"))) if ok_per_roi_dir.exists() else 0
+        if ok_legacy_count + ok_per_roi_count == 0:
             raise TrainingError("Tidak ada gambar OK di template ini")
 
         aug_cfg = self._pm.get_augmentation_config(program, template_id)
@@ -159,7 +166,6 @@ class TrainingWorker(QObject):
             # per-ROI ini sudah pasti benar untuk ROI spesifiknya masing-
             # masing — lihat diskusi soal kenapa 1 foto bisa punya ROI1=OK
             # ROI2=NG dan kenapa itu krusial dilabeli terpisah.
-            ok_per_roi_dir = tmpl_dir / "images" / "ok_per_roi"
             ng_per_roi_dir = tmpl_dir / "images" / "ng_per_roi"
             n_ok_pr = n_ng_pr = 0
             if ok_per_roi_dir.exists():

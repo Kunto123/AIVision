@@ -333,9 +333,16 @@ class TeachPage(QWidget):
         self._algo_combo.addItem("PatchCore", "patchcore")
         self._algo_combo.addItem("EfficientAd", "efficientad")
         self._algo_combo.currentIndexChanged.connect(self._on_advanced_field_changed)
-        self._algo_combo.currentIndexChanged.connect(self._update_epochs_visibility)
+        self._algo_combo.currentIndexChanged.connect(self._update_algorithm_field_visibility)
         self._adv_form.addRow("Algorithm:", self._algo_combo)
 
+        # Backbone & Coreset Ratio cuma dipakai PatchCore (lihat training.py:
+        # Patchcore(backbone=..., coreset_sampling_ratio=...) vs
+        # EfficientAd() yang tidak menerima parameter itu sama sekali — nilai
+        # yang tersimpan tetap ada di config tapi diabaikan total oleh
+        # training). Disembunyikan untuk EfficientAd lewat setRowVisible,
+        # sama seperti Epochs disembunyikan untuk PatchCore, biar tidak
+        # menyesatkan seolah-olah field itu berlaku untuk kedua algorithm.
         self._backbone_combo = QComboBox()
         self._backbone_combo.addItems(["resnet18", "wide_resnet50_2"])
         self._backbone_combo.currentIndexChanged.connect(self._on_advanced_field_changed)
@@ -348,7 +355,7 @@ class TeachPage(QWidget):
         self._coreset_spin.setToolTip(
             "Porsi fitur OK yang disimpan sebagai memory bank. Lebih besar = "
             "lebih lengkap menangkap variasi (lighting, posisi) tapi lebih "
-            "berat/lambat. Default 0.1."
+            "berat/lambat. Default 0.1. Hanya berlaku untuk PatchCore."
         )
         self._coreset_spin.valueChanged.connect(self._on_advanced_field_changed)
         self._adv_form.addRow("Coreset Ratio:", self._coreset_spin)
@@ -368,7 +375,7 @@ class TeachPage(QWidget):
 
         self._advanced_widget.setVisible(False)
         profile_outer.addWidget(self._advanced_widget)
-        self._update_epochs_visibility()
+        self._update_algorithm_field_visibility()
 
         right_layout.addWidget(profile_group)
 
@@ -754,7 +761,7 @@ class TeachPage(QWidget):
         finally:
             for w in _widgets:
                 w.blockSignals(False)
-        self._update_epochs_visibility()
+        self._update_algorithm_field_visibility()
 
     def _infer_profile(self, algorithm: str, backbone: str, coreset_ratio: float) -> str:
         """Guess which preset (if any) matches values loaded from an older
@@ -783,7 +790,7 @@ class TeachPage(QWidget):
         finally:
             for w in _widgets:
                 w.blockSignals(False)
-        self._update_epochs_visibility()
+        self._update_algorithm_field_visibility()
         self.training_config_changed.emit()
 
     def _on_advanced_field_changed(self, *_):
@@ -799,11 +806,13 @@ class TeachPage(QWidget):
     def _on_advanced_toggled(self, checked: bool):
         self._advanced_widget.setVisible(checked)
 
-    def _update_epochs_visibility(self, *_):
-        """Epoch cuma relevan untuk EfficientAd — PatchCore one-shot, selalu
-        1 epoch, jadi field-nya disembunyikan biar tidak membingungkan."""
+    def _update_algorithm_field_visibility(self, *_):
+        """Tampilkan cuma field yang benar-benar dipakai algorithm terpilih:
+        Backbone & Coreset Ratio khusus PatchCore, Epochs khusus EfficientAd."""
         is_efficientad = self._algo_combo.currentData() == "efficientad"
         self._adv_form.setRowVisible(self._epochs_spin, is_efficientad)
+        self._adv_form.setRowVisible(self._backbone_combo, not is_efficientad)
+        self._adv_form.setRowVisible(self._coreset_spin, not is_efficientad)
 
     def _update_pc_field_visibility(self, *_):
         """Show only the threshold/canny rows relevant to the selected method."""

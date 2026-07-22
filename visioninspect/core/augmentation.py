@@ -102,11 +102,22 @@ _TRANSFORMS: dict = {
 
 # ── Config Hash (untuk deteksi skip-jika-tidak-berubah) ─────────────────
 
-def compute_config_hash(config: dict) -> str:
+def compute_config_hash(config: dict, rois: Optional[list] = None) -> str:
     """Hash deterministik dari field augmentasi yang relevan — mengecualikan
-    generated_config_hash/generated_at sendiri supaya tidak muter."""
+    generated_config_hash/generated_at sendiri supaya tidak muter.
+
+    rois (opsional) diikutsertakan sebagai fingerprint posisi/ukuran ROI saat
+    ini — augmentasi geometris (rotasi/flip/translasi) dijalankan di atas
+    hasil crop ROI, jadi kalau ROI digeser/diubah ukurannya, cache augmentasi
+    lama harus otomatis dianggap basi juga, bukan cuma kalau setting
+    augmentasi sendiri yang berubah.
+    """
     relevant = {k: v for k, v in config.items()
                 if k not in ("generated_config_hash", "generated_at")}
+    if rois:
+        relevant["_rois_fingerprint"] = sorted(
+            (r.get("uid"), r.get("x"), r.get("y"), r.get("width"), r.get("height"))
+            for r in rois)
     payload = json.dumps(relevant, sort_keys=True)
     return hashlib.md5(payload.encode()).hexdigest()[:12]
 
@@ -170,15 +181,24 @@ def _augment_one_dir(src_dir: Path, out_dir: Path, config: dict,
 def generate_augmentations(
     ok_dir: Path, ng_dir: Optional[Path],
     ok_out_dir: Path, ng_out_dir: Path,
-    config: dict, force: bool = False,
+    config: dict, rois: Optional[list] = None, force: bool = False,
     progress_cb: Optional[Callable[[int, str], None]] = None,
 ) -> dict:
     """Generate augmented images dari ok_dir/ng_dir ke ok_out_dir/ng_out_dir,
-    skip kalau config tidak berubah sejak generate terakhir (kecuali force=True).
+    skip kalau config (+ rois, lihat compute_config_hash) tidak berubah sejak
+    generate terakhir (kecuali force=True).
+
+    ok_dir/ng_dir HARUS sudah berupa hasil crop ROI (kalau template punya
+    ROI) — augmentasi geometris (rotasi/flip/translasi) yang dijalankan di
+    full-frame lalu di-crop pakai kotak ROI yang diam di tempat akan salah
+    sasaran (part bisa tergeser keluar kotak crop, atau flip malah menangkap
+    area yang tidak berhubungan sama sekali). Kalau template tidak punya ROI,
+    ok_dir/ng_dir boleh full-frame (tidak ada kotak crop tetap yang bisa
+    salah sasaran dalam kasus itu).
 
     Returns: {"generated": bool, "ok_count": int, "ng_count": int, "config_hash": str}
     """
-    current_hash = compute_config_hash(config)
+    current_hash = compute_config_hash(config, rois)
     stored_hash = config.get("generated_config_hash")
     has_existing = ok_out_dir.exists() and any(ok_out_dir.iterdir())
 

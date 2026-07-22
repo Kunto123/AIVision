@@ -126,57 +126,91 @@ class TrainingWorker(QObject):
         if not ok_dir.exists() or len(list(ok_dir.glob("*.png")) + list(ok_dir.glob("*.jpg"))) == 0:
             raise TrainingError("Tidak ada gambar OK di template ini")
 
-        # ── Augmentasi (opsional) — jalan di atas gambar asli SEBELUM
-        # ROI-crop, disimpan ke folder terpisah (images/ok_augmented,
-        # images/ng_augmented) supaya persisten & bisa di-skip di retrain
-        # berikutnya kalau config tidak berubah. Hasilnya ikut disertakan
-        # baik lewat ROI-crop maupun merge full-frame di bawah.
         aug_cfg = self._pm.get_augmentation_config(program, template_id)
+        aug_enabled = any(aug_cfg.get(t, {}).get("enabled") for t in AUGMENTATION_TYPES)
         ok_aug_dir = tmpl_dir / "images" / "ok_augmented"
         ng_aug_dir = tmpl_dir / "images" / "ng_augmented"
-        if any(aug_cfg.get(t, {}).get("enabled") for t in AUGMENTATION_TYPES):
-            self.progress.emit(1, "Memeriksa augmentasi...")
-            aug_result = generate_augmentations(
-                ok_dir, ng_dir if ng_dir.exists() else None,
-                ok_aug_dir, ng_aug_dir, aug_cfg,
-                force=force_regenerate_augmentation,
-                progress_cb=lambda p, m: self.progress.emit(1 + int(p * 0.08), m))
-            if aug_result["generated"]:
-                self._pm.update_augmentation_config(program, template_id, {
-                    "generated_config_hash": aug_result["config_hash"],
-                    "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")})
 
         # Extract enabled ROIs and crop images to match inference pipeline
         rois = self._get_enabled_rois(tmpl_cfg)
         input_size = tmpl_cfg.get("input_size", 256)
 
         if rois:
-            self.progress.emit(10, f"Menyiapkan data: crop ke {len(rois)} ROI...")
+            self.progress.emit(3, f"Menyiapkan data: crop ke {len(rois)} ROI...")
             import tempfile
             ok_crop_dir = Path(tempfile.mkdtemp(prefix="visioninspect_ok_crop_"))
             ng_crop_dir = Path(tempfile.mkdtemp(prefix="visioninspect_ng_crop_"))
             n_ok = _crop_images_to_rois(ok_dir, rois, ok_crop_dir, input_size)
             n_ng = _crop_images_to_rois(ng_dir, rois, ng_crop_dir, input_size)
-            if ok_aug_dir.exists() and any(ok_aug_dir.iterdir()):
-                n_ok += _crop_images_to_rois(ok_aug_dir, rois, ok_crop_dir, input_size)
-            if ng_aug_dir.exists() and any(ng_aug_dir.iterdir()):
-                n_ng += _crop_images_to_rois(ng_aug_dir, rois, ng_crop_dir, input_size)
             logger.info(
                 "ROI crop: %d OK originals → %d crops across %d ROI(s); "
                 "%d NG originals → %d crops",
                 len(list(ok_dir.glob("*"))), n_ok, len(rois),
                 len(list(ng_dir.glob("*"))), n_ng,
             )
+
+            # ── Augmentasi (opsional) — jalan SETELAH ROI-crop, bukan
+            # sebelumnya. Kalau rotasi/flip/translasi dijalankan di
+            # full-frame lalu di-crop pakai kotak ROI yang sama, isinya
+            # sudah geser/tercermin ke posisi lain relatif kotak crop yang
+            # diam di tempat — hasilnya bukan "part yang sama, sedikit
+            # berubah", tapi crop yang salah sasaran (bisa nangkap
+            # background, atau part malah terpotong). Augmentasi harus
+            # jalan di atas hasil crop ROI itu sendiri supaya part tetap
+            # utuh & center di tiap variannya. Disimpan ke folder terpisah
+            # (persisten, di-skip kalau belum berubah) — hash-nya ikut
+            # sertakan fingerprint ROI saat ini, jadi kalau ROI
+            # digeser/diubah ukurannya, cache augmentasi lama otomatis
+            # dianggap basi juga, bukan cuma kalau setting augmentasi
+            # sendiri yang berubah.
+            if aug_enabled:
+                self.progress.emit(15, "Memeriksa augmentasi...")
+                ng_crop_has_files = any(ng_crop_dir.glob("*.png"))
+                aug_result = generate_augmentations(
+                    ok_crop_dir, ng_crop_dir if ng_crop_has_files else None,
+                    ok_aug_dir, ng_aug_dir, aug_cfg,
+                    rois=rois,
+                    force=force_regenerate_augmentation,
+                    progress_cb=lambda p, m: self.progress.emit(15 + int(p * 0.10), m))
+                if aug_result["generated"]:
+                    self._pm.update_augmentation_config(program, template_id, {
+                        "generated_config_hash": aug_result["config_hash"],
+                        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+                # Augmented images sudah berbentuk crop ROI jadi (sudah
+                # di-resize ke input_size) — cukup disalin langsung, JANGAN
+                # di-crop ulang (itu akan meng-crop hasil crop, merusaknya).
+                import shutil as _shutil
+                if ok_aug_dir.exists():
+                    for f in ok_aug_dir.glob("*.png"):
+                        _shutil.copy2(f, ok_crop_dir / f.name)
+                if ng_aug_dir.exists():
+                    for f in ng_aug_dir.glob("*.png"):
+                        _shutil.copy2(f, ng_crop_dir / f.name)
+
             ok_dir = ok_crop_dir
             ng_dir = ng_crop_dir
         else:
             logger.info("Tidak ada ROI — training dengan full-frame images")
-            # Tanpa ROI-crop tidak ada langkah merge alami, jadi gabungkan
-            # manual supaya augmented images tetap ikut training.
-            if ok_aug_dir.exists() and any(ok_aug_dir.iterdir()):
-                ok_dir = _merge_dirs([ok_dir, ok_aug_dir])
-            if ng_dir.exists() and ng_aug_dir.exists() and any(ng_aug_dir.iterdir()):
-                ng_dir = _merge_dirs([ng_dir, ng_aug_dir])
+            # Tanpa ROI, seluruh frame itu sendiri "ROI"-nya — tidak ada
+            # kotak crop tetap yang bisa salah sasaran, jadi augmentasi di
+            # full-frame di sini aman dijalankan langsung, tanpa fingerprint
+            # ROI (tidak ada ROI untuk di-fingerprint).
+            if aug_enabled:
+                self.progress.emit(3, "Memeriksa augmentasi...")
+                aug_result = generate_augmentations(
+                    ok_dir, ng_dir if ng_dir.exists() else None,
+                    ok_aug_dir, ng_aug_dir, aug_cfg,
+                    rois=None,
+                    force=force_regenerate_augmentation,
+                    progress_cb=lambda p, m: self.progress.emit(3 + int(p * 0.10), m))
+                if aug_result["generated"]:
+                    self._pm.update_augmentation_config(program, template_id, {
+                        "generated_config_hash": aug_result["config_hash"],
+                        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+                if ok_aug_dir.exists() and any(ok_aug_dir.iterdir()):
+                    ok_dir = _merge_dirs([ok_dir, ok_aug_dir])
+                if ng_dir.exists() and ng_aug_dir.exists() and any(ng_aug_dir.iterdir()):
+                    ng_dir = _merge_dirs([ng_dir, ng_aug_dir])
 
         ng_path = ng_dir if (ng_dir.exists() and list(ng_dir.glob("*"))) else None
 

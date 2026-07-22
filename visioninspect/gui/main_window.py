@@ -56,7 +56,7 @@ class MainWindow(QMainWindow):
     """Main application window dengan 5 tab halaman."""
 
     # Signal untuk invoke training di QThread worker
-    start_training_signal = Signal(str, str)
+    start_training_signal = Signal(str, str, bool)
 
     # Signals untuk kirim hasil training WSL dari background thread biasa
     # (bukan QThread) balik ke GUI thread. QTimer.singleShot yang dipanggil
@@ -104,6 +104,7 @@ class MainWindow(QMainWindow):
         # State
         self._active_program = ""
         self._active_template = ""
+        self._force_regenerate_augmentation = False
 
         # Performance monitoring
         self._perf_timer = QTimer(self)
@@ -442,6 +443,12 @@ class MainWindow(QMainWindow):
         # TEACH: Training Profile signal
         self._teach_page.training_config_changed.connect(
             self._on_training_config_changed)
+
+        # TEACH: Augmentasi Data signals
+        self._teach_page.augmentation_config_changed.connect(
+            self._on_augmentation_config_changed)
+        self._teach_page.get_augmentation_regenerate_button().clicked.connect(
+            self._on_augmentation_regenerate)
 
         # HISTORY: Correction buttons
         self._history_page.get_correct_ok_button().clicked.connect(
@@ -956,6 +963,29 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.warning("Training config save error: %s", e)
 
+    def _on_augmentation_config_changed(self):
+        """Save Augmentasi Data UI state to template config. Actual generation
+        happens on the next TRAIN click (training_worker._do_training) — this
+        just persists what should be generated, mirroring _on_training_config_changed."""
+        if not self._active_template:
+            return
+        updates = self._teach_page.get_augmentation_config()
+        try:
+            self._pm.update_augmentation_config(
+                self._active_program, self._active_template, updates)
+        except Exception as e:
+            logger.warning("Augmentation config save error: %s", e)
+
+    def _on_augmentation_regenerate(self):
+        """Force-regenerate augmented images right away (starts training),
+        even if the augmentation config hasn't changed since last generation —
+        e.g. user just wants a fresh draw of the Acak/random parameters."""
+        if not self._active_template:
+            self.set_status("Tidak ada template aktif!", 3000)
+            return
+        self._force_regenerate_augmentation = True
+        self._on_train()
+
     def _on_gate_roi_changed(self):
         """Save gate ROI from editor to template config."""
         if not self._active_template:
@@ -1200,6 +1230,11 @@ class MainWindow(QMainWindow):
 
             # Training Profile UI
             self._teach_page.set_training_config(tmpl_cfg)
+
+            # Augmentasi Data UI
+            self._teach_page.set_augmentation_config(
+                self._pm.get_augmentation_config(
+                    self._active_program, self._active_template))
 
     def _load_gallery_thumbnails(self, label: str):
         """Load thumbnail images from disk into gallery."""
@@ -1820,8 +1855,10 @@ class MainWindow(QMainWindow):
         gc.collect()
 
         # Emit signal — worker di QThread akan menjalankan training
+        force_regen = self._force_regenerate_augmentation
+        self._force_regenerate_augmentation = False
         self.start_training_signal.emit(
-            self._active_program, self._active_template)
+            self._active_program, self._active_template, force_regen)
 
     # ---- Training via WSL (fallback saat PyTorch diblokir Windows) ----
 

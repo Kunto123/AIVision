@@ -443,6 +443,29 @@ class ProgramManager:
         return master if master.exists() else None
 
     # =====================================================================
+    # AUGMENTATION
+    # =====================================================================
+
+    def get_augmentation_config(self, program: str, template_id: str) -> dict:
+        """Get augmentation config for a template, with safe defaults for old templates."""
+        from visioninspect.core.augmentation import DEFAULT_AUGMENTATION_CONFIG
+        cfg = self.get_template_config(program, template_id)
+        aug = cfg.get("augmentation", {})
+        merged = DEFAULT_AUGMENTATION_CONFIG.copy()
+        merged.update(aug)
+        return merged
+
+    def update_augmentation_config(self, program: str, template_id: str,
+                                    updates: dict) -> dict:
+        """Update augmentation config fields (read-modify-merge-write)."""
+        aug = self.get_augmentation_config(program, template_id)
+        aug.update(updates)
+        tmpl_cfg = self.get_template_config(program, template_id)
+        tmpl_cfg["augmentation"] = aug
+        self.update_template_config(program, template_id, tmpl_cfg)
+        return aug
+
+    # =====================================================================
     # INTERNAL
     # =====================================================================
 

@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
 from visioninspect.core.training import TrainingPipeline, TrainingConfig, TrainingError
 from visioninspect.core.program import ProgramManager
+from visioninspect.core.augmentation import AUGMENTATION_TYPES, generate_augmentations
 from visioninspect.utils.logging_setup import get_logger
 
 logger = get_logger("training")
@@ -56,6 +57,22 @@ def _crop_images_to_rois(
     return count
 
 
+def _merge_dirs(dirs: List[Path]) -> Path:
+    """Copy all images from multiple directories into one fresh temp dir.
+    Used for the no-ROI training path so augmented images (kept in their own
+    persisted folder) still end up alongside originals for training."""
+    import shutil
+    import tempfile
+
+    merged = Path(tempfile.mkdtemp(prefix="visioninspect_merged_"))
+    for d in dirs:
+        if not d or not d.exists():
+            continue
+        for f in list(d.glob("*.png")) + list(d.glob("*.jpg")) + list(d.glob("*.jpeg")):
+            shutil.copy2(f, merged / f.name)
+    return merged
+
+
 class TrainingWorker(QObject):
     """Worker untuk training yang berjalan di QThread terpisah."""
 
@@ -70,14 +87,15 @@ class TrainingWorker(QObject):
         self._pm = program_manager
         self._pipeline: Optional[TrainingPipeline] = None
 
-    @Slot(str, str)
-    def start_training(self, program: str, template_id: str):
+    @Slot(str, str, bool)
+    def start_training(self, program: str, template_id: str,
+                        force_regenerate_augmentation: bool = False):
         """
         Start training for a template.
         Dipanggil dari QThread via signal.
         """
         try:
-            self._do_training(program, template_id)
+            self._do_training(program, template_id, force_regenerate_augmentation)
         except TrainingError as e:
             self.error.emit(str(e))
             logger.error("Training failed: %s", e)
@@ -87,7 +105,8 @@ class TrainingWorker(QObject):
         finally:
             self.done.emit()
 
-    def _do_training(self, program: str, template_id: str):
+    def _do_training(self, program: str, template_id: str,
+                      force_regenerate_augmentation: bool = False):
         """Internal: jalankan training dengan ROI cropping otomatis.
 
         Full-frame images dari galeri di-crop ke setiap enabled ROI
@@ -107,17 +126,41 @@ class TrainingWorker(QObject):
         if not ok_dir.exists() or len(list(ok_dir.glob("*.png")) + list(ok_dir.glob("*.jpg"))) == 0:
             raise TrainingError("Tidak ada gambar OK di template ini")
 
+        # ── Augmentasi (opsional) — jalan di atas gambar asli SEBELUM
+        # ROI-crop, disimpan ke folder terpisah (images/ok_augmented,
+        # images/ng_augmented) supaya persisten & bisa di-skip di retrain
+        # berikutnya kalau config tidak berubah. Hasilnya ikut disertakan
+        # baik lewat ROI-crop maupun merge full-frame di bawah.
+        aug_cfg = self._pm.get_augmentation_config(program, template_id)
+        ok_aug_dir = tmpl_dir / "images" / "ok_augmented"
+        ng_aug_dir = tmpl_dir / "images" / "ng_augmented"
+        if any(aug_cfg.get(t, {}).get("enabled") for t in AUGMENTATION_TYPES):
+            self.progress.emit(1, "Memeriksa augmentasi...")
+            aug_result = generate_augmentations(
+                ok_dir, ng_dir if ng_dir.exists() else None,
+                ok_aug_dir, ng_aug_dir, aug_cfg,
+                force=force_regenerate_augmentation,
+                progress_cb=lambda p, m: self.progress.emit(1 + int(p * 0.08), m))
+            if aug_result["generated"]:
+                self._pm.update_augmentation_config(program, template_id, {
+                    "generated_config_hash": aug_result["config_hash"],
+                    "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+
         # Extract enabled ROIs and crop images to match inference pipeline
         rois = self._get_enabled_rois(tmpl_cfg)
         input_size = tmpl_cfg.get("input_size", 256)
 
         if rois:
-            self.progress.emit(3, f"Menyiapkan data: crop ke {len(rois)} ROI...")
+            self.progress.emit(10, f"Menyiapkan data: crop ke {len(rois)} ROI...")
             import tempfile
             ok_crop_dir = Path(tempfile.mkdtemp(prefix="visioninspect_ok_crop_"))
             ng_crop_dir = Path(tempfile.mkdtemp(prefix="visioninspect_ng_crop_"))
             n_ok = _crop_images_to_rois(ok_dir, rois, ok_crop_dir, input_size)
             n_ng = _crop_images_to_rois(ng_dir, rois, ng_crop_dir, input_size)
+            if ok_aug_dir.exists() and any(ok_aug_dir.iterdir()):
+                n_ok += _crop_images_to_rois(ok_aug_dir, rois, ok_crop_dir, input_size)
+            if ng_aug_dir.exists() and any(ng_aug_dir.iterdir()):
+                n_ng += _crop_images_to_rois(ng_aug_dir, rois, ng_crop_dir, input_size)
             logger.info(
                 "ROI crop: %d OK originals → %d crops across %d ROI(s); "
                 "%d NG originals → %d crops",
@@ -128,6 +171,12 @@ class TrainingWorker(QObject):
             ng_dir = ng_crop_dir
         else:
             logger.info("Tidak ada ROI — training dengan full-frame images")
+            # Tanpa ROI-crop tidak ada langkah merge alami, jadi gabungkan
+            # manual supaya augmented images tetap ikut training.
+            if ok_aug_dir.exists() and any(ok_aug_dir.iterdir()):
+                ok_dir = _merge_dirs([ok_dir, ok_aug_dir])
+            if ng_dir.exists() and ng_aug_dir.exists() and any(ng_aug_dir.iterdir()):
+                ng_dir = _merge_dirs([ng_dir, ng_aug_dir])
 
         ng_path = ng_dir if (ng_dir.exists() and list(ng_dir.glob("*"))) else None
 

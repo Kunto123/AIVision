@@ -52,6 +52,7 @@ class TeachPage(QWidget):
     thumbnail_clicked = Signal(str)
     import_cancelled = Signal()
     training_config_changed = Signal()
+    augmentation_config_changed = Signal()
 
     def __init__(self, translator: Translator, parent=None):
         super().__init__(parent)
@@ -379,6 +380,57 @@ class TeachPage(QWidget):
 
         right_layout.addWidget(profile_group)
 
+        # ── Augmentasi Data ──
+        # Sengaja tidak menyediakan cutout/distorsi berat/blur berat — jenis
+        # augmentasi itu bisa menyerupai defect asli (scratch/kontaminasi)
+        # dan justru mengajari model salah. Cuma transformasi klasik yang
+        # aman: rotasi, flip, translasi, brightness, contrast.
+        aug_group = QGroupBox("🧬 Augmentasi Data")
+        aug_outer = QVBoxLayout(aug_group)
+        aug_outer.setSpacing(6)
+        aug_outer.setContentsMargins(10, 8, 10, 10)
+
+        count_row = QHBoxLayout()
+        count_row.addWidget(QLabel("Jumlah gambar per jenis:"))
+        self._aug_count_spin = QSpinBox()
+        self._aug_count_spin.setRange(1, 50)
+        self._aug_count_spin.setValue(5)
+        self._aug_count_spin.valueChanged.connect(self._on_augmentation_field_changed)
+        count_row.addWidget(self._aug_count_spin)
+        count_row.addStretch()
+        aug_outer.addLayout(count_row)
+
+        # Baris tanpa parameter rentang (flip) — cuma checkbox.
+        self._aug_flip_h_cb = QCheckBox("Flip Horizontal")
+        self._aug_flip_h_cb.toggled.connect(self._on_augmentation_field_changed)
+        aug_outer.addWidget(self._aug_flip_h_cb)
+
+        self._aug_flip_v_cb = QCheckBox("Flip Vertical")
+        self._aug_flip_v_cb.toggled.connect(self._on_augmentation_field_changed)
+        aug_outer.addWidget(self._aug_flip_v_cb)
+
+        # Baris dengan parameter rentang: checkbox aktif + spin max + "Acak".
+        self._aug_rotation_cb, self._aug_rotation_spin, self._aug_rotation_random_cb = \
+            self._build_augmentation_range_row(
+                aug_outer, "Rotasi", "°", 1, 180, 15)
+        self._aug_translation_cb, self._aug_translation_spin, self._aug_translation_random_cb = \
+            self._build_augmentation_range_row(
+                aug_outer, "Translasi", "%", 1, 50, 10)
+        self._aug_brightness_cb, self._aug_brightness_spin, self._aug_brightness_random_cb = \
+            self._build_augmentation_range_row(
+                aug_outer, "Brightness", "%", 1, 100, 20)
+        self._aug_contrast_cb, self._aug_contrast_spin, self._aug_contrast_random_cb = \
+            self._build_augmentation_range_row(
+                aug_outer, "Contrast", "%", 1, 100, 20)
+
+        self._aug_regenerate_btn = QPushButton("🔄 Regenerate")
+        self._aug_regenerate_btn.setToolTip(
+            "Paksa generate ulang augmentasi walau setting tidak berubah "
+            "(misal cuma ingin nilai Acak yang baru).")
+        aug_outer.addWidget(self._aug_regenerate_btn)
+
+        right_layout.addWidget(aug_group)
+
         # Train button + progress stacked
         train_box = QVBoxLayout()
         train_box.setSpacing(4)
@@ -539,6 +591,36 @@ class TeachPage(QWidget):
         right_layout.addStretch()
 
         layout.addWidget(right_panel, 2)
+
+    def _build_augmentation_range_row(self, parent_layout, label: str, unit: str,
+                                       min_val: int, max_val: int, default_val: int):
+        """Baris augmentasi bertipe rentang: checkbox aktif + spin max + 'Acak'.
+        Qt spinbox tidak punya state kosong native, jadi 'kosong = Acak' di
+        spek fitur direalisasikan lewat checkbox terpisah yang men-disable
+        spin-nya — nilai tersimpan jadi None (bukan angka yang kebetulan
+        masih ada di spinbox yang di-disable) saat Acak dicentang."""
+        row = QHBoxLayout()
+        row.setSpacing(6)
+
+        enable_cb = QCheckBox(label)
+        enable_cb.toggled.connect(self._on_augmentation_field_changed)
+        row.addWidget(enable_cb)
+        row.addStretch()
+
+        row.addWidget(QLabel(f"Max ({unit}):"))
+        spin = QSpinBox()
+        spin.setRange(min_val, max_val)
+        spin.setValue(default_val)
+        spin.valueChanged.connect(self._on_augmentation_field_changed)
+        row.addWidget(spin)
+
+        random_cb = QCheckBox("Acak")
+        random_cb.toggled.connect(lambda checked, s=spin: s.setEnabled(not checked))
+        random_cb.toggled.connect(self._on_augmentation_field_changed)
+        row.addWidget(random_cb)
+
+        parent_layout.addLayout(row)
+        return enable_cb, spin, random_cb
 
     # ---- Gallery ----
 
@@ -813,6 +895,74 @@ class TeachPage(QWidget):
         self._adv_form.setRowVisible(self._epochs_spin, is_efficientad)
         self._adv_form.setRowVisible(self._backbone_combo, not is_efficientad)
         self._adv_form.setRowVisible(self._coreset_spin, not is_efficientad)
+
+    # ---- Augmentasi Data ----
+
+    def get_augmentation_config(self) -> dict:
+        def _range_val(spin: QSpinBox, random_cb: QCheckBox):
+            return None if random_cb.isChecked() else spin.value()
+
+        return {
+            "count_per_type": self._aug_count_spin.value(),
+            "rotation": {"enabled": self._aug_rotation_cb.isChecked(),
+                         "max_degrees": _range_val(self._aug_rotation_spin,
+                                                    self._aug_rotation_random_cb)},
+            "flip_horizontal": {"enabled": self._aug_flip_h_cb.isChecked()},
+            "flip_vertical": {"enabled": self._aug_flip_v_cb.isChecked()},
+            "translation": {"enabled": self._aug_translation_cb.isChecked(),
+                             "max_percent": _range_val(self._aug_translation_spin,
+                                                        self._aug_translation_random_cb)},
+            "brightness": {"enabled": self._aug_brightness_cb.isChecked(),
+                           "max_percent": _range_val(self._aug_brightness_spin,
+                                                      self._aug_brightness_random_cb)},
+            "contrast": {"enabled": self._aug_contrast_cb.isChecked(),
+                         "max_percent": _range_val(self._aug_contrast_spin,
+                                                    self._aug_contrast_random_cb)},
+        }
+
+    def set_augmentation_config(self, cfg: dict):
+        _widgets = [
+            self._aug_count_spin, self._aug_flip_h_cb, self._aug_flip_v_cb,
+            self._aug_rotation_cb, self._aug_rotation_spin, self._aug_rotation_random_cb,
+            self._aug_translation_cb, self._aug_translation_spin, self._aug_translation_random_cb,
+            self._aug_brightness_cb, self._aug_brightness_spin, self._aug_brightness_random_cb,
+            self._aug_contrast_cb, self._aug_contrast_spin, self._aug_contrast_random_cb,
+        ]
+        for w in _widgets:
+            w.blockSignals(True)
+        try:
+            self._aug_count_spin.setValue(cfg.get("count_per_type", 5))
+            self._aug_flip_h_cb.setChecked(cfg.get("flip_horizontal", {}).get("enabled", False))
+            self._aug_flip_v_cb.setChecked(cfg.get("flip_vertical", {}).get("enabled", False))
+
+            def _load_range(enable_cb, spin, random_cb, sub_cfg, key, default):
+                enable_cb.setChecked(sub_cfg.get("enabled", False))
+                val = sub_cfg.get(key)
+                random_cb.setChecked(val is None)
+                spin.setValue(val if val is not None else default)
+                spin.setEnabled(val is not None)
+
+            _load_range(self._aug_rotation_cb, self._aug_rotation_spin,
+                        self._aug_rotation_random_cb,
+                        cfg.get("rotation", {}), "max_degrees", 15)
+            _load_range(self._aug_translation_cb, self._aug_translation_spin,
+                        self._aug_translation_random_cb,
+                        cfg.get("translation", {}), "max_percent", 10)
+            _load_range(self._aug_brightness_cb, self._aug_brightness_spin,
+                        self._aug_brightness_random_cb,
+                        cfg.get("brightness", {}), "max_percent", 20)
+            _load_range(self._aug_contrast_cb, self._aug_contrast_spin,
+                        self._aug_contrast_random_cb,
+                        cfg.get("contrast", {}), "max_percent", 20)
+        finally:
+            for w in _widgets:
+                w.blockSignals(False)
+
+    def _on_augmentation_field_changed(self, *_):
+        self.augmentation_config_changed.emit()
+
+    def get_augmentation_regenerate_button(self) -> QPushButton:
+        return self._aug_regenerate_btn
 
     def _update_pc_field_visibility(self, *_):
         """Show only the threshold/canny rows relevant to the selected method."""

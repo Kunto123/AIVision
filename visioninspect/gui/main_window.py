@@ -1183,10 +1183,8 @@ class MainWindow(QMainWindow):
 
         # Counts
         if self._active_template:
-            ok_count = self._pm.count_template_images(
-                self._active_program, self._active_template, "ok")
-            ng_count = self._pm.count_template_images(
-                self._active_program, self._active_template, "ng")
+            ok_count = self._count_all_images("ok")
+            ng_count = self._count_all_images("ng")
             self._teach_page.set_ok_count(ok_count)
             self._teach_page.set_ng_count(ng_count)
 
@@ -1236,10 +1234,36 @@ class MainWindow(QMainWindow):
                 self._pm.get_augmentation_config(
                     self._active_program, self._active_template))
 
+    def _count_all_images(self, label: str) -> int:
+        """Total gambar training untuk label ini — gabungan foto legacy
+        (images/<label>/, di-crop rata ke semua ROI saat training) + crop
+        per-ROI dari CaptureReviewDialog (images/<label>_per_roi/, sudah
+        benar per-ROI). Dipakai di mana pun butuh "berapa banyak data
+        OK/NG yang sebenarnya ada", bukan cuma folder lama — supaya
+        template yang datanya semua lewat review per-ROI (2+ ROI) tidak
+        salah dianggap "belum ada gambar OK" padahal folder legacy-nya
+        memang sengaja kosong."""
+        if not self._active_template:
+            return 0
+        base = self._pm.count_template_images(
+            self._active_program, self._active_template, label)
+        per_roi = self._pm.count_template_images(
+            self._active_program, self._active_template, f"{label}_per_roi")
+        return base + per_roi
+
+    def _list_all_images(self, label: str) -> list:
+        """Sama seperti _count_all_images tapi mengembalikan daftar path."""
+        if not self._active_template:
+            return []
+        base = self._pm.list_template_images(
+            self._active_program, self._active_template, label)
+        per_roi = self._pm.list_template_images(
+            self._active_program, self._active_template, f"{label}_per_roi")
+        return base + per_roi
+
     def _load_gallery_thumbnails(self, label: str):
         """Load thumbnail images from disk into gallery."""
-        images = self._pm.list_template_images(
-            self._active_program, self._active_template, label)
+        images = self._list_all_images(label)
         for img_path in images[-30:]:
             pixmap = QPixmap(str(img_path))
             if not pixmap.isNull():
@@ -1250,10 +1274,48 @@ class MainWindow(QMainWindow):
 
     # ---- Capture ----
 
+    def _maybe_review_and_save_per_roi(self, frame, default_label: str) -> bool:
+        """Kalau template ini punya 2+ ROI aktif, buka dialog review per-ROI
+        sebelum menyimpan — satu foto bisa punya kondisi campuran antar ROI
+        (mis. ROI1 OK, ROI2 NG), dan semua ROI berbagi satu memory
+        bank/model yang sama, jadi label yang salah pada satu ROI bisa
+        mencemari model yang dipakai ROI lain juga. Dengan 0-1 ROI tidak
+        ada ambiguitas untuk direview (foto = ROI itu sendiri).
+
+        Return True kalau ditangani di sini (baik tersimpan maupun
+        dibatalkan user) — caller harus langsung return. Return False
+        kalau caller harus lanjut pakai alur simpan foto-utuh yang lama.
+        """
+        if len(self._current_all_rois) < 2:
+            return False
+
+        from visioninspect.gui.dialogs.capture_review_dialog import CaptureReviewDialog
+        rois = self._teach_page.get_roi_editor().get_rois()
+        dialog = CaptureReviewDialog(frame, rois, default_label, parent=self)
+        if not dialog.exec():
+            self.set_status("Review dibatalkan, tidak ada yang disimpan.", 3000)
+            return True
+
+        saved_ok = saved_ng = 0
+        for roi, crop, lbl in dialog.get_labeled_crops():
+            self._pm.save_template_image(
+                self._active_program, self._active_template,
+                crop, f"{lbl}_per_roi", update_count=False)
+            if lbl == "ok":
+                saved_ok += 1
+            else:
+                saved_ng += 1
+        logger.info("Capture per-ROI: %d OK, %d NG (template=%s)",
+                     saved_ok, saved_ng, self._active_template)
+        self._refresh_template_ui()
+        self.set_status(f"Tersimpan per-ROI: {saved_ok} OK, {saved_ng} NG", 3000)
+        return True
+
     def _on_capture(self, label: str):
         """Capture frame from camera — or in import mode, save current import image.
 
-        Full frame disimpan untuk ditampilkan di galeri.
+        Full frame disimpan untuk ditampilkan di galeri (kecuali template
+        punya 2+ ROI, lihat _maybe_review_and_save_per_roi).
         ROI cropping dilakukan saat training (lihat TrainingWorker).
         """
         # === IMPORT REVIEW MODE ===
@@ -1272,6 +1334,9 @@ class MainWindow(QMainWindow):
         frame = self._camera_worker.get_frame()
         if frame is None:
             self.set_status("Gagal ambil frame!", 3000)
+            return
+
+        if self._maybe_review_and_save_per_roi(frame, label):
             return
 
         # Save full frame (cropping ke ROI dilakukan saat training)
@@ -1362,15 +1427,21 @@ class MainWindow(QMainWindow):
         img = self._import_current_image
         if img is not None:
             path = self._import_files[self._import_index]
-            # Save to disk (batch mode — count diakumulasi dan ditulis sekali di akhir)
-            self._pm.save_template_image(
-                self._active_program, self._active_template, img, label,
-                update_count=False)
-            # Accumulate count in memory
-            if label == "ok":
-                self._import_ok_count += 1
+            if self._maybe_review_and_save_per_roi(img, label):
+                # Tersimpan (atau dibatalkan) lewat review per-ROI — tidak
+                # pakai counter num_ok/num_ng batch import (per-ROI save
+                # selalu update_count=False, dihitung via glob folder saja).
+                pass
             else:
-                self._import_ng_count += 1
+                # Save to disk (batch mode — count diakumulasi dan ditulis sekali di akhir)
+                self._pm.save_template_image(
+                    self._active_program, self._active_template, img, label,
+                    update_count=False)
+                # Accumulate count in memory
+                if label == "ok":
+                    self._import_ok_count += 1
+                else:
+                    self._import_ng_count += 1
             logger.info("Import saved %s as %s", Path(path).name, label)
         else:
             logger.warning("Import: cached image missing for index %d", self._import_index)
@@ -1818,8 +1889,7 @@ class MainWindow(QMainWindow):
             self.set_status("Pilih template dulu!", 3000)
             return
 
-        ok_count = self._pm.count_template_images(
-            self._active_program, self._active_template, "ok")
+        ok_count = self._count_all_images("ok")
         if ok_count < 1:
             QMessageBox.warning(self, "Training",
                                 "Minimal 1 gambar OK diperlukan untuk training.")
@@ -2189,8 +2259,7 @@ class MainWindow(QMainWindow):
 
         # ── Additional Learning: retrain on this specific template ──
         if saved_count > 0:
-            ok_count = self._pm.count_template_images(
-                self._active_program, self._active_template, "ok")
+            ok_count = self._count_all_images("ok")
             if ok_count >= 1:
                 self.set_status(f"🧠 Additional Learning: {saved_count} ROI(s) + {ok_count} OK total",
                                 2000)

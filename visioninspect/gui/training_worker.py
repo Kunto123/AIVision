@@ -138,6 +138,7 @@ class TrainingWorker(QObject):
         if rois:
             self.progress.emit(3, f"Menyiapkan data: crop ke {len(rois)} ROI...")
             import tempfile
+            import shutil
             ok_crop_dir = Path(tempfile.mkdtemp(prefix="visioninspect_ok_crop_"))
             ng_crop_dir = Path(tempfile.mkdtemp(prefix="visioninspect_ng_crop_"))
             n_ok = _crop_images_to_rois(ok_dir, rois, ok_crop_dir, input_size)
@@ -148,6 +149,30 @@ class TrainingWorker(QObject):
                 len(list(ok_dir.glob("*"))), n_ok, len(rois),
                 len(list(ng_dir.glob("*"))), n_ng,
             )
+
+            # ── Gabungkan crop per-ROI yang sudah dilabeli benar lewat
+            # CaptureReviewDialog (images/ok_per_roi, images/ng_per_roi) —
+            # ini sudah berbentuk crop ROI jadi (sudah di-resize ke
+            # input_size), jadi cukup disalin langsung, JANGAN di-crop ulang
+            # (itu akan meng-crop hasil crop, merusaknya). Beda dengan foto
+            # legacy di atas yang labelnya berlaku rata ke semua ROI, crop
+            # per-ROI ini sudah pasti benar untuk ROI spesifiknya masing-
+            # masing — lihat diskusi soal kenapa 1 foto bisa punya ROI1=OK
+            # ROI2=NG dan kenapa itu krusial dilabeli terpisah.
+            ok_per_roi_dir = tmpl_dir / "images" / "ok_per_roi"
+            ng_per_roi_dir = tmpl_dir / "images" / "ng_per_roi"
+            n_ok_pr = n_ng_pr = 0
+            if ok_per_roi_dir.exists():
+                for f in ok_per_roi_dir.glob("*.png"):
+                    shutil.copy2(f, ok_crop_dir / f.name)
+                    n_ok_pr += 1
+            if ng_per_roi_dir.exists():
+                for f in ng_per_roi_dir.glob("*.png"):
+                    shutil.copy2(f, ng_crop_dir / f.name)
+                    n_ng_pr += 1
+            if n_ok_pr or n_ng_pr:
+                logger.info("Crop per-ROI (CaptureReviewDialog): +%d OK, +%d NG",
+                            n_ok_pr, n_ng_pr)
 
             # ── Augmentasi (opsional) — jalan SETELAH ROI-crop, bukan
             # sebelumnya. Kalau rotasi/flip/translasi dijalankan di
@@ -342,18 +367,34 @@ class TrainingWorker(QObject):
         tmpl_dir = self._pm._get_template_dir(program) / template_id
         ok_src = tmpl_dir / "images" / "ok"
         ng_src = tmpl_dir / "images" / "ng"
+        # Crop per-ROI yang disimpan lewat CaptureReviewDialog (nama file
+        # mengandung roi<uid[:4]>) — sudah pasti berlaku untuk ROI ini
+        # spesifik (bukan tebakan dari foto full-frame yang labelnya
+        # berlaku rata ke semua ROI), jadi lebih akurat untuk kalibrasi.
+        ok_per_roi_src = tmpl_dir / "images" / "ok_per_roi"
+        ng_per_roi_src = tmpl_dir / "images" / "ng_per_roi"
         input_size = tmpl_cfg.get("input_size", 256)
 
         per_roi = {}
         norm_ok, norm_ng = [], []
         global_ok, global_ng = [], []
         for roi in rois:
+            uid_tag = roi.get("uid", "default")[:4]
             okd = Path(tempfile.mkdtemp(prefix="vi_cal_ok_"))
             ngd = Path(tempfile.mkdtemp(prefix="vi_cal_ng_"))
             try:
+                # Foto legacy full-frame: fallback best-effort — labelnya
+                # berlaku rata ke semua ROI karena data lama tidak punya
+                # info kondisi per-ROI yang lebih akurat.
                 _crop_images_to_rois(ok_src, [roi], okd, input_size)
                 if ng_src.exists():
                     _crop_images_to_rois(ng_src, [roi], ngd, input_size)
+                if ok_per_roi_src.exists():
+                    for f in ok_per_roi_src.glob(f"*roi{uid_tag}*.png"):
+                        shutil.copy2(f, okd / f.name)
+                if ng_per_roi_src.exists():
+                    for f in ng_per_roi_src.glob(f"*roi{uid_tag}*.png"):
+                        shutil.copy2(f, ngd / f.name)
                 ok_imgs = sorted(okd.glob("*.png"))
                 ng_imgs = sorted(ngd.glob("*.png"))
                 ok_raw = self._pipeline._score_images_openvino(model_xml, ok_imgs)

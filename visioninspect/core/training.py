@@ -13,6 +13,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from visioninspect.utils.logging_setup import get_logger
+from visioninspect.core.resource_detector import detect_resource, check_training_safety
 
 logger = get_logger("training")
 
@@ -35,6 +36,12 @@ class TrainingConfig:
         threshold_margin_sigma: float = 3.0,
         enable_int8: bool = True,
         max_epochs: Optional[int] = None,
+        # === BARU: Resource-aware parameters ===
+        device: str = "auto",               # "auto" | "cuda" | "cpu"
+        batch_size: int = 0,                # 0 = auto-pilih
+        num_workers: int = 0,               # 0 = auto-pilih
+        precision: str = "32",              # "32" | "16-mixed"
+        enable_mixed_precision: bool = False,
     ):
         self.algorithm = algorithm
         self.backbone = backbone
@@ -44,6 +51,11 @@ class TrainingConfig:
         self.manual_threshold = manual_threshold
         self.threshold_margin_sigma = threshold_margin_sigma
         self.enable_int8 = enable_int8
+        self.device = device
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.precision = precision
+        self.enable_mixed_precision = enable_mixed_precision
         # PatchCore is one-shot (memory-bank, no backprop) — 1 epoch is correct.
         # EfficientAd trains an actual network via backprop and needs many more
         # epochs to converge; None picks a sensible per-algorithm default.
@@ -105,6 +117,29 @@ class TrainingPipeline:
             raise TrainingError("Minimal 1 gambar OK diperlukan")
 
         self._report(5, f"Menyiapkan data: {len(ok_images)} OK, {len(ng_images)} NG")
+
+        # ── Memory Guard: estimasi peak memory & auto-adjust ────────────────
+        try:
+            import os as _os
+            # Estimasi kasar total gambar (termasuk augmentasi jika ada info)
+            total_images = len(ok_images) + len(ng_images)
+            peak_est = check_training_safety(
+                detect_resource(), total_images, self._config.algorithm,
+                aug_count=0, aug_factor=1)
+            if not peak_est.safe_to_train:
+                msg = (
+                    f"⚠️ Memory Guard: estimasi peak memory {peak_est.estimated_peak_gb}GB "
+                    f"melebihi batas aman. Disarankan kurangi jumlah gambar atau "
+                    f"matikan beberapa jenis augmentasi."
+                )
+                logger.warning(msg)
+                self._report(5, msg)
+            if peak_est.warnings:
+                for w in peak_est.warnings:
+                    logger.warning("Memory Guard: %s", w)
+        except Exception as _e:
+            logger.debug("Memory guard check skipped: %s", _e)
+        # ── Akhir Memory Guard ──────────────────────────────────────────────
 
         # Try Anomalib import
         try:
@@ -175,7 +210,30 @@ class TrainingPipeline:
             # EfficientAd's teacher-student normalization stats are computed
             # per-sample and require batch_size=1 (anomalib raises otherwise);
             # PatchCore has no such constraint.
-            batch_size = 1 if self._config.algorithm == "efficientad" else 16
+            # --- Resource-aware batch_size & num_workers ---
+            if self._config.algorithm == "efficientad":
+                batch_size = 1  # EfficientAd Wajib batch_size=1
+                num_workers = 0
+            else:
+                # PatchCore — pakai rekomendasi dari config atau auto-detect
+                if self._config.batch_size > 0:
+                    batch_size = self._config.batch_size
+                else:
+                    res = detect_resource()
+                    batch_size = res.batch_size
+                    num_workers = res.num_workers
+                    logger.info(
+                        "ResourceDetector: mode=%s, batch_size=%d, num_workers=%d, device=%s",
+                        res.mode, batch_size, num_workers, res.device)
+                    if res.warnings:
+                        for w in res.warnings:
+                            logger.warning("Resource: %s", w)
+                # Pastikan batch_size minimal 1
+                batch_size = max(1, batch_size)
+                if self._config.num_workers > 0:
+                    num_workers = self._config.num_workers
+                else:
+                    num_workers = num_workers  # dari detect_resource
             datamodule = Folder(
                 name="visioninspect",
                 task=TaskType.CLASSIFICATION,
@@ -185,7 +243,7 @@ class TrainingPipeline:
                 image_size=(self._config.input_size, self._config.input_size),
                 train_batch_size=batch_size,
                 eval_batch_size=batch_size,
-                num_workers=0,
+                num_workers=num_workers,
             )
             datamodule.setup()
         except Exception as e:
@@ -200,12 +258,47 @@ class TrainingPipeline:
         # (Lightning bikin symlink v0→latest yg error di Windows tanpa privilege)
         import tempfile as _tf
         _train_work_dir = _tf.mkdtemp(prefix="visioninspect_")
+
+        # Tentukan accelerator & precision
+        if self._config.device == "auto":
+            res = detect_resource()
+            accelerator = "cuda" if res.has_cuda else "cpu"
+            precision = res.precision
+            if res.warnings:
+                for w in res.warnings:
+                    logger.warning("Resource: %s", w)
+        elif self._config.device == "cuda":
+            accelerator = "cuda"
+            precision = "16-mixed" if self._config.enable_mixed_precision else self._config.precision
+        else:
+            accelerator = "cpu"
+            precision = self._config.precision
+
+        # Validasi: fallback ke CPU kalau CUDA diminta tapi tidak tersedia
+        if accelerator == "cuda":
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    logger.warning("CUDA diminta tapi tidak tersedia, fallback ke CPU")
+                    accelerator = "cpu"
+                    precision = "32"
+            except ImportError:
+                logger.warning("PyTorch tidak terinstall, fallback ke CPU")
+                accelerator = "cpu"
+                precision = "32"
+
+        logger.info("Engine: accelerator=%s, precision=%s, batch_size=%d, num_workers=%d",
+                     accelerator, precision,
+                     batch_size if 'batch_size' in dir() else '?',
+                     num_workers if 'num_workers' in dir() else '?')
+
         engine = Engine(
             task="classification",  # or "segmentation" depending on model
             image_metrics=["F1Score", "AUROC"],
             pixel_metrics=None,
-            accelerator="cpu",
+            accelerator=accelerator,
             devices=1,
+            precision=precision,
             max_epochs=self._config.max_epochs,
             default_root_dir=_train_work_dir,
             #enable_checkpointing=False,  # cegah symlink v0→latest (WinError 1314)

@@ -312,6 +312,12 @@ class TrainingWorker(QObject):
             manual_threshold=tmpl_cfg.get("manual_threshold", 0.5),
             enable_int8=tmpl_cfg.get("enable_int8", True),
             max_epochs=tmpl_cfg.get("max_epochs"),
+            # === BARU: Resource-aware parameters dari config atau auto ===
+            device=tmpl_cfg.get("device", "auto"),
+            batch_size=tmpl_cfg.get("batch_size", 0),     # 0 = auto
+            num_workers=tmpl_cfg.get("num_workers", 0),    # 0 = auto
+            precision=tmpl_cfg.get("precision", "32"),
+            enable_mixed_precision=tmpl_cfg.get("enable_mixed_precision", False),
         )
 
         # Create pipeline

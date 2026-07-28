@@ -443,6 +443,152 @@ class ProgramManager:
         return master if master.exists() else None
 
     # =====================================================================
+    # MODEL EXPORT / IMPORT (untuk deploy Dev → Edge)
+    # =====================================================================
+
+    def export_model_to_zip(self, program: str, template_id: str,
+                            output_path: Path) -> str:
+        """Export trained model + config + metadata ke file .zip portabel.
+
+        Args:
+            program: Nama program.
+            template_id: ID template.
+            output_path: Path file .zip tujuan.
+
+        Returns:
+            str: Path file zip yang dihasilkan.
+        """
+        import zipfile
+
+        model_dir = self._get_template_dir(program) / template_id / "model"
+        if not model_dir.exists() or not any(model_dir.iterdir()):
+            raise ProgramError(
+                f"Tidak ada model untuk template '{template_id}'. Latih model dulu.")
+
+        tmpl_cfg = self.get_template_config(program, template_id)
+        if not tmpl_cfg.get("trained", False):
+            raise ProgramError(
+                f"Template '{template_id}' belum pernah di-train.")
+
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with zipfile.ZipFile(str(output_path), "w", zipfile.ZIP_DEFLATED) as zf:
+            # Model artifacts
+            if model_dir.exists():
+                for fpath in model_dir.rglob("*"):
+                    if fpath.is_file():
+                        arcname = f"model/{fpath.relative_to(model_dir)}"
+                        zf.write(str(fpath), arcname)
+
+            # Template config (tanpa gambar)
+            zf.writestr("template_config.json",
+                        json.dumps(tmpl_cfg, indent=2, ensure_ascii=False))
+
+            # Metadata
+            meta = {
+                "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "program": program,
+                "template_id": template_id,
+                "model_version": tmpl_cfg.get("model_version", 0),
+                "algorithm": tmpl_cfg.get("algorithm", ""),
+                "input_size": tmpl_cfg.get("input_size", 256),
+                "threshold": tmpl_cfg.get("threshold", 0.5),
+            }
+            zf.writestr("export_metadata.json",
+                        json.dumps(meta, indent=2, ensure_ascii=False))
+
+        logger.info("Model exported: %s → %s (%s)",
+                    template_id, output_path,
+                    f"{output_path.stat().st_size / 1024:.0f} KB")
+        return str(output_path)
+
+    def import_model_from_zip(self, zip_path: Path, program: str,
+                              template_id: str) -> dict:
+        """Import model dari file .zip ke template.
+
+        Args:
+            zip_path: Path file .zip hasil export.
+            program: Nama program tujuan.
+            template_id: ID template tujuan (bisa berbeda dari asalnya).
+
+        Returns:
+            dict: Metadata hasil import.
+        """
+        import zipfile
+
+        zip_path = Path(zip_path)
+        if not zip_path.exists():
+            raise ProgramError(f"File tidak ditemukan: {zip_path}")
+
+        tmpl_dir = self._get_template_dir(program) / template_id
+        model_dir = tmpl_dir / "model"
+
+        import_meta = {}
+        restored_config = {}
+
+        with zipfile.ZipFile(str(zip_path), "r") as zf:
+            # Baca metadata
+            if "export_metadata.json" in zf.namelist():
+                import_meta = json.loads(zf.read("export_metadata.json"))
+
+            # Baca template config
+            if "template_config.json" in zf.namelist():
+                restored_config = json.loads(zf.read("template_config.json"))
+
+            # Extract model files
+            model_files = [n for n in zf.namelist() if n.startswith("model/")]
+            if not model_files:
+                raise ProgramError(
+                    "File .zip tidak berisi model (folder 'model/' tidak ditemukan).")
+
+            # Hapus model lama
+            if model_dir.exists():
+                import gc
+                for _ in range(3):
+                    try:
+                        shutil.rmtree(str(model_dir))
+                        break
+                    except PermissionError:
+                        gc.collect()
+                        time.sleep(0.5)
+
+            for name in model_files:
+                # Skip direktori
+                if name.endswith("/"):
+                    continue
+                rel_path = name[len("model/"):]
+                dest = model_dir / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(name) as src, open(str(dest), "wb") as dst:
+                    dst.write(src.read())
+
+            # Update template config
+            if restored_config:
+                # Pertahankan images/gallery yang sudah ada
+                existing_cfg = self.get_template_config(program, template_id)
+                restored_config["images"] = existing_cfg.get("images", {})
+                restored_config["image_count"] = existing_cfg.get("image_count", 0)
+                # Tandai sebagai trained
+                restored_config["trained"] = True
+                restored_config["model_version"] = (
+                    existing_cfg.get("model_version", 0) + 1)
+                restored_config["imported_from"] = import_meta.get("exported_at", "")
+                restored_config["last_trained"] = import_meta.get("exported_at", "")
+                self.update_template_config(program, template_id, restored_config)
+
+        logger.info("Model imported: %s → %s/%s (%d files)",
+                    zip_path, program, template_id, len(model_files))
+        return {
+            "imported": True,
+            "program": program,
+            "template_id": template_id,
+            "model_version": restored_config.get("model_version", 0),
+            "source_exported_at": import_meta.get("exported_at", ""),
+            "files_restored": len(model_files),
+        }
+
+    # =====================================================================
     # AUGMENTATION
     # =====================================================================
 

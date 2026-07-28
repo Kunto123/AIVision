@@ -1,7 +1,6 @@
-# VisionInspect - Industrial Visual Inspection System
+# VisionInspect - PC Edge (CPU) requirements
 # Python 3.10+ required
-# NOTE: PC Dev (GPU) → pakai requirements_dev.txt
-#       PC Edge (CPU) → pakai file ini atau requirements_edge.txt
+# Gunakan: pip install -r requirements_edge.txt
 
 --extra-index-url https://download.pytorch.org/whl/cpu
 

@@ -161,11 +161,20 @@ class ProgramManager:
                         config: Optional[dict] = None) -> dict:
         """
         Create a new template in a program.
+        Folder name = display name (disanitasi), bukan template_N lagi.
         Returns template info.
         """
         safe_name = self._sanitize_name(template_name)
-        tmpl_id = self._next_template_id(program)
-        tmpl_dir = self._get_template_dir(program) / tmpl_id
+        tmpl_dir_base = self._get_template_dir(program)
+
+        # ── Cari folder name yg unik ──
+        tmpl_id = safe_name
+        tmpl_dir = tmpl_dir_base / tmpl_id
+        counter = 1
+        while tmpl_dir.exists():
+            tmpl_id = f"{safe_name}_{counter}"
+            tmpl_dir = tmpl_dir_base / tmpl_id
+            counter += 1
 
         # Create folders
         (tmpl_dir / "images" / "ok").mkdir(parents=True)
@@ -177,7 +186,7 @@ class ProgramManager:
         # Default template config
         default_config = {
             "id": tmpl_id,
-            "name": safe_name,
+            "name": tmpl_id,
             "algorithm": "patchcore",
             "backbone": "resnet18",
             "input_size": 256,
@@ -203,9 +212,44 @@ class ProgramManager:
 
         return {
             "id": tmpl_id,
-            "name": safe_name,
+            "name": tmpl_id,
             "config": default_config,
         }
+
+    def rename_template(self, program: str, old_id: str,
+                        new_name: str) -> dict:
+        """
+        Rename template: rename folder + update config.
+        Returns updated template info.
+        """
+        safe_name = self._sanitize_name(new_name)
+        tmpl_dir_base = self._get_template_dir(program)
+        old_dir = tmpl_dir_base / old_id
+
+        if not old_dir.exists():
+            raise ProgramError(f"Template '{old_id}' tidak ditemukan")
+
+        # Cari folder name baru yg unik
+        new_id = safe_name
+        new_dir = tmpl_dir_base / new_id
+        counter = 1
+        while new_dir.exists() and new_dir != old_dir:
+            new_id = f"{safe_name}_{counter}"
+            new_dir = tmpl_dir_base / new_id
+            counter += 1
+
+        # Rename folder
+        old_dir.rename(new_dir)
+
+        # Update config
+        cfg_path = new_dir / "config.json"
+        cfg = self._load_json(cfg_path, {})
+        cfg["id"] = new_id
+        cfg["name"] = new_id
+        self._atomic_write(cfg_path, cfg)
+
+        logger.info("Template renamed: '%s' → '%s' in program '%s'", old_id, new_id, program)
+        return {"id": new_id, "name": new_id, "config": cfg}
 
     def delete_template(self, program: str, template_id: str) -> None:
         """Delete a template."""

@@ -112,6 +112,11 @@ class TeachPage(QWidget):
         self._add_template_btn.setToolTip("Buat template baru")
         tmpl_layout.addWidget(self._add_template_btn)
 
+        self._rename_template_btn = QPushButton("✏️")
+        self._rename_template_btn.setFixedWidth(36)
+        self._rename_template_btn.setToolTip("Ubah nama template")
+        tmpl_layout.addWidget(self._rename_template_btn)
+
         self._clear_btn = QPushButton("🗑")
         self._clear_btn.setFixedWidth(36)
         self._clear_btn.setToolTip("Hapus template aktif")
@@ -984,6 +989,7 @@ class TeachPage(QWidget):
     def get_progress_bar(self): return self._progress_bar
     def get_template_combo(self): return self._template_combo
     def get_add_template_button(self): return self._add_template_btn
+    def get_rename_template_button(self): return self._rename_template_btn
     def get_clear_button(self): return self._clear_btn
     def get_roi_editor(self): return self._roi_editor
     def get_roi_panel(self): return self._roi_panel

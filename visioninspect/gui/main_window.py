@@ -281,6 +281,19 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
 
+        # ── Tools menu ──
+        tools_menu = menubar.addMenu("Tools")
+
+        self._export_model_action = QAction("Export Model", self)
+        self._export_model_action.setShortcut(QKeySequence("Ctrl+E"))
+        self._export_model_action.triggered.connect(self._export_model_dialog)
+        tools_menu.addAction(self._export_model_action)
+
+        self._import_model_action = QAction("Import Model", self)
+        self._import_model_action.setShortcut(QKeySequence("Ctrl+I"))
+        self._import_model_action.triggered.connect(self._import_model_dialog)
+        tools_menu.addAction(self._import_model_action)
+
     def _apply_theme(self):
         theme_path = Path(__file__).parent / "theme.qss"
         if theme_path.exists():
@@ -393,6 +406,7 @@ class MainWindow(QMainWindow):
 
         # TEACH: Template buttons
         self._teach_page.get_add_template_button().clicked.connect(self._on_add_template)
+        self._teach_page.get_rename_template_button().clicked.connect(self._on_rename_template)
         self._teach_page.get_template_combo().currentIndexChanged.connect(
             self._on_template_changed)
 
@@ -1639,6 +1653,30 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "Error", str(e))
 
+    def _on_rename_template(self):
+        """Rename active template: folder + config."""
+        if not self._active_program or not self._active_template:
+            QMessageBox.warning(self, "Rename Template",
+                                "Pilih template terlebih dahulu.")
+            return
+        old_id = self._active_template
+        current_name = self._pm.get_template_config(
+            self._active_program, old_id).get("name", old_id)
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Template",
+            "Nama baru:", text=current_name)
+        if ok and new_name.strip() and new_name.strip() != current_name:
+            try:
+                result = self._pm.rename_template(
+                    self._active_program, old_id, new_name.strip())
+                self._active_template = result["id"]
+                self._pm.set_active_template(
+                    self._active_program, self._active_template)
+                self._refresh_template_ui()
+                self.set_status(f"Template diganti: '{current_name}' → '{result['name']}'", 3000)
+            except Exception as e:
+                QMessageBox.warning(self, "Error", str(e))
+
     def _on_template_changed(self, index: int):
         """Switch active template — triggered by either TEACH or RUN combo."""
         combo = self.sender()
@@ -2431,6 +2469,90 @@ class MainWindow(QMainWindow):
             "<p>Built with Anomalib + OpenVINO + PySide6</p>"
             "<p>100% lokal, CPU-only, offline.</p>"
         )
+
+    # ── Model Export / Import ───────────────────────────────────────────
+
+    def _export_model_dialog(self):
+        """Dialog untuk export model ke file .zip."""
+        program = self._active_program
+        template = self._active_template
+        if not program or not template:
+            QMessageBox.warning(self, "Export Model",
+                                "Pilih program dan template terlebih dahulu.")
+            return
+
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from pathlib import Path
+
+        try:
+            tmpl_cfg = self._pm.get_template_config(program, template)
+            if not tmpl_cfg.get("trained", False):
+                QMessageBox.warning(self, "Export Model",
+                                    f"Template '{template}' belum pernah di-train.\n"
+                                    "Latih model terlebih dahulu sebelum export.")
+                return
+
+            default_name = f"model_{program}_{template}_{tmpl_cfg.get('model_version', 0)}.zip"
+            save_path, _ = QFileDialog.getSaveFileName(
+                self, "Export Model", default_name,
+                "ZIP files (*.zip)")
+            if not save_path:
+                return
+
+            self.set_status("Exporting model...", 0)
+            result = self._pm.export_model_to_zip(
+                program, template, Path(save_path))
+            self.set_status(f"Model exported: {save_path}", 3000)
+            QMessageBox.information(self, "Export Model",
+                                    f"Model berhasil diexport:\n{result}")
+        except Exception as e:
+            logger.error("Export model gagal: %s", e)
+            QMessageBox.critical(self, "Export Model Error", str(e))
+
+    def _import_model_dialog(self):
+        """Dialog untuk import model dari file .zip."""
+        program = self._active_program
+        template = self._active_template
+        if not program or not template:
+            QMessageBox.warning(self, "Import Model",
+                                "Pilih program dan template terlebih dahulu.")
+            return
+
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from pathlib import Path
+
+        try:
+            zip_path, _ = QFileDialog.getOpenFileName(
+                self, "Import Model", "",
+                "ZIP files (*.zip)")
+            if not zip_path:
+                return
+
+            # Konfirmasi
+            reply = QMessageBox.question(
+                self, "Import Model",
+                f"Import model ke template '{template}'?\n"
+                "Model yang ada akan diganti.",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
+
+            self.set_status("Importing model...", 0)
+            result = self._pm.import_model_from_zip(
+                Path(zip_path), program, template)
+            self.set_status(f"Model imported (v{result['model_version']})", 3000)
+
+            # Refresh teach page
+            if hasattr(self, "_teach_page"):
+                self._teach_page.refresh()
+            QMessageBox.information(self, "Import Model",
+                                    f"Model berhasil diimport!\n"
+                                    f"  Versi: {result['model_version']}\n"
+                                    f"  Files: {result['files_restored']}\n"
+                                    f"  Diexport: {result.get('source_exported_at', '-')}")
+        except Exception as e:
+            logger.error("Import model gagal: %s", e)
+            QMessageBox.critical(self, "Import Model Error", str(e))
 
     def keyPressEvent(self, event):
         """Esc untuk konfirmasi exit saat borderless full screen."""

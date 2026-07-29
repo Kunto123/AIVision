@@ -303,17 +303,18 @@ class TrainingPipeline:
         # ======================================================
         engine_callbacks: list = []
         if self._config.patience > 0:
-            monitor_metric = "val_loss"  # metric yg selalu ada
+            # image_AUROC dari validation metrics Anomalib
+            monitor_metric = "image_AUROC"
             es = EarlyStopping(
                 monitor=monitor_metric,
-                mode="min",
+                mode="max",
                 patience=self._config.patience,
                 min_delta=0.001,
                 verbose=True,
             )
             engine_callbacks.append(es)
             logger.info(
-                "EarlyStopping enabled: monitor=%s, patience=%d, min_delta=0.001",
+                "EarlyStopping enabled: monitor=%s, patience=%d, mode=max, min_delta=0.001",
                 monitor_metric, self._config.patience,
             )
 

@@ -143,7 +143,7 @@ class LoginDialog(QDialog):
             "background: #1A2A44; border: 1px dashed #F59E0B; border-radius: 6px;")
         hl = QHBoxLayout(hint_frame)
         hl.setContentsMargins(8, 6, 8, 6)
-        self._rfid_hint = QLabel("💳 Tap kartu RFID untuk masuk otomatis")
+        self._rfid_hint = QLabel("Tap kartu RFID untuk masuk otomatis")
         self._rfid_hint.setStyleSheet("color: #F59E0B; font-size: 11px; background: transparent;")
         self._rfid_hint.setAlignment(Qt.AlignCenter)
         hl.addWidget(self._rfid_hint)
@@ -180,12 +180,12 @@ class LoginDialog(QDialog):
             logger.info("RFID login: %s (role=%s)", user["username"], user["role"])
             self.accept()
         else:
-            self._rfid_hint.setText(f"❌ Kartu tidak terdaftar ({uid[:12]}...)")
+            self._rfid_hint.setText(f"Kartu tidak terdaftar ({uid[:12]}...)")
             self._rfid_hint.setStyleSheet("color: #EF4444; font-size: 11px; background: transparent;")
             QTimer.singleShot(3000, self._reset_hint)
 
     def _reset_hint(self):
-        self._rfid_hint.setText("💳 Tap kartu RFID untuk masuk otomatis")
+        self._rfid_hint.setText("Tap kartu RFID untuk masuk otomatis")
         self._rfid_hint.setStyleSheet("color: #F59E0B; font-size: 11px; background: transparent;")
 
     def _on_login(self):

@@ -81,7 +81,7 @@ class _ROICropToggle(QFrame):
         self.setStyleSheet(
             f"QFrame {{ background: #111D30; border: 3px solid {color}; "
             f"border-radius: 6px; }}")
-        self._status_label.setText("✅ OK" if self.label == "ok" else "❌ NG")
+        self._status_label.setText("OK" if self.label == "ok" else "NG")
         self._status_label.setStyleSheet(
             f"font-weight: bold; font-size: 12px; color: {color}; background: transparent;")
 
@@ -99,7 +99,7 @@ class CaptureReviewDialog(QDialog):
         self._frame = frame
         self._toggles: List[_ROICropToggle] = []
 
-        self.setWindowTitle("📋 Review Per-ROI")
+        self.setWindowTitle("Review Per-ROI")
         self.setModal(True)
         self.resize(720, 320)
 
@@ -118,7 +118,7 @@ class CaptureReviewDialog(QDialog):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        title = QLabel("📋 Review Per-ROI")
+        title = QLabel("Review Per-ROI")
         title.setStyleSheet("font-size: 15px; font-weight: bold; color: #FFFFFF;")
         layout.addWidget(title)
 
@@ -157,7 +157,7 @@ class CaptureReviewDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
 
-        save_btn = QPushButton("✅ Simpan Semua")
+        save_btn = QPushButton("Simpan Semua")
         save_btn.setObjectName("primaryButton")
         save_btn.setMinimumHeight(36)
         save_btn.setMinimumWidth(140)

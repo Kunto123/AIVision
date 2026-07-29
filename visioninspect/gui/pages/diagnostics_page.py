@@ -39,7 +39,7 @@ class DiagnosticsPage(QWidget):
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(12, 12, 12, 12)
 
-        title = QLabel("📋 " + self._tr.tr("diagnostics_logs"))
+        title = QLabel(self._tr.tr("diagnostics_logs"))
         title.setObjectName("sectionTitle")
         left_layout.addWidget(title)
 
@@ -54,7 +54,7 @@ class DiagnosticsPage(QWidget):
         left_layout.addWidget(self._log_view, 1)
 
         log_btn_layout = QHBoxLayout()
-        self._clear_log_btn = QPushButton("🗑 Clear")
+        self._clear_log_btn = QPushButton("Hapus")
         log_btn_layout.addWidget(self._clear_log_btn)
         log_btn_layout.addStretch()
         left_layout.addLayout(log_btn_layout)
@@ -81,7 +81,7 @@ class DiagnosticsPage(QWidget):
         right_scroll.setWidget(right_content)
 
         # Performance group
-        perf_group = QGroupBox("📊 " + self._tr.tr("diagnostics_performance"))
+        perf_group = QGroupBox(self._tr.tr("diagnostics_performance"))
         perf_layout = QVBoxLayout(perf_group)
         perf_layout.setSpacing(8)
 
@@ -90,7 +90,7 @@ class DiagnosticsPage(QWidget):
         ram_frame.setObjectName("cardPanel")
         ram_layout = QHBoxLayout(ram_frame)
         ram_layout.setContentsMargins(8, 4, 8, 4)
-        ram_layout.addWidget(QLabel("🧠 RAM:"))
+        ram_layout.addWidget(QLabel("RAM:"))
         self._ram_label = QLabel(self._tr.tr("diagnostics_ram_usage", mb="—"))
         self._ram_label.setStyleSheet("font-weight: bold;")
         ram_layout.addWidget(self._ram_label)
@@ -114,7 +114,7 @@ class DiagnosticsPage(QWidget):
         fps_frame.setObjectName("cardPanel")
         fps_layout = QHBoxLayout(fps_frame)
         fps_layout.setContentsMargins(8, 4, 8, 4)
-        fps_layout.addWidget(QLabel("📷 FPS Kamera:"))
+        fps_layout.addWidget(QLabel("FPS Kamera:"))
         self._fps_label = QLabel(self._tr.tr("diagnostics_fps", fps="—"))
         self._fps_label.setStyleSheet("font-weight: bold;")
         fps_layout.addWidget(self._fps_label)
@@ -126,7 +126,7 @@ class DiagnosticsPage(QWidget):
         lat_frame.setObjectName("cardPanel")
         lat_layout = QHBoxLayout(lat_frame)
         lat_layout.setContentsMargins(8, 4, 8, 4)
-        lat_layout.addWidget(QLabel("⏱ Inferensi:"))
+        lat_layout.addWidget(QLabel("Inferensi:"))
         self._latency_label = QLabel(self._tr.tr("diagnostics_inference_latency", ms="—"))
         self._latency_label.setStyleSheet("font-weight: bold;")
         lat_layout.addWidget(self._latency_label)
@@ -151,20 +151,20 @@ class DiagnosticsPage(QWidget):
         thread_group = QGroupBox("🧵 " + self._tr.tr("diagnostics_threads"))
         thread_layout = QVBoxLayout(thread_group)
         self._thread_status_label = QLabel(
-            "📷 Camera: ⏹ —\n"
-            "🧠 Inference: ⏹ —\n"
-            "🔌 PLC: ⏹ —\n"
-            "🎓 Training: ⏹ —"
+            "Camera: off —\n"
+            "Inference: off —\n"
+            "PLC: off —\n"
+            "Training: off —"
         )
         self._thread_status_label.setStyleSheet("font-family: monospace; font-size: 12px;")
         thread_layout.addWidget(self._thread_status_label)
         right_layout.addWidget(thread_group)
 
         # PLC Test
-        plc_test_group = QGroupBox("🔌 " + self._tr.tr("diagnostics_plc_test"))
+        plc_test_group = QGroupBox(self._tr.tr("diagnostics_plc_test"))
         plc_test_layout = QVBoxLayout(plc_test_group)
 
-        self._send_test_btn = QPushButton("📤 " + self._tr.tr("diagnostics_plc_send_test"))
+        self._send_test_btn = QPushButton("Kirim " + self._tr.tr("diagnostics_plc_send_test"))
         self._send_test_btn.setMinimumHeight(36)
         plc_test_layout.addWidget(self._send_test_btn)
 
@@ -198,10 +198,10 @@ class DiagnosticsPage(QWidget):
     @Slot()
     def update_thread_status(self, camera: str, inference: str, plc: str, training: str):
         self._thread_status_label.setText(
-            f"📷 Camera: {camera}\n"
-            f"🧠 Inference: {inference}\n"
-            f"🔌 PLC: {plc}\n"
-            f"🎓 Training: {training}"
+            f"Camera: {camera}\n"
+            f"Inference: {inference}\n"
+            f"PLC: {plc}\n"
+            f"Training: {training}"
         )
 
     @Slot()

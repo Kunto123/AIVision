@@ -242,7 +242,7 @@ class MainWindow(QMainWindow):
         self._user_label.setStyleSheet("font-weight: bold; color: #22C55E; padding: 0 8px;")
         self._statusbar.addPermanentWidget(self._user_label)
 
-        self._logout_btn = QPushButton("🔓 Logout")
+        self._logout_btn = QPushButton("Logout")
         self._logout_btn.setFixedHeight(24)
         self._logout_btn.setStyleSheet(
             "font-size: 11px; padding: 0 8px; border: 1px solid #233A57;"
@@ -254,7 +254,7 @@ class MainWindow(QMainWindow):
         self._program_label = QLabel("Program: —")
         self._statusbar.addPermanentWidget(self._program_label)
 
-        self._cam_status_label = QLabel("📷 —")
+        self._cam_status_label = QLabel("Camera —")
         self._statusbar.addPermanentWidget(self._cam_status_label)
 
         self._fps_status_label = QLabel("FPS: —")
@@ -603,7 +603,7 @@ class MainWindow(QMainWindow):
             self._teach_page.set_preview(pixmap)
 
     def _on_camera_started(self):
-        self._cam_status_label.setText("📷 Aktif")
+        self._cam_status_label.setText("Camera Aktif")
         self._cam_status_label.setStyleSheet("color: #22C55E;")
         self._run_page.set_camera_status(True)
         self._start_cam_action.setText("Stop Kamera")
@@ -611,14 +611,14 @@ class MainWindow(QMainWindow):
         self.set_status("Kamera aktif", 3000)
 
     def _on_camera_stopped(self):
-        self._cam_status_label.setText("📷 Mati")
+        self._cam_status_label.setText("Camera Mati")
         self._cam_status_label.setStyleSheet("color: #EF4444;")
         self._run_page.set_camera_status(False)
         self._start_cam_action.setText("Start Kamera")
         self._teach_page.set_preview_text("Kamera dimatikan")
 
     def _on_camera_error(self, msg: str):
-        self._cam_status_label.setText("📷 Error")
+        self._cam_status_label.setText("Camera Error")
         self._cam_status_label.setStyleSheet("color: #F59E0B;")
         self._run_page.set_camera_status(False)
         self._run_page.set_status_message(
@@ -638,9 +638,9 @@ class MainWindow(QMainWindow):
         """Toggle heatmap overlay on/off."""
         self._heatmap_enabled = enabled
         if enabled:
-            self._run_page.get_heatmap_button().setText("🔥 Heatmap ON")
+            self._run_page.get_heatmap_button().setText("Heatmap ON")
         else:
-            self._run_page.get_heatmap_button().setText("🔥 Heatmap")
+            self._run_page.get_heatmap_button().setText("Heatmap")
         logger.info("Heatmap overlay: %s", "ON" if enabled else "OFF")
 
     # ---- Inference ----
@@ -800,7 +800,7 @@ class MainWindow(QMainWindow):
                 self._cycle_delay_timer.start(cycle_delay)
                 self._cycle_delay_active = True
                 self._run_page.set_status_message(
-                    f"⏳ Cycle delay {cycle_delay} ms...")
+                    f"Cycle delay {cycle_delay} ms...")
             else:
                 self._cycle_delay_active = False
 
@@ -925,9 +925,9 @@ class MainWindow(QMainWindow):
     def _on_cycle_delay_tick(self):
         """Cycle delay timer tick — ready for next inspection cycle."""
         self._cycle_delay_active = False
-        self._run_page.set_status_message("⏳ Siap")
-
-    # ---- Part Presence Check ----
+        self._run_page.set_status_message("Siap")
+ 
+     # ---- Part Presence Check ----
 
     def _on_part_check_config_changed(self):
         """Save part check UI state to template config and refresh cache."""
@@ -971,7 +971,7 @@ class MainWindow(QMainWindow):
                 self._active_program, self._active_template, updates)
             if changed_deploy_relevant:
                 self.set_status(
-                    "⚠️ Algorithm/Backbone diubah — klik TRAIN untuk "
+                    "Algorithm/Backbone diubah — klik TRAIN untuk "
                     "menerapkan ke model (model saat ini masih pakai setting lama).",
                     5000)
         except Exception as e:
@@ -1864,7 +1864,7 @@ class MainWindow(QMainWindow):
         if self._cycle_delay_timer.isActive():
             self._cycle_delay_timer.stop()
         self._cycle_delay_active = False
-        self._run_page.set_status_message("⏳ Siap")
+        self._run_page.set_status_message("Siap")
 
     def _on_gallery_image_deleted(self, label: str):
         """Refresh gallery after image deletion."""
@@ -1991,7 +1991,7 @@ class MainWindow(QMainWindow):
         prog = self._active_program
         tmpl = self._active_template
 
-        self._teach_page.set_training_progress(5, "🧠 Meluncurkan WSL...")
+        self._teach_page.set_training_progress(5, "Meluncurkan WSL...")
         self._teach_page.get_train_button().setEnabled(False)
         self.set_status("Training via WSL (PyTorch di Linux)...", 0)
         logger.info("Training via WSL: %s %s (path=%s)", prog, tmpl, wsl_proj)
@@ -2094,7 +2094,7 @@ class MainWindow(QMainWindow):
         pipeline yang panjang (venv setup / pip install / download dataset /
         training) tidak kelihatan diam selama itu."""
         display = line if len(line) <= 120 else line[:117] + "..."
-        self._teach_page.set_training_progress(10, f"🧠 WSL: {display}")
+        self._teach_page.set_training_progress(10, f"WSL: {display}")
 
     def _on_wsl_train_done(self):
         """WSL training berhasil — reload model + refresh UI."""
@@ -2102,7 +2102,7 @@ class MainWindow(QMainWindow):
         self._teach_page.get_train_button().setEnabled(True)
         self._refresh_template_ui()
         self._load_template_model()
-        self.set_status("✅ Training via WSL selesai! Model dimuat.", 5000)
+        self.set_status("Training via WSL selesai! Model dimuat.", 5000)
         logger.info("WSL training selesai, model reloaded")
 
     def _on_training_progress(self, percent: int, message: str):
@@ -2299,12 +2299,12 @@ class MainWindow(QMainWindow):
         if saved_count > 0:
             ok_count = self._count_all_images("ok")
             if ok_count >= 1:
-                self.set_status(f"🧠 Additional Learning: {saved_count} ROI(s) + {ok_count} OK total",
+                self.set_status(f"Additional Learning: {saved_count} ROI(s) + {ok_count} OK total",
                                 2000)
                 # Trigger training for this specific template
                 self._on_train()
             else:
-                self.set_status(f"✅ {saved_count} ROI(s) disimpan. Butuh minimal 1 OK untuk training.",
+                self.set_status(f"{saved_count} ROI(s) disimpan. Butuh minimal 1 OK untuk training.",
                                 4000)
         else:
             self.set_status("Tidak ada ROI yang berhasil disimpan", 3000)

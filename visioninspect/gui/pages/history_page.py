@@ -67,7 +67,7 @@ class HistoryPage(QWidget):
         self._rebuild_btn.setObjectName("primaryButton")
         filter_layout.addWidget(self._rebuild_btn)
 
-        self._tuning_btn = QPushButton("🔧 Tuning")
+        self._tuning_btn = QPushButton("Tuning")
         self._tuning_btn.setObjectName("primaryButton")
         self._tuning_btn.setEnabled(False)
         self._tuning_btn.setToolTip("Buka mode tuning untuk koreksi per-ROI + additional learning")

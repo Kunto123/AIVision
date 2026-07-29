@@ -92,7 +92,7 @@ class TuningDialog(QDialog):
         self._selected_idx: int = -1
         self._pixmap: Optional[QPixmap] = None
 
-        self.setWindowTitle(f"🔧 Tuning — {Path(image_path).name}")
+        self.setWindowTitle(f"Tuning — {Path(image_path).name}")
         self.setMinimumSize(960, 680)
         self.resize(1100, 780)
         self.setModal(True)
@@ -130,7 +130,7 @@ class TuningDialog(QDialog):
 
         # Title bar
         title_row = QHBoxLayout()
-        title = QLabel(f"🔧 Tuning — {Path(self._image_path).name}")
+        title = QLabel(f"Tuning — {Path(self._image_path).name}")
         title.setStyleSheet("font-size: 16px; font-weight: bold; color: #FFFFFF;")
         title_row.addWidget(title)
         title_row.addStretch()
@@ -168,7 +168,7 @@ class TuningDialog(QDialog):
         right_layout.setContentsMargins(12, 12, 12, 12)
         right_layout.setSpacing(8)
 
-        right_layout.addWidget(QLabel("📍 Pilih ROI"))
+        right_layout.addWidget(QLabel("Pilih ROI"))
 
         # ROI list
         self._roi_list_widget = QWidget()
@@ -184,7 +184,7 @@ class TuningDialog(QDialog):
         right_layout.addWidget(roi_scroll, 1)
 
         # Detail panel for selected ROI
-        right_layout.addWidget(QLabel("📋 Detail"))
+        right_layout.addWidget(QLabel("Detail"))
         self._detail_frame = QFrame()
         self._detail_frame.setObjectName("cardPanel")
         self._detail_layout = QVBoxLayout(self._detail_frame)
@@ -198,14 +198,14 @@ class TuningDialog(QDialog):
         # Register buttons
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
-        self._register_ok_btn = QPushButton("✅ Register as OK")
+        self._register_ok_btn = QPushButton("Register as OK")
         self._register_ok_btn.setObjectName("successButton")
         self._register_ok_btn.setMinimumHeight(36)
         self._register_ok_btn.setEnabled(False)
         self._register_ok_btn.clicked.connect(lambda: self._register("OK"))
         btn_row.addWidget(self._register_ok_btn)
 
-        self._register_ng_btn = QPushButton("❌ Register as NG")
+        self._register_ng_btn = QPushButton("Register as NG")
         self._register_ng_btn.setObjectName("dangerButton")
         self._register_ng_btn.setMinimumHeight(36)
         self._register_ng_btn.setEnabled(False)
@@ -221,11 +221,11 @@ class TuningDialog(QDialog):
         bottom_bar = QHBoxLayout()
         bottom_bar.setSpacing(8)
 
-        self._status_label = QLabel("💡 Pilih ROI untuk mulai koreksi")
+        self._status_label = QLabel("Pilih ROI untuk mulai koreksi")
         self._status_label.setStyleSheet("color: #F59E0B; font-weight: bold;")
         bottom_bar.addWidget(self._status_label, 1)
 
-        self._save_btn = QPushButton("🧠 Simpan & Additional Learning")
+        self._save_btn = QPushButton("Simpan & Additional Learning")
         self._save_btn.setObjectName("primaryButton")
         self._save_btn.setMinimumHeight(40)
         self._save_btn.setMinimumWidth(220)
@@ -257,7 +257,7 @@ class TuningDialog(QDialog):
 
         for i, roi in enumerate(self._rois):
             btn = QPushButton(
-                f"{'✅' if roi.current_judgement == 'OK' else '❌'} "
+                f"{'OK' if roi.current_judgement == 'OK' else 'NG'} "
                 f"{roi.label}  ({roi.score:.3f})"
             )
             btn.setMinimumHeight(32)
@@ -283,11 +283,11 @@ class TuningDialog(QDialog):
 
         # Update detail
         self._detail_label.setText(
-            f"🆔 {roi.label}\n"
-            f"📍 ({roi.x}, {roi.y}) {roi.w}×{roi.h}\n"
-            f"📊 Score: {roi.score:.4f}\n"
-            f"🏷 Asli: {'✅ OK' if roi.judgement == 'OK' else '❌ NG'}\n"
-            f"{'✏️ Koreksi: → ' + ('✅ OK' if roi.corrected_to == 'OK' else '❌ NG') if roi.is_corrected else ''}"
+            f"ID: {roi.label}\n"
+            f"Lokasi: ({roi.x}, {roi.y}) {roi.w}x{roi.h}\n"
+            f"Score: {roi.score:.4f}\n"
+            f"Hasil: {'OK' if roi.judgement == 'OK' else 'NG'}\n"
+            f"{'Koreksi: ' + ('OK' if roi.corrected_to == 'OK' else 'NG') if roi.is_corrected else ''}"
         )
 
         self._update_image_display()
@@ -298,7 +298,7 @@ class TuningDialog(QDialog):
     def _update_image_display(self):
         """Draw image with ROI overlays onto the label."""
         if self._pixmap is None or self._pixmap.isNull():
-            self._image_label.setText("📷 Tidak ada gambar")
+            self._image_label.setText("Tidak ada gambar")
             return
 
         # Scale pixmap to label size
@@ -355,13 +355,13 @@ class TuningDialog(QDialog):
         roi = self._rois[self._selected_idx]
 
         if roi.judgement == new_judgement and not roi.is_corrected:
-            self._status_label.setText(f"ℹ️ {roi.label} sudah {new_judgement}, tidak perlu koreksi")
+            self._status_label.setText(f"{roi.label} sudah {new_judgement}, tidak perlu koreksi")
             return
 
         # Set correction
         roi.corrected_to = new_judgement
         self._status_label.setText(
-            f"✏️ {roi.label}: {roi.judgement} → {new_judgement}")
+            f"{roi.label}: {roi.judgement} → {new_judgement}")
         self._status_label.setStyleSheet(
             "color: #22C55E; font-weight: bold;")
 

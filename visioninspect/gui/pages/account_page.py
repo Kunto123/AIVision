@@ -60,17 +60,17 @@ class AccountPage(QWidget):
 
         # Toolbar
         toolbar = QHBoxLayout()
-        self._add_btn = QPushButton("➕ Tambah User")
+        self._add_btn = QPushButton("+ Tambah User")
         self._add_btn.setObjectName("successButton")
         self._add_btn.clicked.connect(self._on_add_user)
         toolbar.addWidget(self._add_btn)
 
-        self._edit_btn = QPushButton("✏️ Edit")
+        self._edit_btn = QPushButton("Edit")
         self._edit_btn.setEnabled(False)
         self._edit_btn.clicked.connect(self._on_edit_user)
         toolbar.addWidget(self._edit_btn)
 
-        self._delete_btn = QPushButton("🗑 Hapus")
+        self._delete_btn = QPushButton("Hapus")
         self._delete_btn.setObjectName("dangerButton")
         self._delete_btn.setEnabled(False)
         self._delete_btn.clicked.connect(self._on_delete_user)
@@ -78,13 +78,13 @@ class AccountPage(QWidget):
 
         toolbar.addStretch()
 
-        self._bind_rfid_btn = QPushButton("💳 Bind RFID")
+        self._bind_rfid_btn = QPushButton("Bind RFID")
         self._bind_rfid_btn.setEnabled(False)
         self._bind_rfid_btn.setCheckable(True)
         self._bind_rfid_btn.clicked.connect(self._on_toggle_bind_rfid)
         toolbar.addWidget(self._bind_rfid_btn)
 
-        self._unbind_rfid_btn = QPushButton("🔓 Unbind RFID")
+        self._unbind_rfid_btn = QPushButton("Unbind RFID")
         self._unbind_rfid_btn.setEnabled(False)
         self._unbind_rfid_btn.clicked.connect(self._on_unbind_rfid)
         toolbar.addWidget(self._unbind_rfid_btn)
@@ -114,7 +114,7 @@ class AccountPage(QWidget):
 
         # Help text
         help_text = QLabel(
-            "💡 Pilih user, klik 'Bind RFID', lalu tap kartu RFID.\n"
+            "Pilih user, klik 'Bind RFID', lalu tap kartu RFID.\n"
             "Operator hanya bisa melihat halaman RUN.\n"
             "Admin melihat semua halaman termasuk ini."
         )
@@ -157,14 +157,14 @@ class AccountPage(QWidget):
         if RFID_MIN_LEN <= len(uid) <= RFID_MAX_LEN:
             logger.info("RFID bind: UID=%s for user id=%d", uid, self._bind_target_id)
             if self._db.bind_rfid(self._bind_target_id, uid):
-                self._rfid_status.setText(f"✅ RFID {uid[:12]}... berhasil di-bind!")
+                self._rfid_status.setText(f"RFID {uid[:12]}... berhasil di-bind!")
                 self._rfid_status.setStyleSheet("color: #22C55E; font-weight: bold; padding: 4px;")
                 self.refresh()
             else:
-                self._rfid_status.setText(f"❌ RFID {uid[:12]}... sudah dipakai user lain!")
+                self._rfid_status.setText(f"RFID {uid[:12]}... sudah dipakai user lain!")
                 self._rfid_status.setStyleSheet("color: #EF4444; font-weight: bold; padding: 4px;")
         else:
-            self._rfid_status.setText(f"❌ UID tidak valid ({len(uid)} chars)")
+            self._rfid_status.setText(f"UID tidak valid ({len(uid)} chars)")
             self._rfid_status.setStyleSheet("color: #EF4444; font-weight: bold; padding: 4px;")
 
         self._rfid_buffer = ""
@@ -196,7 +196,7 @@ class AccountPage(QWidget):
             self._table.setItem(row, 2, QTableWidgetItem(u.get("display_name", "")))
             self._table.setItem(row, 3, QTableWidgetItem(u["role"]))
             rfid = u.get("rfid_uid", "")
-            rfid_display = f"✅ {rfid[:8]}..." if rfid else "—"
+            rfid_display = f"{rfid[:8]}..." if rfid else "—"
             self._table.setItem(row, 4, QTableWidgetItem(rfid_display))
             self._table.setItem(row, 5, QTableWidgetItem(u.get("created_at", "")))
         self._table.resizeColumnsToContents()
@@ -265,7 +265,7 @@ class AccountPage(QWidget):
             self._bind_target_id = user_id
             self._rfid_buffer = ""
             self.installEventFilter(self)
-            self._rfid_status.setText("💳 Tap kartu RFID sekarang...")
+            self._rfid_status.setText("Tap kartu RFID sekarang...")
             self._rfid_status.setStyleSheet("color: #F59E0B; font-weight: bold; padding: 4px;")
             self._rfid_status.show()
             self.setFocus()  # Ensure this widget can receive key events
@@ -279,7 +279,7 @@ class AccountPage(QWidget):
             return
         self._db.unbind_rfid(user_id)
         self.refresh()
-        self._rfid_status.setText("✅ RFID unbind berhasil")
+        self._rfid_status.setText("RFID unbind berhasil")
         self._rfid_status.setStyleSheet("color: #22C55E; font-weight: bold; padding: 4px;")
         self._rfid_status.show()
         QTimer.singleShot(3000, self._rfid_status.hide)
@@ -303,7 +303,7 @@ class UserEditDialog(QDialog):
         layout.setContentsMargins(24, 16, 24, 16)
         layout.setSpacing(12)
 
-        title = QLabel("✏️ Edit User" if self._is_edit else "➕ Tambah User")
+        title = QLabel("Edit User" if self._is_edit else "+ Tambah User")
         title.setStyleSheet("font-size: 16px; font-weight: bold;")
         layout.addWidget(title)
 
@@ -342,7 +342,7 @@ class UserEditDialog(QDialog):
 
         # Buttons
         btn_layout = QHBoxLayout()
-        save_btn = QPushButton("💾 Simpan")
+        save_btn = QPushButton("Simpan")
         save_btn.setObjectName("primaryButton")
         save_btn.clicked.connect(self._on_save)
         btn_layout.addWidget(save_btn)

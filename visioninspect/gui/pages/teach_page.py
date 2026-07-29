@@ -40,11 +40,11 @@ class TeachPage(QWidget):
     # separate, implicit 4th option (not listed here) for hand-tuned values via
     # Mode Lanjutan.
     TRAINING_PROFILES = {
-        "fast": {"label": "⚡ Cepat", "backbone": "resnet18",
+        "fast": {"label": "Cepat", "backbone": "resnet18",
                  "coreset_sampling_ratio": 0.1},
-        "balanced": {"label": "⚖️ Seimbang", "backbone": "resnet18",
+        "balanced": {"label": "Seimbang", "backbone": "resnet18",
                      "coreset_sampling_ratio": 0.25},
-        "accurate": {"label": "🎯 Detail Tinggi", "backbone": "wide_resnet50_2",
+        "accurate": {"label": "Detail Tinggi", "backbone": "wide_resnet50_2",
                      "coreset_sampling_ratio": 0.25},
     }
 
@@ -86,7 +86,7 @@ class TeachPage(QWidget):
 
         # Title row
         title_row = QHBoxLayout()
-        title = QLabel("📋 " + self._tr.tr("teach_title"))
+        title = QLabel(self._tr.tr("teach_title"))
         title.setObjectName("sectionTitle")
         title_row.addWidget(title)
         title_row.addStretch()
@@ -106,19 +106,19 @@ class TeachPage(QWidget):
         self._template_combo.setToolTip("Pilih template aktif")
         tmpl_layout.addWidget(self._template_combo, 1)
 
-        self._add_template_btn = QPushButton("➕")
-        self._add_template_btn.setFixedWidth(36)
+        self._add_template_btn = QPushButton("+ Baru")
+        self._add_template_btn.setFixedWidth(72)
         self._add_template_btn.setObjectName("successButton")
         self._add_template_btn.setToolTip("Buat template baru")
         tmpl_layout.addWidget(self._add_template_btn)
 
-        self._rename_template_btn = QPushButton("✏️")
-        self._rename_template_btn.setFixedWidth(36)
+        self._rename_template_btn = QPushButton("Ubah")
+        self._rename_template_btn.setFixedWidth(54)
         self._rename_template_btn.setToolTip("Ubah nama template")
         tmpl_layout.addWidget(self._rename_template_btn)
 
-        self._clear_btn = QPushButton("🗑")
-        self._clear_btn.setFixedWidth(36)
+        self._clear_btn = QPushButton("Hapus")
+        self._clear_btn.setFixedWidth(60)
         self._clear_btn.setToolTip("Hapus template aktif")
         tmpl_layout.addWidget(self._clear_btn)
 
@@ -127,21 +127,21 @@ class TeachPage(QWidget):
         # Capture buttons
         capture_row = QHBoxLayout()
         capture_row.setSpacing(6)
-        self._capture_ok_btn = QPushButton("✅ Capture OK")
+        self._capture_ok_btn = QPushButton("Capture OK")
         self._capture_ok_btn.setObjectName("successButton")
         self._capture_ok_btn.setMinimumHeight(38)
         capture_row.addWidget(self._capture_ok_btn)
 
-        self._capture_ng_btn = QPushButton("❌ Capture NG")
+        self._capture_ng_btn = QPushButton("Capture NG")
         self._capture_ng_btn.setObjectName("dangerButton")
         self._capture_ng_btn.setMinimumHeight(38)
         capture_row.addWidget(self._capture_ng_btn)
 
-        self._import_btn = QPushButton("📁 Import")
+        self._import_btn = QPushButton("Import")
         self._import_btn.setMinimumHeight(38)
         capture_row.addWidget(self._import_btn)
 
-        self._test_model_btn = QPushButton("🧪 Uji Model")
+        self._test_model_btn = QPushButton("Uji Model")
         self._test_model_btn.setMinimumHeight(38)
         self._test_model_btn.setToolTip(
             "Uji model terhadap batch foto statis dari disk — sanity check "
@@ -195,7 +195,7 @@ class TeachPage(QWidget):
         # QC Region
         qc_box = QVBoxLayout()
         qc_box.setSpacing(2)
-        qc_label = QLabel("🔍 QC Region")
+        qc_label = QLabel("QC Region")
         qc_label.setObjectName("secondaryText")
         qc_box.addWidget(qc_label)
         self._roi_editor = ROIEditor()
@@ -206,7 +206,7 @@ class TeachPage(QWidget):
         # Gate Part 1
         gate_box = QVBoxLayout()
         gate_box.setSpacing(2)
-        gate_label = QLabel("🧩 Gate Part 1")
+        gate_label = QLabel("Gate Part 1")
         gate_label.setObjectName("secondaryText")
         gate_box.addWidget(gate_label)
         self._gate_roi_editor = ROIEditor()
@@ -222,7 +222,7 @@ class TeachPage(QWidget):
         # Bottom row: Daftar ROI (full width)
         rp_box = QVBoxLayout()
         rp_box.setSpacing(2)
-        rp_label = QLabel("📍 Daftar ROI")
+        rp_label = QLabel("Daftar ROI")
         rp_label.setObjectName("secondaryText")
         rp_box.addWidget(rp_label)
         self._roi_panel = ROIListPanel()
@@ -237,7 +237,7 @@ class TeachPage(QWidget):
         gallery_layout.setSpacing(8)
 
         # OK
-        ok_group = QGroupBox("✅ " + self._tr.tr("teach_gallery_ok"))
+        ok_group = QGroupBox("OK " + self._tr.tr("teach_gallery_ok"))
         ok_g = QVBoxLayout(ok_group)
         ok_g.setContentsMargins(6, 6, 6, 6)
         self._ok_count_label = QLabel(self._tr.tr("teach_count_ok", count=0))
@@ -256,7 +256,7 @@ class TeachPage(QWidget):
         gallery_layout.addWidget(ok_group)
 
         # NG
-        ng_group = QGroupBox("❌ " + self._tr.tr("teach_gallery_ng"))
+        ng_group = QGroupBox("NG " + self._tr.tr("teach_gallery_ng"))
         ng_g = QVBoxLayout(ng_group)
         ng_g.setContentsMargins(6, 6, 6, 6)
         self._ng_count_label = QLabel(self._tr.tr("teach_count_ng", count=0))
@@ -299,14 +299,14 @@ class TeachPage(QWidget):
         right_scroll.setWidget(right_content)
 
         # Model version
-        self._version_label = QLabel("💾 Model: —")
+        self._version_label = QLabel("Model: —")
         self._version_label.setObjectName("secondaryText")
         right_layout.addWidget(self._version_label)
 
         # ── Training Profile ──
         # Preset-driven so most users never touch raw hyperparameters directly;
         # "Mode Lanjutan" reveals the underlying fields for full manual control.
-        profile_group = QGroupBox("🧠 Training Profile")
+        profile_group = QGroupBox("Training Profile")
         profile_outer = QVBoxLayout(profile_group)
         profile_outer.setSpacing(6)
         profile_outer.setContentsMargins(10, 8, 10, 10)
@@ -314,18 +314,18 @@ class TeachPage(QWidget):
         self._profile_combo = QComboBox()
         for key, prof in self.TRAINING_PROFILES.items():
             self._profile_combo.addItem(prof["label"], key)
-        self._profile_combo.addItem("🔧 Custom", "custom")
+        self._profile_combo.addItem("Custom", "custom")
         self._profile_combo.setToolTip(
-            "⚡ Cepat: resnet18, ringan & responsif — cocok kebanyakan part.\n"
-            "⚖️ Seimbang: resnet18 dengan memory bank lebih lengkap.\n"
-            "🎯 Detail Tinggi: wide_resnet50_2 — lebih akurat untuk detail halus, "
+            "Cepat: resnet18, ringan & responsif — cocok kebanyakan part.\n"
+            "Seimbang: resnet18 dengan memory bank lebih lengkap.\n"
+            "Detail Tinggi: wide_resnet50_2 — lebih akurat untuk detail halus, "
             "tapi ~3-4x lebih berat/lambat di CPU.\n"
-            "🔧 Custom: atur manual lewat Mode Lanjutan."
+            "Custom: atur manual lewat Mode Lanjutan."
         )
         self._profile_combo.currentIndexChanged.connect(self._on_profile_selected)
         profile_outer.addWidget(self._profile_combo)
 
-        self._advanced_cb = QCheckBox("🔧 Mode Lanjutan")
+        self._advanced_cb = QCheckBox("Mode Lanjutan")
         self._advanced_cb.toggled.connect(self._on_advanced_toggled)
         profile_outer.addWidget(self._advanced_cb)
 
@@ -390,7 +390,7 @@ class TeachPage(QWidget):
         # augmentasi itu bisa menyerupai defect asli (scratch/kontaminasi)
         # dan justru mengajari model salah. Cuma transformasi klasik yang
         # aman: rotasi, flip, translasi, brightness, contrast.
-        aug_group = QGroupBox("🧬 Augmentasi Data")
+        aug_group = QGroupBox("Augmentasi Data")
         aug_outer = QVBoxLayout(aug_group)
         aug_outer.setSpacing(6)
         aug_outer.setContentsMargins(10, 8, 10, 10)
@@ -428,7 +428,7 @@ class TeachPage(QWidget):
             self._build_augmentation_range_row(
                 aug_outer, "Contrast", "%", 1, 100, 20)
 
-        self._aug_regenerate_btn = QPushButton("🔄 Regenerate")
+        self._aug_regenerate_btn = QPushButton("Regenerate")
         self._aug_regenerate_btn.setToolTip(
             "Paksa generate ulang augmentasi walau setting tidak berubah "
             "(misal cuma ingin nilai Acak yang baru).")
@@ -439,7 +439,7 @@ class TeachPage(QWidget):
         # Train button + progress stacked
         train_box = QVBoxLayout()
         train_box.setSpacing(4)
-        self._train_btn = QPushButton("🎯 TRAIN")
+        self._train_btn = QPushButton("TRAIN")
         self._train_btn.setObjectName("primaryButton")
         self._train_btn.setMinimumHeight(44)
         self._train_btn.setEnabled(False)
@@ -469,7 +469,7 @@ class TeachPage(QWidget):
         # Step 1 of the 2-step flow (gate before QC) — form-aligned rows, with
         # method-specific rows hidden via setRowVisible so the panel only ever
         # shows the 2-3 controls relevant to the chosen method, not all 6 at once.
-        pc_group = QGroupBox("🧩 Part Presence (Step 1)")
+        pc_group = QGroupBox("Part Presence (Step 1)")
         pc_outer = QVBoxLayout(pc_group)
         pc_outer.setSpacing(8)
         pc_outer.setContentsMargins(10, 8, 10, 10)
@@ -535,7 +535,7 @@ class TeachPage(QWidget):
         # Master photo — capture + status on one row, compact thumbnail below
         master_row = QHBoxLayout()
         master_row.setSpacing(8)
-        self._capture_master_btn = QPushButton("📸 Ambil Master")
+        self._capture_master_btn = QPushButton("Ambil Master")
         self._capture_master_btn.setObjectName("successButton")
         self._capture_master_btn.setMinimumHeight(32)
         master_row.addWidget(self._capture_master_btn)
@@ -548,7 +548,7 @@ class TeachPage(QWidget):
             "background: #0A0F1A; border: 1px solid #233A57; border-radius: 4px;")
         master_row.addWidget(self._master_thumbnail)
 
-        self._master_status_label = QLabel("⏹ Belum ada master")
+        self._master_status_label = QLabel("Belum ada master")
         self._master_status_label.setObjectName("secondaryText")
         self._master_status_label.setWordWrap(True)
         master_row.addWidget(self._master_status_label, 1)
@@ -559,7 +559,7 @@ class TeachPage(QWidget):
         self._update_pc_field_visibility()
 
         # Threshold
-        threshold_group = QGroupBox("🎚️ " + self._tr.tr("teach_threshold"))
+        threshold_group = QGroupBox(self._tr.tr("teach_threshold"))
         th_layout = QVBoxLayout(threshold_group)
         th_layout.setSpacing(4)
         self._threshold_slider = QSlider(Qt.Horizontal)
@@ -579,7 +579,7 @@ class TeachPage(QWidget):
         right_layout.addWidget(threshold_group)
 
         # Histogram
-        histogram_group = QGroupBox("📊 Histogram")
+        histogram_group = QGroupBox("Histogram")
         hist_layout = QVBoxLayout(histogram_group)
         self._histogram = HistogramWidget()
         self._histogram.setMinimumHeight(100)
@@ -661,12 +661,12 @@ class TeachPage(QWidget):
 
     @Slot()
     def set_ok_count(self, count: int):
-        self._ok_count_label.setText(f"✅ {self._tr.tr('teach_count_ok', count=count)}")
+        self._ok_count_label.setText(self._tr.tr('teach_count_ok', count=count))
         self._train_btn.setEnabled(count > 0)
 
     @Slot()
     def set_ng_count(self, count: int):
-        self._ng_count_label.setText(f"❌ {self._tr.tr('teach_count_ng', count=count)}")
+        self._ng_count_label.setText(self._tr.tr('teach_count_ng', count=count))
 
     @Slot()
     def set_preview(self, pixmap: QPixmap):
@@ -681,7 +681,7 @@ class TeachPage(QWidget):
 
     @Slot()
     def set_version(self, version: int):
-        self._version_label.setText(f"💾 Model: v{version}" if version else "💾 Model: —")
+        self._version_label.setText(f"Model: v{version}" if version else "Model: —")
 
     @Slot()
     def set_training_progress(self, percent: int, message: str = ""):
@@ -692,12 +692,12 @@ class TeachPage(QWidget):
     @Slot()
     def set_training_done(self):
         self._progress_bar.setValue(100)
-        self._progress_bar.setFormat("✅ Selesai!")
+        self._progress_bar.setFormat("Selesai!")
         self._progress_label.setText(self._tr.tr("teach_training_done"))
 
     @Slot()
     def set_training_failed(self, error: str):
-        self._progress_bar.setFormat("❌ Gagal")
+        self._progress_bar.setFormat("Gagal")
         self._progress_label.setText(self._tr.tr("teach_training_failed", error=error))
 
     @Slot()
@@ -727,16 +727,16 @@ class TeachPage(QWidget):
     @Slot()
     def show_import_mode(self, active: bool):
         if active:
-            self._capture_ok_btn.setText("✅ Simpan OK")
-            self._capture_ng_btn.setText("❌ Simpan NG")
+            self._capture_ok_btn.setText("Simpan OK")
+            self._capture_ng_btn.setText("Simpan NG")
             self._import_btn.hide()
             self._import_status_label.show()
             self._import_progress_bar.show()
             self._import_progress_bar.setValue(0)
             self._cancel_import_btn.show()
         else:
-            self._capture_ok_btn.setText("✅ Capture OK")
-            self._capture_ng_btn.setText("❌ Capture NG")
+            self._capture_ok_btn.setText("Capture OK")
+            self._capture_ng_btn.setText("Capture NG")
             self._import_btn.show()
             self._import_status_label.hide()
             self._import_progress_bar.hide()
@@ -745,7 +745,7 @@ class TeachPage(QWidget):
 
     @Slot()
     def set_import_status(self, current: int, total: int):
-        self._import_status_label.setText(f"📁 Import: {current}/{total} — pilih OK atau NG")
+        self._import_status_label.setText(f"Import: {current}/{total} — pilih OK atau NG")
 
     @Slot()
     def set_import_progress(self, value: int):
@@ -792,10 +792,10 @@ class TeachPage(QWidget):
 
     def set_master_status(self, has_master: bool, timestamp="", thumbnail=None):
         if has_master and timestamp:
-            self._master_status_label.setText(f"✅ {timestamp}")
+            self._master_status_label.setText(f"{timestamp}")
             self._master_status_label.setStyleSheet("color: #22C55E; font-weight: bold;")
         else:
-            self._master_status_label.setText("⏹ Belum ada master")
+            self._master_status_label.setText("Belum ada master")
             self._master_status_label.setStyleSheet("color: #EF4444;")
         if thumbnail and not thumbnail.isNull():
             self._master_thumbnail.setPixmap(

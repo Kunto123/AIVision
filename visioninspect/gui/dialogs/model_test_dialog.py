@@ -65,7 +65,7 @@ class PhotoDetailDialog(QDialog):
         self._pixmap: Optional[QPixmap] = None
 
         name = Path(photo_result["path"]).name
-        self.setWindowTitle(f"🧪 Detail — {name}")
+        self.setWindowTitle(f"Detail — {name}")
         self.setMinimumSize(880, 620)
         self.resize(1000, 700)
         self.setModal(True)
@@ -85,7 +85,7 @@ class PhotoDetailDialog(QDialog):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        title = QLabel(f"🧪 {Path(self._result['path']).name}")
+        title = QLabel(f"{Path(self._result['path']).name}")
         title.setStyleSheet("font-size: 16px; font-weight: bold; color: #FFFFFF;")
         layout.addWidget(title)
 
@@ -129,14 +129,14 @@ class PhotoDetailDialog(QDialog):
 
         overall = self._result.get("overall_judgement")
         overall_label = QLabel(
-            f"{'✅ OK' if overall == 'OK' else '❌ NG'}  (skor tertinggi: "
+            f"{'OK' if overall == 'OK' else 'NG'}  (skor tertinggi: "
             f"{self._result.get('worst_score', 0.0):.3f})")
         overall_label.setStyleSheet(
             f"font-size: 14px; font-weight: bold; "
             f"color: {GREEN if overall == 'OK' else RED};")
         right_layout.addWidget(overall_label)
 
-        right_layout.addWidget(QLabel("📍 Per-ROI"))
+        right_layout.addWidget(QLabel("Per-ROI"))
 
         roi_scroll = QScrollArea()
         roi_scroll.setWidgetResizable(True)
@@ -149,7 +149,7 @@ class PhotoDetailDialog(QDialog):
         for i, r in enumerate(self._result.get("roi_results", [])):
             color = GREEN if r["judgement"] == "OK" else RED
             btn = QPushButton(
-                f"{'✅' if r['judgement'] == 'OK' else '❌'} "
+                f"{'OK' if r['judgement'] == 'OK' else 'NG'} "
                 f"{r['label']}  ({r['score']:.3f})")
             btn.setMinimumHeight(32)
             btn.setStyleSheet(
@@ -163,7 +163,7 @@ class PhotoDetailDialog(QDialog):
         roi_scroll.setWidget(roi_list_widget)
         right_layout.addWidget(roi_scroll, 1)
 
-        right_layout.addWidget(QLabel("📋 Detail"))
+        right_layout.addWidget(QLabel("Detail"))
         self._detail_label = QLabel("Klik ROI untuk melihat detail")
         self._detail_label.setStyleSheet("color: #9FB3C8;")
         self._detail_label.setWordWrap(True)
@@ -189,17 +189,17 @@ class PhotoDetailDialog(QDialog):
         r = roi_results[idx]
         x, y, w, h = r["roi"]
         self._detail_label.setText(
-            f"🆔 {r['label']}\n"
-            f"📍 ({x}, {y}) {w}×{h}\n"
-            f"📊 Score: {r['score']:.4f}\n"
-            f"🏷 {'✅ OK' if r['judgement'] == 'OK' else '❌ NG'}\n"
-            f"⏱ {r['latency_ms']:.1f} ms"
+            f"ID: {r['label']}\n"
+            f"Lokasi: ({x}, {y}) {w}x{h}\n"
+            f"Score: {r['score']:.4f}\n"
+            f"Hasil: {'OK' if r['judgement'] == 'OK' else 'NG'}\n"
+            f"Waktu: {r['latency_ms']:.1f} ms"
         )
         self._update_image_display()
 
     def _update_image_display(self):
         if self._pixmap is None or self._pixmap.isNull():
-            self._image_label.setText("📷 Tidak ada gambar")
+            self._image_label.setText("Tidak ada gambar")
             return
 
         label_size = self._image_label.size()
@@ -252,7 +252,7 @@ class ModelTestDialog(QDialog):
         self._threshold = threshold
         self._path_to_result = {r["path"]: r for r in results}
 
-        self.setWindowTitle(f"🧪 Uji Model — {template_label} ({len(results)} foto)")
+        self.setWindowTitle(f"Uji Model — {template_label} ({len(results)} foto)")
         self.setMinimumSize(980, 680)
         self.resize(1100, 760)
         self.setModal(True)
@@ -264,7 +264,7 @@ class ModelTestDialog(QDialog):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        title = QLabel(f"🧪 Uji Model — {self._template_label}")
+        title = QLabel(f"Uji Model — {self._template_label}")
         title.setStyleSheet("font-size: 16px; font-weight: bold; color: #FFFFFF;")
         layout.addWidget(title)
 
@@ -303,7 +303,7 @@ class ModelTestDialog(QDialog):
         right_layout.setContentsMargins(12, 12, 12, 12)
         right_layout.setSpacing(6)
 
-        right_layout.addWidget(QLabel("📊 Ringkasan"))
+        right_layout.addWidget(QLabel("Ringkasan"))
         self._summary_label = QLabel()
         self._summary_label.setWordWrap(True)
         right_layout.addWidget(self._summary_label)
@@ -387,8 +387,8 @@ class ModelTestDialog(QDialog):
         agg = self._aggregate
         self._summary_label.setText(
             f"Total foto: {agg['total']}\n"
-            f"✅ OK: {agg['ok_count']}\n"
-            f"❌ NG: {agg['ng_count']}\n"
+            f"OK: {agg['ok_count']}\n"
+            f"NG: {agg['ng_count']}\n"
             f"Pass rate: {agg['pass_rate']:.1f}%"
         )
         warnings = []

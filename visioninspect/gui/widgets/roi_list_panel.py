@@ -38,7 +38,7 @@ class ROIListPanel(QFrame):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        title = QLabel("📍 ROI List")
+        title = QLabel("ROI List")
         title.setStyleSheet("font-weight: bold; color: #FFFFFF;")
         layout.addWidget(title)
 
@@ -53,12 +53,12 @@ class ROIListPanel(QFrame):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(4)
 
-        self._add_btn = QPushButton("➕ Add")
+        self._add_btn = QPushButton("+ Add")
         self._add_btn.setObjectName("successButton")
         self._add_btn.clicked.connect(self.roi_added.emit)
         btn_layout.addWidget(self._add_btn)
 
-        self._del_btn = QPushButton("🗑 Del")
+        self._del_btn = QPushButton("Hapus")
         self._del_btn.setObjectName("dangerButton")
         self._del_btn.clicked.connect(self._request_delete)
         btn_layout.addWidget(self._del_btn)
@@ -67,11 +67,11 @@ class ROIListPanel(QFrame):
 
         # Enable All / Disable All
         toggle_layout = QHBoxLayout()
-        self._enable_all_btn = QPushButton("✅ All OK")
+        self._enable_all_btn = QPushButton("All OK")
         self._enable_all_btn.clicked.connect(lambda: self.roi_toggle_all.emit(True))
         toggle_layout.addWidget(self._enable_all_btn)
 
-        self._disable_all_btn = QPushButton("❌ All NG")
+        self._disable_all_btn = QPushButton("All NG")
         self._disable_all_btn.clicked.connect(lambda: self.roi_toggle_all.emit(False))
         toggle_layout.addWidget(self._disable_all_btn)
 

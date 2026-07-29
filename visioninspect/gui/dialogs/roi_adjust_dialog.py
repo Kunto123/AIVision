@@ -65,7 +65,7 @@ class ROIAdjustDialog(QDialog):
         layout.setSpacing(8)
 
         # Title
-        title = QLabel("🔄 Atur Region of Interest")
+        title = QLabel("Atur Region of Interest")
         title.setStyleSheet("font-size: 16px; font-weight: bold; color: #FFFFFF;")
         layout.addWidget(title)
 
@@ -87,7 +87,7 @@ class ROIAdjustDialog(QDialog):
         btn_bar.setSpacing(8)
         btn_bar.addStretch()
 
-        self._save_btn = QPushButton("✅ Simpan")
+        self._save_btn = QPushButton("Simpan")
         self._save_btn.setObjectName("primaryButton")
         self._save_btn.setMinimumHeight(36)
         self._save_btn.setMinimumWidth(120)

@@ -63,18 +63,18 @@ class RunPage(QWidget):
         self._device_spin.setToolTip("Pilih index device kamera (0=default)")
         ctrl_layout.addWidget(self._device_spin)
 
-        self._cam_toggle_btn = QPushButton("🔴 Start Kamera")
+        self._cam_toggle_btn = QPushButton("Start Kamera")
         self._cam_toggle_btn.setObjectName("primaryButton")
         self._cam_toggle_btn.setMinimumWidth(140)
         ctrl_layout.addWidget(self._cam_toggle_btn)
 
-        self._heatmap_btn = QPushButton("🔥 Heatmap")
+        self._heatmap_btn = QPushButton("Heatmap")
         self._heatmap_btn.setCheckable(True)
         self._heatmap_btn.setChecked(False)
         self._heatmap_btn.setToolTip("Tampilkan overlay heatmap anomaly di live view")
         ctrl_layout.addWidget(self._heatmap_btn)
 
-        self._cam_status_icon = QLabel("⏹ Mati")
+        self._cam_status_icon = QLabel("Mati")
         self._cam_status_icon.setStyleSheet("color: #EF4444; font-weight: bold;")
         ctrl_layout.addWidget(self._cam_status_icon)
 
@@ -211,14 +211,14 @@ class RunPage(QWidget):
         status_layout.setContentsMargins(12, 8, 12, 8)
 
         # Active model indicator
-        self._model_indicator = QLabel("🔴 Model: —")
+        self._model_indicator = QLabel("Model: —")
         self._model_indicator.setStyleSheet("font-weight: bold; color: #9FB3C8;")
         status_layout.addWidget(self._model_indicator)
 
         # PLC status
         plc_row = QHBoxLayout()
         plc_row.addWidget(QLabel(self._tr.tr("run_plc_status") + ":"))
-        self._plc_status_label = QLabel("⏹ " + self._tr.tr("disconnected"))
+        self._plc_status_label = QLabel(self._tr.tr("disconnected"))
         self._plc_status_label.setObjectName("plcDisconnected")
         plc_row.addWidget(self._plc_status_label)
         plc_row.addStretch()
@@ -246,10 +246,10 @@ class RunPage(QWidget):
     def update_judgement(self, judgement: str, score: float):
         """Update judgement display."""
         if judgement == "OK":
-            self._judgement_label.setText("✅ " + self._tr.tr("ok"))
+            self._judgement_label.setText("OK " + self._tr.tr("ok"))
             self._judgement_label.setStyleSheet("color: #22C55E; font-size: 56px; font-weight: bold;")
         else:
-            self._judgement_label.setText("❌ " + self._tr.tr("ng"))
+            self._judgement_label.setText("NG " + self._tr.tr("ng"))
             self._judgement_label.setStyleSheet("color: #EF4444; font-size: 56px; font-weight: bold;")
         self._score_label.setText(f"{score:.4f}")
 
@@ -269,10 +269,10 @@ class RunPage(QWidget):
     @Slot()
     def set_plc_status(self, connected: bool):
         if connected:
-            self._plc_status_label.setText("✅ " + self._tr.tr("connected"))
+            self._plc_status_label.setText("OK " + self._tr.tr("connected"))
             self._plc_status_label.setStyleSheet("color: #22C55E; font-weight: bold;")
         else:
-            self._plc_status_label.setText("⏹ " + self._tr.tr("disconnected"))
+            self._plc_status_label.setText(self._tr.tr("disconnected"))
             self._plc_status_label.setStyleSheet("color: #EF4444; font-weight: bold;")
 
     @Slot()
@@ -280,10 +280,10 @@ class RunPage(QWidget):
         """Show active template + model info on RUN page."""
         if model_loaded:
             self._model_indicator.setText(
-                f"🟢 [{template_name}] Model aktif | Threshold: {threshold:.3f}")
+                f"[{template_name}] Model aktif | Threshold: {threshold:.3f}")
             self._model_indicator.setStyleSheet("font-weight: bold; color: #22C55E;")
         else:
-            self._model_indicator.setText(f"🟡 [{template_name}] Belum ditraining")
+            self._model_indicator.setText(f"[{template_name}] Belum ditraining")
             self._model_indicator.setStyleSheet("font-weight: bold; color: #F59E0B;")
 
     @Slot()
@@ -308,7 +308,7 @@ class RunPage(QWidget):
             roi = r["roi"]
             label = f"ROI{i+1}"
             judge = r["judgement"]
-            icon = "✅" if judge == "OK" else "❌"
+            icon = "OK" if judge == "OK" else "NG"
             color = colors[i % len(colors)]
             lines.append(
                 f'<span style="color:{color}">{icon} {label}:'
@@ -328,15 +328,15 @@ class RunPage(QWidget):
     @Slot()
     def set_waiting_for_part(self):
         """Show 'waiting for part' neutral state — no OK/NG."""
-        self._judgement_label.setText("⏳ Menunggu Part")
+        self._judgement_label.setText("Menunggu Part")
         self._judgement_label.setStyleSheet("color: #F59E0B; font-size: 48px; font-weight: bold;")
         self._score_label.setText("—")
-        self._roi_results_label.setText("ROI: ⏳ Menunggu part terdeteksi di area gate")
+        self._roi_results_label.setText("ROI: Menunggu part terdeteksi di area gate")
 
     @Slot()
     def set_part_check_incomplete(self, msg: str):
         """Show 'part check not configured' warning — block QC, no false NG."""
-        self._judgement_label.setText("⚠️ Part-check belum lengkap")
+        self._judgement_label.setText("Part-check belum lengkap")
         self._judgement_label.setStyleSheet("color: #F59E0B; font-size: 40px; font-weight: bold;")
         self._score_label.setText("—")
         self._roi_results_label.setText("ROI: —")
@@ -348,9 +348,9 @@ class RunPage(QWidget):
         if active:
             self._cam_status_icon.setText("▶ Aktif")
             self._cam_status_icon.setStyleSheet("color: #22C55E; font-weight: bold;")
-            self._cam_toggle_btn.setText("⏹ Stop Kamera")
+            self._cam_toggle_btn.setText("Stop Kamera")
         else:
-            self._cam_status_icon.setText("⏹ Mati")
+            self._cam_status_icon.setText("Mati")
             self._cam_status_icon.setStyleSheet("color: #EF4444; font-weight: bold;")
             self._cam_toggle_btn.setText("▶ Start Kamera")
 

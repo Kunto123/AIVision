@@ -155,7 +155,7 @@ class SettingsPage(QWidget):
         model_layout = QVBoxLayout(model_group)
 
         model_hint = QLabel(
-            "ℹ️ Default untuk template baru saja — tidak mengubah template yang "
+            "Default untuk template baru saja — tidak mengubah template yang "
             "sudah ada. Untuk template yang sedang aktif, atur lewat "
             "Training Profile di tab TEACH.")
         model_hint.setWordWrap(True)
@@ -199,7 +199,7 @@ class SettingsPage(QWidget):
         main_layout.addWidget(flask_group)
 
         # === PostgreSQL Settings ===
-        pg_group = QGroupBox("🐘 PostgreSQL")
+        pg_group = QGroupBox("PostgreSQL")
         pg_layout = QVBoxLayout(pg_group)
 
         self._pg_enabled = QCheckBox("Enable PostgreSQL")
@@ -242,13 +242,13 @@ class SettingsPage(QWidget):
 
         # Connection status + test button
         status_row = QHBoxLayout()
-        self._pg_status_label = QLabel("⏹ Tidak aktif")
+        self._pg_status_label = QLabel("Tidak aktif")
         self._pg_status_label.setStyleSheet(
             "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
             "color: #9FB3C8; background-color: #1A2A44;")
         status_row.addWidget(self._pg_status_label, 1)
 
-        self._pg_test_btn = QPushButton("🔌 Test Koneksi")
+        self._pg_test_btn = QPushButton("Test Koneksi")
         self._pg_test_btn.setFixedHeight(28)
         self._pg_test_btn.setStyleSheet(
             "font-size: 11px; padding: 0 10px; border: 1px solid #233A57; "
@@ -267,7 +267,7 @@ class SettingsPage(QWidget):
         main_layout.addWidget(pg_group)
 
         # === NG Detection Settings ===
-        ng_group = QGroupBox("🔴 NG Detection")
+        ng_group = QGroupBox("NG Detection")
         ng_form = QVBoxLayout(ng_group)
 
         ng_delay_row = QHBoxLayout()
@@ -294,7 +294,7 @@ class SettingsPage(QWidget):
         main_layout.addWidget(ng_group)
 
         # === Cycle Delay ===
-        cycle_group = QGroupBox("🔄 Cycle Delay")
+        cycle_group = QGroupBox("Cycle Delay")
         cycle_form = QVBoxLayout(cycle_group)
 
         cycle_delay_row = QHBoxLayout()
@@ -320,7 +320,7 @@ class SettingsPage(QWidget):
         main_layout.addWidget(cycle_group)
 
         # === Logging Settings ===
-        log_group = QGroupBox("📝 Logging")
+        log_group = QGroupBox("Logging")
         log_layout = QVBoxLayout(log_group)
         self._show_debug_cb = QCheckBox("Tampilkan log debug di terminal")
         self._show_debug_cb.setToolTip(
@@ -431,13 +431,13 @@ class SettingsPage(QWidget):
         parts = []
         color = "#9FB3C8"
         if has_openvino:
-            parts.append("OpenVINO ✅")
+            parts.append("OpenVINO OK")
         else:
-            parts.append("OpenVINO ❌")
+            parts.append("OpenVINO error")
         if has_torch:
-            parts.append("PyTorch ✅")
+            parts.append("PyTorch OK")
         else:
-            parts.append("PyTorch ❌")
+            parts.append("PyTorch error")
         text = " | ".join(parts)
 
         if active_runtime == "openvino":
@@ -460,20 +460,20 @@ class SettingsPage(QWidget):
     def set_pg_status(self, connected: bool, detail: str = ""):
         """Update PostgreSQL connection status indicator."""
         if connected:
-            self._pg_status_label.setText(f"🟢 Terhubung{(' — ' + detail) if detail else ''}")
+            self._pg_status_label.setText(f"Terhubung{(' — ' + detail) if detail else ''}")
             self._pg_status_label.setStyleSheet(
                 "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
                 "color: #22C55E; background-color: #1A2A44;")
         else:
             text = detail or "Tidak terhubung"
-            self._pg_status_label.setText(f"🔴 {text}")
+            self._pg_status_label.setText(f"Gagal: {text}")
             self._pg_status_label.setStyleSheet(
                 "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
                 "color: #EF4444; background-color: #1A2A44;")
 
     def _on_test_pg_connection(self):
         """Test PostgreSQL connection with current form values."""
-        self._pg_status_label.setText("⏳ Menguji koneksi...")
+        self._pg_status_label.setText("Menguji koneksi...")
         self._pg_status_label.setStyleSheet(
             "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
             "color: #F59E0B; background-color: #1A2A44;")

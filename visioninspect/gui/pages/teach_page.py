@@ -379,6 +379,18 @@ class TeachPage(QWidget):
         self._epochs_spin.valueChanged.connect(self._on_advanced_field_changed)
         self._adv_form.addRow("Epochs:", self._epochs_spin)
 
+        # Patience — EarlyStopping, juga cuma untuk EfficientAd
+        self._patience_spin = QSpinBox()
+        self._patience_spin.setRange(0, 100)
+        self._patience_spin.setValue(0)
+        self._patience_spin.setToolTip(
+            "Early Stopping: stop training lebih awal jika tidak ada "
+            "perbaikan selama N epoch. 0 = nonaktif. "
+            "Hanya berlaku untuk EfficientAd."
+        )
+        self._patience_spin.valueChanged.connect(self._on_advanced_field_changed)
+        self._adv_form.addRow("Patience:", self._patience_spin)
+
         self._advanced_widget.setVisible(False)
         profile_outer.addWidget(self._advanced_widget)
         self._update_algorithm_field_visibility()
@@ -818,6 +830,8 @@ class TeachPage(QWidget):
         # kebetulan tersisa di spinbox yang sedang disembunyikan.
         if self._algo_combo.currentData() == "efficientad":
             cfg["max_epochs"] = self._epochs_spin.value()
+        # Patience juga cuma untuk EfficientAd
+        cfg["patience"] = self._patience_spin.value()
         return cfg
 
     def set_training_config(self, cfg: dict):
@@ -825,7 +839,8 @@ class TeachPage(QWidget):
         # set_part_check_config di atas (hindari re-trigger handler penyimpan
         # sebelum semua field selesai di-load).
         _widgets = [self._profile_combo, self._algo_combo,
-                    self._backbone_combo, self._coreset_spin, self._epochs_spin]
+                    self._backbone_combo, self._coreset_spin, self._epochs_spin,
+                    self._patience_spin]
         for w in _widgets:
             w.blockSignals(True)
         try:
@@ -839,6 +854,7 @@ class TeachPage(QWidget):
             self._backbone_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self._coreset_spin.setValue(coreset)
             self._epochs_spin.setValue(cfg.get("max_epochs", 100))
+            self._patience_spin.setValue(cfg.get("patience", 0))
 
             profile = cfg.get("training_profile") or self._infer_profile(
                 algorithm, backbone, coreset)
@@ -895,9 +911,10 @@ class TeachPage(QWidget):
 
     def _update_algorithm_field_visibility(self, *_):
         """Tampilkan cuma field yang benar-benar dipakai algorithm terpilih:
-        Backbone & Coreset Ratio khusus PatchCore, Epochs khusus EfficientAd."""
+        Backbone & Coreset Ratio khusus PatchCore, Epochs & Patience khusus EfficientAd."""
         is_efficientad = self._algo_combo.currentData() == "efficientad"
         self._adv_form.setRowVisible(self._epochs_spin, is_efficientad)
+        self._adv_form.setRowVisible(self._patience_spin, is_efficientad)
         self._adv_form.setRowVisible(self._backbone_combo, not is_efficientad)
         self._adv_form.setRowVisible(self._coreset_spin, not is_efficientad)
 

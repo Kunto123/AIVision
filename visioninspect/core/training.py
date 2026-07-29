@@ -12,6 +12,8 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from lightning.pytorch.callbacks import EarlyStopping
+
 from visioninspect.utils.logging_setup import get_logger
 from visioninspect.core.resource_detector import detect_resource, check_training_safety
 
@@ -42,6 +44,8 @@ class TrainingConfig:
         num_workers: int = 0,               # 0 = auto-pilih
         precision: str = "32",              # "32" | "16-mixed"
         enable_mixed_precision: bool = False,
+        # === Early Stopping ===
+        patience: int = 0,                  # 0 = nonaktif, >0 = stop setelah N epoch tanpa improvement
     ):
         self.algorithm = algorithm
         self.backbone = backbone
@@ -56,6 +60,7 @@ class TrainingConfig:
         self.num_workers = num_workers
         self.precision = precision
         self.enable_mixed_precision = enable_mixed_precision
+        self.patience = patience
         # PatchCore is one-shot (memory-bank, no backprop) — 1 epoch is correct.
         # EfficientAd trains an actual network via backprop and needs many more
         # epochs to converge; None picks a sensible per-algorithm default.
@@ -292,17 +297,34 @@ class TrainingPipeline:
                      batch_size if 'batch_size' in dir() else '?',
                      num_workers if 'num_workers' in dir() else '?')
 
+        # ======================================================
+        # Callbacks: ModelCheckpoint (otomatis dari Engine) +
+        #            EarlyStopping (hanya jika patience > 0)
+        # ======================================================
+        engine_callbacks: list = []
+        if self._config.patience > 0:
+            monitor_metric = "val_loss"  # metric yg selalu ada
+            es = EarlyStopping(
+                monitor=monitor_metric,
+                mode="min",
+                patience=self._config.patience,
+                min_delta=0.001,
+                verbose=True,
+            )
+            engine_callbacks.append(es)
+            logger.info(
+                "EarlyStopping enabled: monitor=%s, patience=%d, min_delta=0.001",
+                monitor_metric, self._config.patience,
+            )
+
         engine = Engine(
-            task="classification",  # or "segmentation" depending on model
-            image_metrics=["F1Score", "AUROC"],
-            pixel_metrics=None,
+            callbacks=engine_callbacks,  # Engine gabung dgn internal callbacks
             accelerator=accelerator,
             devices=1,
             precision=precision,
             max_epochs=self._config.max_epochs,
             default_root_dir=_train_work_dir,
-            #enable_checkpointing=False,  # cegah symlink v0→latest (WinError 1314)
-            logger=False,              # TensorBoard logger jg bikin symlink yg sama
+            logger=False,
         )
 
         # Fit

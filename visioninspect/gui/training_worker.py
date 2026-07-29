@@ -318,6 +318,7 @@ class TrainingWorker(QObject):
             num_workers=tmpl_cfg.get("num_workers", 0),    # 0 = auto
             precision=tmpl_cfg.get("precision", "32"),
             enable_mixed_precision=tmpl_cfg.get("enable_mixed_precision", False),
+            patience=tmpl_cfg.get("patience", 0),
         )
 
         # Create pipeline

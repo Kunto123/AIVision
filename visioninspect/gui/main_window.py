@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from visioninspect.utils import normalize_wsl_path, is_wsl
 from visioninspect.utils.config import Config, ConfigError
 from visioninspect.utils.i18n import Translator
 from visioninspect.utils.logging_setup import setup_logging, get_logger
@@ -78,11 +79,13 @@ class MainWindow(QMainWindow):
         self._camera_worker: Optional[CameraWorker] = None
 
         # Program Manager — use project-relative path for WSL/Windows sharing
-        data_dir = Path(config.get("data_dir", "")).resolve()
+        raw_data_dir = config.get("data_dir", "")
+        data_dir = normalize_wsl_path(raw_data_dir).resolve()
         if not data_dir.is_absolute():
             data_dir = Path(__file__).resolve().parent.parent.parent / "data"
             data_dir.mkdir(parents=True, exist_ok=True)
         self._data_dir = data_dir
+        logger.info("Data directory: %s", self._data_dir)
         self._pm = ProgramManager(data_dir / "programs")
 
         # Database (shared instance for history, counters, corrections, users)
@@ -2585,6 +2588,18 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # Deteksi GPU/CUDA
+        gpu_info = ""
+        gpu_available = False
+        if has_torch:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    gpu_available = True
+                    gpu_info = torch.cuda.get_device_name(0)
+            except Exception:
+                pass
+
         if has_ov and self._inference_engine._model is not None:
             active = "openvino"
         elif self._inference_engine._simple_loaded:
@@ -2594,7 +2609,8 @@ class MainWindow(QMainWindow):
         else:
             active = ""
 
-        self._settings_page.set_runtime_status(has_ov, has_torch, active)
+        self._settings_page.set_runtime_status(has_ov, has_torch, active,
+                                                gpu_available, gpu_info)
 
         # Update PostgreSQL connection status (gunakan self._pg langsung)
         if self._pg.is_enabled:

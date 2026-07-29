@@ -4,10 +4,45 @@ VisionInspect - Utility functions
 
 import json
 import os
+import platform
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
+
+
+def normalize_wsl_path(path_str: str) -> Path:
+    """Convert Windows paths (C:\\foo) to WSL paths (/mnt/c/foo).
+
+    Di WSL, Path('C:\\foo') dianggap relative path karena tidak dimulai
+    dengan '/'. Fungsi ini mendeteksi path bergaya Windows dan mengkonversinya.
+    """
+    p = Path(path_str)
+
+    # Cek: apakah ini path Windows? (C:\, D:\, d:\)
+    if len(path_str) > 1 and path_str[1] == ':':
+        drive = path_str[0].lower()
+        rest = path_str[2:].replace('\\', '/').lstrip('/')
+        return Path(f'/mnt/{drive}/{rest}')
+
+    # Cek: path yang mengandung backslash (C:\foo\bar disimpan tanpa colon?)
+    if '\\' in path_str:
+        # Coba parse sebagai Windows path
+        cleaned = path_str.replace('\\', '/')
+        return Path(cleaned)
+
+    return p
+
+
+def is_wsl() -> bool:
+    """Detect if running inside WSL."""
+    if platform.system() != 'Linux':
+        return False
+    try:
+        with open('/proc/version', 'r') as f:
+            return 'microsoft' in f.read().lower() or 'wsl' in f.read().lower()
+    except Exception:
+        return False
 
 
 def atomic_write(path: Path, data: Any) -> None:

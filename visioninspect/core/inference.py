@@ -88,6 +88,31 @@ class InferenceEngine:
                 self._core = _OV_CORE()
                 logger.info("OpenVINO core initialized. Available devices: %s",
                             self._core.available_devices)
+                # Coba deteksi GPU device via OpenVINO
+                try:
+                    if self._core is not None:
+                        gpu_devices = [d for d in self._core.available_devices if d.upper() in ("GPU", "IGPU")]
+                        if gpu_devices:
+                            for d in gpu_devices:
+                                name = self._core.get_property(d, "FULL_DEVICE_NAME")
+                                logger.info("OpenVINO GPU terdeteksi: %s (%s)", d, name)
+                        else:
+                            logger.info("OpenVINO GPU device tidak tersedia — hanya CPU: %s",
+                                        self._core.available_devices)
+                except Exception:
+                    pass
+                # Cek CUDA via PyTorch
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        logger.info("CUDA GPU terdeteksi via PyTorch: %s",
+                                    torch.cuda.get_device_name(0))
+                    else:
+                        logger.info("CUDA tidak tersedia (PyTorch ada tapi GPU tidak terdeteksi)")
+                except ImportError:
+                    logger.info("CUDA tidak tersedia (PyTorch tidak terinstall)")
+                except Exception as e:
+                    logger.debug("CUDA check error: %s", e)
             except Exception as e:
                 logger.warning("OpenVINO core init failed: %s", e)
                 self._use_ov = False

@@ -10,10 +10,17 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from visioninspect.utils import normalize_wsl_path, is_wsl
 
 APP_NAME = "VisionInspect"
 APP_VERSION = "1.0.0"
-DEFAULT_DATA_DIR = Path(os.getenv("VISIONINSPECT_DATA", default=""))
+
+# Normalisasi path WSL: C:\foo → /mnt/c/foo
+_raw_data_dir = os.getenv("VISIONINSPECT_DATA", "")
+if _raw_data_dir:
+    DEFAULT_DATA_DIR = normalize_wsl_path(_raw_data_dir)
+else:
+    DEFAULT_DATA_DIR = Path.home() / ".visioninspect"
 if not DEFAULT_DATA_DIR.is_absolute():
     DEFAULT_DATA_DIR = Path.home() / ".visioninspect"
 

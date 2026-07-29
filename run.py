@@ -6,7 +6,26 @@ Gunakan ini untuk menjalankan aplikasi dari folder proyek.
 
 import os
 import sys
+import platform
 from pathlib import Path
+
+# === WSL-specific fixes ===
+_on_wsl = False
+if platform.system() == "Linux":
+    try:
+        with open("/proc/version") as f:
+            _on_wsl = "microsoft" in f.read().lower()
+    except Exception:
+        pass
+
+if _on_wsl:
+    # Suppress EGL/MESA/ZINK errors — pakai software rendering
+    os.environ.setdefault("QT_OPENGL", "software")
+    os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+    # Pastikan display environment ada
+    if "DISPLAY" not in os.environ and "WAYLAND_DISPLAY" not in os.environ:
+        print("INFO: Running in WSL tanpa display server.",
+              "Install VcXsrv/X410 di Windows lalu export DISPLAY=:0")
 
 # Auto-set VISIONINSPECT_DATA ke data/ proyek (agar konsisten
 # di Windows & WSL tanpa perlu config override manual)

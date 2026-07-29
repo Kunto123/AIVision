@@ -426,7 +426,9 @@ class SettingsPage(QWidget):
         return self._config.get("inference.cycle_delay_ms", 1000)
 
     def set_runtime_status(self, has_openvino: bool, has_torch: bool,
-                           active_runtime: str = ""):
+                           active_runtime: str = "",
+                           gpu_available: bool = False,
+                           gpu_name: str = ""):
         """Update inference runtime indicator in Model settings."""
         parts = []
         color = "#9FB3C8"
@@ -449,6 +451,14 @@ class SettingsPage(QWidget):
         elif active_runtime == "anomalib":
             text += " | Active: Anomalib"
             color = "#22C55E"
+
+        # GPU indicator
+        if gpu_available:
+            gpu_label = gpu_name if gpu_name else "GPU"
+            text += f" | GPU: {gpu_label}"
+            color = "#22C55E"
+        else:
+            text += " | GPU: None (CPU)"
 
         self._runtime_label.setText(text)
         self._runtime_label.setStyleSheet(

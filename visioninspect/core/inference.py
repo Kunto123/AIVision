@@ -4,6 +4,7 @@ Menangani inferensi model OpenVINO, hot-swap model, double-buffer.
 ROI crop → resize → infer → heatmap overlay → score/judgement.
 """
 
+import gc
 import time
 import threading
 from dataclasses import dataclass
@@ -207,9 +208,19 @@ class InferenceEngine:
         score_ref, score_ref_per_roi = self._read_norm(xml_path)
 
         try:
-            # Compile new model first (don't swap yet)
-            model = self._core.read_model(str(xml_path))
-            compiled = self._core.compile_model(model, "CPU")
+            # Retry compile_model — .bin bisa di-lock OpenVINO/Defender (WinError 32 / Errno 13)
+            compiled = None
+            for attempt in range(5):
+                try:
+                    model = self._core.read_model(str(xml_path))
+                    compiled = self._core.compile_model(model, "CPU")
+                    break
+                except (PermissionError, OSError) as e:
+                    if attempt == 4:
+                        raise InferenceEngineError(f"Model load failed (bin locked): {e}") from e
+                    logger.warning("Model compile retry %d/5: %s", attempt + 1, e)
+                    gc.collect()
+                    time.sleep(0.5 * (attempt + 1))
 
             # Get input shape — guard terhadap dynamic shape (?,3,?,?)
             input_key = compiled.input(0)

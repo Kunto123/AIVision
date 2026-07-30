@@ -18,6 +18,7 @@ Struktur folder per program:
                     openvino_int8/model.xml (optional)
 """
 
+import gc
 import json
 import os
 import re
@@ -343,66 +344,65 @@ class ProgramManager:
     # =====================================================================
 
     def save_template_model(self, program: str, template_id: str,
-                             model_artifacts: dict) -> int:
-        """
-        Save trained model artifacts to a template.
-        `model_artifacts` harus berisi path ke folder export (openvino/ atau openvino_int8/).
-        Returns version number.
-        """
-        cfg = self.get_template_config(program, template_id)
-        version = cfg.get("model_version", 0) + 1
+                                 model_artifacts: dict) -> int:
+            """
+            Save trained model artifacts to a template.
+            `model_artifacts` harus berisi path ke folder export (openvino/ atau openvino_int8/).
+            Returns version number.
+            """
+            cfg = self.get_template_config(program, template_id)
+            version = cfg.get("model_version", 0) + 1
 
-        model_dir = (self._get_template_dir(program) / template_id / "model")
+            model_dir = (self._get_template_dir(program) / template_id / "model")
 
-        # Clear old model. On Windows the previous model.bin may still be
-        # mmap'd by OpenVINO for a moment (WinError 32); retry with a GC pass
-        # so any lingering handle is released before we delete.
-        if model_dir.exists():
-            import gc
+            # Clear old model. On Windows the previous model.bin may still be
+            # mmap'd by OpenVINO for a moment (WinError 32); retry with a GC pass
+            # so any lingering handle is released before we delete.
+            if model_dir.exists():
 
-            def _clear() -> None:
-                for child in model_dir.iterdir():
-                    if child.is_dir():
-                        shutil.rmtree(child)
-                    else:
-                        child.unlink()
+                def _clear() -> None:
+                    for child in model_dir.iterdir():
+                        if child.is_dir():
+                            shutil.rmtree(child)
+                        else:
+                            child.unlink()
 
-            for attempt in range(4):
-                try:
-                    _clear()
-                    break
-                except PermissionError:
-                    if attempt == 3:
-                        raise
-                    gc.collect()
-                    time.sleep(0.5)
+                for attempt in range(4):
+                    try:
+                        _clear()
+                        break
+                    except PermissionError:
+                        if attempt == 3:
+                            raise
+                        gc.collect()
+                        time.sleep(0.5)
 
-        # Copy specific subfolders only (openvino, openvino_int8)
-        copied = False
-        for key in ["export_path", "int8_path"]:
-            src_str = model_artifacts.get(key, "")
-            if src_str:
-                src = Path(src_str)
-                if src.exists() and src.is_dir():
-                    for subdir in ["openvino", "openvino_int8", "simple_model", "torch"]:
-                        sub_src = src / subdir
-                        if sub_src.exists() and sub_src.is_dir():
-                            shutil.copytree(sub_src, model_dir / subdir,
-                                            dirs_exist_ok=True)
-                            copied = True
+            # Copy specific subfolders only (openvino, openvino_int8)
+            copied = False
+            for key in ["export_path", "int8_path"]:
+                src_str = model_artifacts.get(key, "")
+                if src_str:
+                    src = Path(src_str)
+                    if src.exists() and src.is_dir():
+                        for subdir in ["openvino", "openvino_int8", "simple_model", "torch"]:
+                            sub_src = src / subdir
+                            if sub_src.exists() and sub_src.is_dir():
+                                shutil.copytree(sub_src, model_dir / subdir,
+                                                dirs_exist_ok=True)
+                                copied = True
 
-        if not copied:
-            logger.warning("No model artifacts found to copy for template '%s'", template_id)
+            if not copied:
+                logger.warning("No model artifacts found to copy for template '%s'", template_id)
 
-        # Update template config
-        cfg["model_version"] = version
-        cfg["trained"] = True
-        cfg["threshold"] = model_artifacts.get("threshold", cfg.get("threshold", 0.5))
-        cfg["last_trained"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        self.update_template_config(program, template_id, cfg)
+            # Update template config
+            cfg["model_version"] = version
+            cfg["trained"] = True
+            cfg["threshold"] = model_artifacts.get("threshold", cfg.get("threshold", 0.5))
+            cfg["last_trained"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            self.update_template_config(program, template_id, cfg)
 
-        logger.info("Model v%d saved to template '%s'", version, template_id)
-        return version
+            logger.info("Model v%d saved to template '%s'", version, template_id)
+            return version
 
     def get_template_model_path(self, program: str, template_id: str) -> Optional[Path]:
         """
@@ -572,54 +572,65 @@ class ProgramManager:
         restored_config = {}
 
         with zipfile.ZipFile(str(zip_path), "r") as zf:
-            # Baca metadata
-            if "export_metadata.json" in zf.namelist():
-                import_meta = json.loads(zf.read("export_metadata.json"))
+                    # Baca metadata
+                    if "export_metadata.json" in zf.namelist():
+                        import_meta = json.loads(zf.read("export_metadata.json"))
 
-            # Baca template config
-            if "template_config.json" in zf.namelist():
-                restored_config = json.loads(zf.read("template_config.json"))
+                    # Baca template config
+                    if "template_config.json" in zf.namelist():
+                        restored_config = json.loads(zf.read("template_config.json"))
 
-            # Extract model files
-            model_files = [n for n in zf.namelist() if n.startswith("model/")]
-            if not model_files:
-                raise ProgramError(
-                    "File .zip tidak berisi model (folder 'model/' tidak ditemukan).")
+                    # Extract model files
+                    model_files = [n for n in zf.namelist() if n.startswith("model/")]
+                    if not model_files:
+                        raise ProgramError(
+                            "File .zip tidak berisi model (folder 'model/' tidak ditemukan).")
 
-            # Hapus model lama
-            if model_dir.exists():
-                import gc
-                for _ in range(3):
-                    try:
-                        shutil.rmtree(str(model_dir))
-                        break
-                    except PermissionError:
-                        gc.collect()
-                        time.sleep(0.5)
+                    # Hapus model lama
+                    if model_dir.exists():
+                        for _ in range(3):
+                            try:
+                                shutil.rmtree(str(model_dir))
+                                break
+                            except PermissionError:
+                                gc.collect()
+                                time.sleep(0.5)
 
-            for name in model_files:
-                # Skip direktori
-                if name.endswith("/"):
-                    continue
-                rel_path = name[len("model/"):]
-                dest = model_dir / rel_path
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(name) as src, open(str(dest), "wb") as dst:
-                    dst.write(src.read())
+                    for name in model_files:
+                        # Skip direktori
+                        if name.endswith("/"):
+                            continue
+                        rel_path = name[len("model/"):]
+                        dest = model_dir / rel_path
+                        dest.parent.mkdir(parents=True, exist_ok=True)
 
-            # Update template config
-            if restored_config:
-                # Pertahankan images/gallery yang sudah ada
-                existing_cfg = self.get_template_config(program, template_id)
-                restored_config["images"] = existing_cfg.get("images", {})
-                restored_config["image_count"] = existing_cfg.get("image_count", 0)
-                # Tandai sebagai trained
-                restored_config["trained"] = True
-                restored_config["model_version"] = (
-                    existing_cfg.get("model_version", 0) + 1)
-                restored_config["imported_from"] = import_meta.get("exported_at", "")
-                restored_config["last_trained"] = import_meta.get("exported_at", "")
-                self.update_template_config(program, template_id, restored_config)
+                        # Retry write with backoff — model.bin sering di-lock OpenVINO (WinError 32 / Errno 13)
+                        for attempt in range(6):
+                            try:
+                                with zf.open(name) as src, open(str(dest), "wb") as dst:
+                                    dst.write(src.read())
+                                break
+                            except (PermissionError, OSError) as e:
+                                if isinstance(e, OSError) and e.errno != 13:
+                                    raise
+                                if attempt == 5:
+                                    raise
+                                gc.collect()
+                                time.sleep(0.5 * (attempt + 1))
+
+                    # Update template config
+                    if restored_config:
+                        # Pertahankan images/gallery yang sudah ada
+                        existing_cfg = self.get_template_config(program, template_id)
+                        restored_config["images"] = existing_cfg.get("images", {})
+                        restored_config["image_count"] = existing_cfg.get("image_count", 0)
+                        # Tandai sebagai trained
+                        restored_config["trained"] = True
+                        restored_config["model_version"] = (
+                            existing_cfg.get("model_version", 0) + 1)
+                        restored_config["imported_from"] = import_meta.get("exported_at", "")
+                        restored_config["last_trained"] = import_meta.get("exported_at", "")
+                        self.update_template_config(program, template_id, restored_config)
 
         logger.info("Model imported: %s → %s/%s (%d files)",
                     zip_path, program, template_id, len(model_files))

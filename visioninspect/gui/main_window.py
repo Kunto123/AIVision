@@ -2572,9 +2572,10 @@ class MainWindow(QMainWindow):
                 Path(zip_path), program, template)
             self.set_status(f"Model imported (v{result['model_version']})", 3000)
 
-            # Refresh teach page
+            # Refresh teach page — reload template + model
             if hasattr(self, "_teach_page"):
-                self._teach_page.refresh()
+                self._refresh_template_ui()
+                self._load_template_model()
             QMessageBox.information(self, "Import Model",
                                     f"Model berhasil diimport!\n"
                                     f"  Versi: {result['model_version']}\n"

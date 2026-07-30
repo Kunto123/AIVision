@@ -548,100 +548,129 @@ class ProgramManager:
         return str(output_path)
 
     def import_model_from_zip(self, zip_path: Path, program: str,
-                              template_id: str) -> dict:
-        """Import model dari file .zip ke template.
+                                  template_id: str) -> dict:
+            """Import model dari file .zip ke template.
 
-        Args:
-            zip_path: Path file .zip hasil export.
-            program: Nama program tujuan.
-            template_id: ID template tujuan (bisa berbeda dari asalnya).
+            Args:
+                zip_path: Path file .zip hasil export.
+                program: Nama program tujuan.
+                template_id: ID template tujuan (bisa berbeda dari asalnya).
 
-        Returns:
-            dict: Metadata hasil import.
-        """
-        import zipfile
+            Returns:
+                dict: Metadata hasil import.
+            """
+            import zipfile
 
-        zip_path = Path(zip_path)
-        if not zip_path.exists():
-            raise ProgramError(f"File tidak ditemukan: {zip_path}")
+            zip_path = Path(zip_path)
+            if not zip_path.exists():
+                raise ProgramError(f"File tidak ditemukan: {zip_path}")
 
-        tmpl_dir = self._get_template_dir(program) / template_id
-        model_dir = tmpl_dir / "model"
+            tmpl_dir = self._get_template_dir(program) / template_id
+            model_dir = tmpl_dir / "model"
 
-        import_meta = {}
-        restored_config = {}
+            import_meta = {}
+            restored_config = {}
 
-        with zipfile.ZipFile(str(zip_path), "r") as zf:
-                    # Baca metadata
-                    if "export_metadata.json" in zf.namelist():
-                        import_meta = json.loads(zf.read("export_metadata.json"))
+            with zipfile.ZipFile(str(zip_path), "r") as zf:
+                # Baca metadata
+                if "export_metadata.json" in zf.namelist():
+                    import_meta = json.loads(zf.read("export_metadata.json"))
 
-                    # Baca template config
-                    if "template_config.json" in zf.namelist():
-                        restored_config = json.loads(zf.read("template_config.json"))
+                # Baca template config
+                if "template_config.json" in zf.namelist():
+                    restored_config = json.loads(zf.read("template_config.json"))
 
-                    # Extract model files
-                    model_files = [n for n in zf.namelist() if n.startswith("model/")]
-                    if not model_files:
-                        raise ProgramError(
-                            "File .zip tidak berisi model (folder 'model/' tidak ditemukan).")
+                # Extract model files
+                model_files = [n for n in zf.namelist() if n.startswith("model/")]
+                if not model_files:
+                    raise ProgramError(
+                        "File .zip tidak berisi model (folder 'model/' tidak ditemukan).")
 
-                    # Hapus model lama
-                    if model_dir.exists():
-                        for _ in range(3):
-                            try:
-                                shutil.rmtree(str(model_dir))
-                                break
-                            except PermissionError:
-                                gc.collect()
-                                time.sleep(0.5)
+                # Hapus model lama — retry dengan gc untuk lepaskan handle OpenVINO (WinError 32)
+                if model_dir.exists():
+                    for _ in range(4):
+                        try:
+                            shutil.rmtree(str(model_dir))
+                            break
+                        except (PermissionError, OSError) as e:
+                            # Handle Windows sharing violation (winerror=32) + errno=13
+                            winerr = getattr(e, "winerror", None)
+                            errno = getattr(e, "errno", None)
+                            if winerr not in (32, 0) and errno not in (13, 0):
+                                raise
+                            gc.collect()
+                            time.sleep(0.5)
 
+                # Extract to temp dir first, then move atomically — avoids partial writes / locking
+                with tempfile.TemporaryDirectory(prefix="vi_import_") as tmpdir:
+                    tmp_model_dir = Path(tmpdir) / "model"
+                    tmp_model_dir.mkdir(parents=True)
+
+                    # Extract all model files to temp
                     for name in model_files:
-                        # Skip direktori
                         if name.endswith("/"):
                             continue
                         rel_path = name[len("model/"):]
+                        dest = tmp_model_dir / rel_path
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(name) as src, open(str(dest), "wb") as dst:
+                            dst.write(src.read())
+
+                    # Ensure target model dir exists
+                    model_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Move each file with retry (handles winerror=32 / errno=13)
+                    for name in model_files:
+                        if name.endswith("/"):
+                            continue
+                        rel_path = name[len("model/"):]
+                        src = tmp_model_dir / rel_path
                         dest = model_dir / rel_path
                         dest.parent.mkdir(parents=True, exist_ok=True)
 
-                        # Retry write with backoff — model.bin sering di-lock OpenVINO (WinError 32 / Errno 13)
-                        for attempt in range(6):
+                        for attempt in range(8):
                             try:
-                                with zf.open(name) as src, open(str(dest), "wb") as dst:
-                                    dst.write(src.read())
+                                # Remove existing first (if any)
+                                if dest.exists():
+                                    dest.unlink()
+                                # Atomic replace on same volume
+                                src.replace(dest)
                                 break
                             except (PermissionError, OSError) as e:
-                                if isinstance(e, OSError) and e.errno != 13:
+                                winerr = getattr(e, "winerror", None)
+                                errno = getattr(e, "errno", None)
+                                # Retry on sharing violation (winerr=32) or permission denied (errno=13)
+                                if winerr not in (32, 0) and errno not in (13, 0):
                                     raise
-                                if attempt == 5:
+                                if attempt == 7:
                                     raise
                                 gc.collect()
                                 time.sleep(0.5 * (attempt + 1))
 
-                    # Update template config
-                    if restored_config:
-                        # Pertahankan images/gallery yang sudah ada
-                        existing_cfg = self.get_template_config(program, template_id)
-                        restored_config["images"] = existing_cfg.get("images", {})
-                        restored_config["image_count"] = existing_cfg.get("image_count", 0)
-                        # Tandai sebagai trained
-                        restored_config["trained"] = True
-                        restored_config["model_version"] = (
-                            existing_cfg.get("model_version", 0) + 1)
-                        restored_config["imported_from"] = import_meta.get("exported_at", "")
-                        restored_config["last_trained"] = import_meta.get("exported_at", "")
-                        self.update_template_config(program, template_id, restored_config)
+                # Update template config
+                if restored_config:
+                    # Pertahankan images/gallery yang sudah ada
+                    existing_cfg = self.get_template_config(program, template_id)
+                    restored_config["images"] = existing_cfg.get("images", {})
+                    restored_config["image_count"] = existing_cfg.get("image_count", 0)
+                    # Tandai sebagai trained
+                    restored_config["trained"] = True
+                    restored_config["model_version"] = (
+                        existing_cfg.get("model_version", 0) + 1)
+                    restored_config["imported_from"] = import_meta.get("exported_at", "")
+                    restored_config["last_trained"] = import_meta.get("exported_at", "")
+                    self.update_template_config(program, template_id, restored_config)
 
-        logger.info("Model imported: %s → %s/%s (%d files)",
-                    zip_path, program, template_id, len(model_files))
-        return {
-            "imported": True,
-            "program": program,
-            "template_id": template_id,
-            "model_version": restored_config.get("model_version", 0),
-            "source_exported_at": import_meta.get("exported_at", ""),
-            "files_restored": len(model_files),
-        }
+            logger.info("Model imported: %s → %s/%s (%d files)",
+                        zip_path, program, template_id, len(model_files))
+            return {
+                "imported": True,
+                "program": program,
+                "template_id": template_id,
+                "model_version": restored_config.get("model_version", 0),
+                "source_exported_at": import_meta.get("exported_at", ""),
+                "files_restored": len(model_files),
+            }
 
     # =====================================================================
     # AUGMENTATION

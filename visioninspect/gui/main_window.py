@@ -2571,6 +2571,14 @@ class MainWindow(QMainWindow):
                 return
 
             self.set_status("Importing model...", 0)
+
+            # Unload current model dulu — lepaskan handle OpenVINO biar model.bin gak di-lock
+            if hasattr(self, "_inference_engine") and self._inference_engine is not None:
+                self._inference_engine.unload_model()
+                import gc
+                gc.collect()
+                gc.collect()
+
             result = self._pm.import_model_from_zip(
                 Path(zip_path), program, template)
             self.set_status(f"Model imported (v{result['model_version']})", 3000)

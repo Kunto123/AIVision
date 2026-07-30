@@ -15,10 +15,12 @@ from visioninspect.utils import normalize_wsl_path, is_wsl
 APP_NAME = "VisionInspect"
 APP_VERSION = "1.0.0"
 
-# Normalisasi path WSL: C:\foo → /mnt/c/foo
+# Normalisasi path WSL: C:\foo → /mnt/c/foo (khusus WSL)
 _raw_data_dir = os.getenv("VISIONINSPECT_DATA", "")
-if _raw_data_dir:
+if _raw_data_dir and is_wsl():
     DEFAULT_DATA_DIR = normalize_wsl_path(_raw_data_dir)
+elif _raw_data_dir:
+    DEFAULT_DATA_DIR = Path(_raw_data_dir)
 else:
     DEFAULT_DATA_DIR = Path.home() / ".visioninspect"
 if not DEFAULT_DATA_DIR.is_absolute():

@@ -78,10 +78,13 @@ class MainWindow(QMainWindow):
         self._camera_thread: Optional[CameraThread] = None
         self._camera_worker: Optional[CameraWorker] = None
 
-        # Program Manager — use project-relative path for WSL/Windows sharing
+        # Program Manager — path normalisasi khusus WSL
         raw_data_dir = config.get("data_dir", "")
-        data_dir = normalize_wsl_path(raw_data_dir).resolve()
-        if not data_dir.is_absolute():
+        if raw_data_dir and is_wsl():
+            data_dir = normalize_wsl_path(raw_data_dir).resolve()
+        elif raw_data_dir:
+            data_dir = Path(raw_data_dir).resolve()
+        else:
             data_dir = Path(__file__).resolve().parent.parent.parent / "data"
             data_dir.mkdir(parents=True, exist_ok=True)
         self._data_dir = data_dir

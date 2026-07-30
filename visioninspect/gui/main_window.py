@@ -164,6 +164,11 @@ class MainWindow(QMainWindow):
         self._last_part_check_score = 1.0
         # Worst score terakhir untuk NG tick
         self._last_worst_score = 0.0
+        # ROI color state untuk live inference: orange default, berubah hijau/merah
+        # sesuai judgement, lalu balik ke orange setelah TIME_OUT detik
+        self._roi_col_judgement: dict = {}        # {idx: "OK"/"NG"}
+        self._roi_col_timestamp: float = 0.0       # time.monotonic() terakhir update
+        self._roi_col_duration: float = 3.0        # detik sebelum balik orange
         # Part name untuk push ke PG (di-set saat ganti template)
         self._active_partname = ""
 
@@ -554,17 +559,28 @@ class MainWindow(QMainWindow):
                 qp.setRenderHint(QPainter.Antialiasing)
                 font = QFont("Segoe UI", 9)
                 qp.setFont(font)
+
+                # Tentukan warna per-ROI berdasarkan hasil inferensi
+                elapsed = time.monotonic() - self._roi_col_timestamp
+                fresh = elapsed < self._roi_col_duration
+
                 for i, roi_rect in enumerate(self._current_all_rois):
                     x, y, w, h = roi_rect
-                    # Green border only — no fill, no badge
-                    pen = QPen(QColor("#22C55E"), 2)
+
+                    if fresh and i in self._roi_col_judgement:
+                        jdg = self._roi_col_judgement[i]
+                        color = "#22C55E" if jdg == "OK" else "#EF4444"
+                    else:
+                        color = "#F59E0B"  # orange — default / timeout
+
+                    pen = QPen(QColor(color), 2)
                     qp.setPen(pen)
                     qp.setBrush(Qt.NoBrush)
                     qp.drawRect(x, y, w, h)
-                    # Label text langsung di atas gambar, tanpa background fill
+                    # Label text
                     label_x = x + 3
                     label_y = y - 4 if y >= 16 else y + 13
-                    qp.setPen(QColor("#22C55E"))
+                    qp.setPen(QColor(color))
                     qp.drawText(label_x, label_y, f"ROI{i+1}")
                 qp.end()
             except Exception as e:
@@ -753,6 +769,12 @@ class MainWindow(QMainWindow):
 
             raw_judgement = "NG" if overall_ng else "OK"
             self._last_worst_score = worst_score
+
+            # Simpan judgement per-ROI beserta timestamp untuk warna live
+            self._roi_col_judgement = {}
+            for idx, r in enumerate(roi_results):
+                self._roi_col_judgement[idx] = r.get("judgement", "OK")
+            self._roi_col_timestamp = time.monotonic()
 
             # Push SETIAP hasil inferensi ke PostgreSQL (OK & NG).
             # partname = nama template, mpcheck = nama operator (lihat helper).
@@ -1708,6 +1730,11 @@ class MainWindow(QMainWindow):
         self._refresh_template_ui()
         self._load_template_model()
         self._reset_counters()
+
+        # Reset ROI color state agar tidak pakai warna hasil inference template lama
+        self._roi_col_judgement = {}
+        self._roi_col_timestamp = 0.0
+
         logger.info("Switched to template: %s", tmpl_id)
 
     def _load_template_model(self):

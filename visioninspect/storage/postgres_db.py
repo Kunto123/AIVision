@@ -549,7 +549,7 @@ class PostgresDB:
             mpcheck: "OK" or "NG"
             data1: Part ready confidence (0.0 = not ready, 1.0 = ready)
                    — dari conf part ready / part check
-            data2: Anomaly score — dari conf OK/NG inference
+            data2: Similarity score — 1.0 = mirip OK, 0.0 = anomali total
 
         Returns:
             Inserted row ID, or None on failure.

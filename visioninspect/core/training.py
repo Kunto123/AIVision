@@ -488,10 +488,14 @@ class TrainingPipeline:
 
     @staticmethod
     def _normalize_score(raw: float, score_ref: Optional[float]) -> float:
-        """Map skor mentah → [0,1] dgn score_ref sbg titik tengah (0.5)."""
+        """Map raw anomaly score → similarity score [0,1] for histogram display.
+        1.0 = mirip OK, 0.0 = anomali total."""
         if not score_ref or score_ref <= 0:
-            return max(0.0, min(1.0, float(raw)))
-        return max(0.0, min(1.0, 0.5 * float(raw) / score_ref))
+            score = max(0.0, min(1.0, float(raw)))
+        else:
+            score = max(0.0, min(1.0, 0.5 * float(raw) / score_ref))
+        # Invert: anomaly → similarity
+        return 1.0 - score
 
     def _score_images_openvino(self, xml_path: Path, image_paths) -> list:
         """Jalankan model OpenVINO pada tiap gambar → ambil pred_score mentah."""

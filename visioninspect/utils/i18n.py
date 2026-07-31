@@ -45,7 +45,7 @@ class Translator:
         # Run page
         "run_title": "Mode Inspeksi",
         "run_status": "Status",
-        "run_score": "Skor Anomali",
+        "run_score": "Skor Kemiripan",
         "run_latency": "Latensi",
         "run_fps": "FPS",
         "run_judgement": "Hasil",
@@ -170,7 +170,7 @@ class Translator:
         "nav_diagnostics": "DIAGNOSTICS",
         "run_title": "Inspection Mode",
         "run_status": "Status",
-        "run_score": "Anomaly Score",
+        "run_score": "Similarity Score",
         "run_latency": "Latency",
         "run_fps": "FPS",
         "run_judgement": "Result",

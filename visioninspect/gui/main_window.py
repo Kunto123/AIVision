@@ -872,8 +872,8 @@ class MainWindow(QMainWindow):
         Mapping kolom qc_inspection_push:
           partname = nama template (bukan id)
           mpcheck  = nama akun operator yang login (bukan OK/NG)
-          data1    = part-ready confidence
-          data2    = anomaly score
+          data1    = part-ready difference score (0=siap, makin besar = makin beda)
+          data2    = similarity score (1.0=mirip OK, 0.0=anomali total)
 
         push_inspection membuka koneksi baru tiap panggil; menjalankannya
         langsung di thread GUI (per frame) bisa membekukan UI. Jadi dijalankan

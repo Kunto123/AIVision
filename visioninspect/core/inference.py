@@ -42,7 +42,7 @@ except OSError as e:
 @dataclass
 class InferenceResult:
     """Hasil inferensi untuk satu frame."""
-    score: float           # anomaly score [0, 1]
+    score: float           # similarity score [0, 1] — 1.0 = mirip OK, 0.0 = anomali total
     judgement: str         # "OK" or "NG"
     heatmap: Optional[npt.NDArray] = None  # anomaly heatmap (H, W)
     latency_ms: float = 0.0
@@ -340,8 +340,9 @@ class InferenceEngine:
 
         if model is None and not simple_loaded:
             elapsed = (time.perf_counter() - start) * 1000
+            # No model = tidak bisa deteksi anomali → similarity=1.0 (lolos)
             return InferenceResult(
-                score=0.0, judgement="OK", latency_ms=elapsed,
+                score=1.0, judgement="OK", latency_ms=elapsed,
                 threshold=threshold, roi_cropped=resized
             )
 
@@ -365,7 +366,9 @@ class InferenceEngine:
                 z = np.abs(img_f - simple_mean) / simple_std
                 score = float(np.mean(z))
                 score = max(0.0, min(1.0, score))
-                judgement = "OK" if score < threshold else "NG"
+                # Konversi anomaly → similarity (1.0 = mirip OK)
+                score = 1.0 - score
+                judgement = "OK" if score >= threshold else "NG"
                 elapsed = (time.perf_counter() - start) * 1000
                 if track_latency:
                     with self._lock:
@@ -379,8 +382,9 @@ class InferenceEngine:
             except Exception as e:
                 elapsed = (time.perf_counter() - start) * 1000
                 logger.error("Simple inference error: %s", e)
+                # Fail-safe: error → 0% similarity → NG
                 return InferenceResult(
-                    score=1.0, judgement="NG", latency_ms=elapsed,
+                    score=0.0, judgement="NG", latency_ms=elapsed,
                     threshold=threshold, roi_cropped=resized,
                 )
 
@@ -427,8 +431,11 @@ class InferenceEngine:
                 score = min(1.0, max(0.0, 0.5 * raw_score / score_ref))
             else:
                 score = raw_score
+            # Konversi anomaly score → similarity score (1.0 = mirip OK)
+            score = 1.0 - score
+            score = max(0.0, min(1.0, score))
 
-            judgement = "OK" if score < threshold else "NG"
+            judgement = "OK" if score >= threshold else "NG"
             elapsed = (time.perf_counter() - start) * 1000
 
             # Track latency
@@ -450,9 +457,9 @@ class InferenceEngine:
         except Exception as e:
             elapsed = (time.perf_counter() - start) * 1000
             logger.error("Inference error: %s", e)
-            # Fail-safe: return NG
+            # Fail-safe: error → 0% similarity → NG
             return InferenceResult(
-                score=1.0, judgement="NG", latency_ms=elapsed,
+                score=0.0, judgement="NG", latency_ms=elapsed,
                 threshold=threshold, roi_cropped=resized
             )
 

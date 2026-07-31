@@ -101,6 +101,25 @@ class Config:
             "rs485_delay_after_tx": 0.0,
             # Modbus
             "modbus_slave_id": 1,
+            "pulse_ms": 300,          # durasi coil hasil nyala (OK/NG), ms
+            "scan_range": 127,        # range probe scan coil (0..N)
+            # IO mapping — GANTI DI SINI (atau lewat UI Settings → PLC)
+            # outputs: coil yang SISTEM tulis → PLC baca (OK/NG/part_ready/busy)
+            # inputs : coil yang PLC tulis → sistem baca (trigger/reset/switch program)
+            "io_map": {
+                "outputs": {
+                    "result_ok": 1,
+                    "result_ng": 2,
+                    "part_ready": 3,
+                    "busy": 4,
+                },
+                "inputs": {
+                    "trigger": 0,
+                    "reset_result": 5,
+                    "switch_program": 6,
+                },
+                "program_register": 10,
+            },
             # Reconnect
             "reconnect_interval": 5.0,
             "max_reconnect_attempts": 0,  # 0 = unlimited

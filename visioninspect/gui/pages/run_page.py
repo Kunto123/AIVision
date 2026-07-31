@@ -88,7 +88,6 @@ class RunPage(QWidget):
         self._trigger_btn = QPushButton(self._tr.tr("run_trigger_now"))
         self._trigger_btn.setObjectName("primaryButton")
         ctrl_layout.addWidget(self._trigger_btn)
-
         layout.addWidget(cam_ctrl)
 
         # === Main: Live View + Right Panel ===
@@ -364,6 +363,15 @@ class RunPage(QWidget):
 
     def get_trigger_button(self) -> QPushButton:
         return self._trigger_btn
+
+    def set_trigger_mode(self, mode: str) -> None:
+        """Update label Trigger sesuai mode inference (continuous/plc_trigger/manual)."""
+        labels = {
+            "continuous": self._tr.tr("run_trigger_continuous"),
+            "plc_trigger": "PLC Trigger",
+            "manual": "Manual",
+        }
+        self._trigger_mode_label.setText(labels.get(mode, self._tr.tr("run_trigger_continuous")))
 
     def get_heatmap_button(self) -> QPushButton:
         return self._heatmap_btn

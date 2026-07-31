@@ -1,192 +1,243 @@
 #!/usr/bin/env python3
 """
 PLC Simulator — VisionInspect
-Simulasi PLC untuk menguji komunikasi serial (Modbus RTU atau ASCII).
-Menggunakan virtual serial pair (socat atau com0com).
+Simulasi PLC (Modbus RTU SLAVE) untuk menguji komunikasi.
+Sekarang sistem = MASTER, simulator = SLAVE (sesuai arsitektur baru).
 
 Cara pakai:
     1. Install socat (Linux/WSL): sudo apt-get install socat
     2. Buat virtual serial pair:
         socat -d -d PTY,link=/tmp/ttyV0 PTY,link=/tmp/ttyV1
-       Ini akan membuat /tmp/ttyV0 dan /tmp/ttyV1 (serial pair)
-    3. Jalankan simulator: python tools/plc_simulator.py --port /tmp/ttyV0 --protocol modbus
-    4. Konfigurasi VisionInspect ke port /tmp/ttyV1 dengan protokol yang sama
+       → /tmp/ttyV0 dan /tmp/ttyV1 (dua ujung kabel virtual)
+    3. Jalankan simulator (slave):  python tools/plc_simulator.py --port /tmp/ttyV0 --protocol modbus
+    4. Konfigurasi VisionInspect ke /tmp/ttyV1, protocol modbus, enable PLC.
+       (Settings → PLC → port /tmp/ttyV1 → Save)
+
+Simulator meniru PLC FX3U:
+    - Coil output yang DITULIS sistem:  1=OK, 2=NG, 3=part_ready, 4=busy
+    - Coil input yang DIBACA sistem:    0=trigger, 5=reset, 6=switch_program
+    - Holding register: 10 = nomor program (untuk switch_program)
+
+Keyboard simulator:
+    t  → trigger inspeksi (coil 0 ON sesaat)
+    r  → reset (coil 5 ON sesaat)
+    s  → switch program (coil 6 ON sesaat — gunakan p dulu untuk set nomor)
+    p  → set nomor program (default 2)
+    q  → keluar
+
+⚠️ pymodbus 3.13: API lama (ModbusDeviceContext) rusak — pakai SimDevice/SimData.
 """
 
 import argparse
-import json
-import struct
-import time
+import asyncio
 import sys
+import threading
+import time
 from pathlib import Path
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from visioninspect.plc.serial_manager import SerialManager, SerialConfig
-from visioninspect.plc.ascii_protocol import ASCIIProtocolManager
+# Peta alamat — ⚠️ samakan dengan io_map di config VisionInspect
+OUT_COIL_OK = 1
+OUT_COIL_NG = 2
+OUT_COIL_PART_READY = 3
+OUT_COIL_BUSY = 4
+IN_COIL_TRIGGER = 0
+IN_COIL_RESET = 5
+IN_COIL_SWITCH_PROGRAM = 6
+PROGRAM_REGISTER = 10
 
 
 class PLCSimulator:
-    """
-    Simulator PLC untuk testing.
-    - Mode ASCII: mengirim trigger periodik, menerima hasil
-    - Mode Modbus: membaca register, menulis trigger coil
-    """
+    """Modbus RTU slave simulator (menggantikan PLC Mitsubishi FX3U)."""
 
-    def __init__(self, port: str, protocol: str = "ascii", slave_id: int = 1):
+    def __init__(self, port: str, slave_id: int = 1):
         self._port = port
-        self._protocol = protocol
         self._slave_id = slave_id
+        self._server = None
+        self._running = False
+        self._print_lock = threading.Lock()
 
-        # Serial config
-        config = SerialConfig(
-            port=port,
-            baudrate=9600,
-            timeout=1.0,
-        )
-        self._serial = SerialManager(config)
+    # ---- Akses store lewat server.context (SimCore milik server) ----
 
-        # Protocol
-        self._ascii = ASCIIProtocolManager(self._serial)
+    def _set_coil(self, addr: int, value: bool):
+        try:
+            asyncio.run(self._server.context.async_setValues(
+                self._slave_id, 1, addr, [1 if value else 0]))
+        except Exception:
+            pass
 
-        # Statistics
-        self._inspections_requested = 0
-        self._results_received = 0
-        self._last_result = None
+    def _get_coil(self, addr: int) -> int:
+        try:
+            v = asyncio.run(self._server.context.async_getValues(
+                self._slave_id, 1, addr, 1))
+            return 1 if (isinstance(v, list) and v and v[0]) else 0
+        except Exception:
+            return 0
 
-        # Callbacks
-        self._ascii.set_on_trigger(self._on_trigger)
+    def _get_register(self, addr: int) -> int:
+        try:
+            v = asyncio.run(self._server.context.async_getValues(
+                self._slave_id, 3, addr, 1))
+            return v[0] if isinstance(v, list) and v else 0
+        except Exception:
+            return 0
+
+    def _set_register(self, addr: int, value: int):
+        try:
+            asyncio.run(self._server.context.async_setValues(
+                self._slave_id, 3, addr, [value]))
+        except Exception:
+            pass
+
+    # ---- Input simulasi (dari keyboard) ----
+
+    def pulse_coil(self, addr: int, ms: float = 0.4):
+        self._set_coil(addr, True)
+
+        def _off():
+            time.sleep(ms)
+            self._set_coil(addr, False)
+
+        threading.Thread(target=_off, daemon=True).start()
+
+    # ---- Display ----
+
+    def _display_loop(self):
+        last_out = None
+        prog_set = False
+        while self._running:
+            if not prog_set:
+                # Set program awal (register 10 = 1) dengan retry sampai server siap
+                self._set_register(PROGRAM_REGISTER, 1)
+                if self._get_register(PROGRAM_REGISTER) == 1:
+                    prog_set = True
+            ok = self._get_coil(OUT_COIL_OK)
+            ng = self._get_coil(OUT_COIL_NG)
+            pr = self._get_coil(OUT_COIL_PART_READY)
+            busy = self._get_coil(OUT_COIL_BUSY)
+            prog = self._get_register(PROGRAM_REGISTER)
+            out = (ok, ng, pr, busy, prog)
+            if out != last_out:
+                with self._print_lock:
+                    print(f"  [PLC] OK={ok} NG={ng} PartReady={pr} Busy={busy} "
+                          f"Program={prog}")
+                last_out = out
+            time.sleep(0.3)
+
+    def _keyboard_loop(self):
+        with self._print_lock:
+            print("  Keyboard: t=trigger  r=reset  s=switch_program  "
+                  "p=set_program  q=quit")
+        while self._running:
+            try:
+                cmd = input("  > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if cmd == "q":
+                self._running = False
+                break
+            elif cmd == "t":
+                self.pulse_coil(IN_COIL_TRIGGER)
+                with self._print_lock:
+                    print("  → trigger ON (coil 0) sesaat")
+            elif cmd == "r":
+                self.pulse_coil(IN_COIL_RESET)
+                with self._print_lock:
+                    print("  → reset ON (coil 5) sesaat")
+            elif cmd == "s":
+                self.pulse_coil(IN_COIL_SWITCH_PROGRAM)
+                with self._print_lock:
+                    print("  → switch_program ON (coil 6) sesaat")
+            elif cmd == "p":
+                self._set_register(PROGRAM_REGISTER, 2)
+                with self._print_lock:
+                    print("  → program register = 2")
+
+    # ---- Main ----
 
     def run(self):
-        """Run simulator main loop."""
+        from pymodbus.framer import FramerType
+        from pymodbus.server import ModbusSerialServer
+        from pymodbus.simulator import DataType, SimData, SimDevice
+
         print(f"\n{'='*60}")
-        print(f"  PLC SIMULATOR")
-        print(f"  Port: {self._port}")
-        print(f"  Protocol: {self._protocol.upper()}")
-        print(f"{'='*60}\n")
+        print("  PLC SIMULATOR (SLAVE — Modbus RTU)")
+        print(f"  Port: {self._port}  Slave ID: {self._slave_id}")
+        print(f"  Output coil: OK={OUT_COIL_OK} NG={OUT_COIL_NG} "
+              f"PartReady={OUT_COIL_PART_READY} Busy={OUT_COIL_BUSY}")
+        print(f"  Input coil:  Trigger={IN_COIL_TRIGGER} Reset={IN_COIL_RESET} "
+              f"SwitchProg={IN_COIL_SWITCH_PROGRAM}")
+        print(f"  Register:    Program={PROGRAM_REGISTER}")
+        print("="*60)
 
-        # Connect
-        if not self._serial.connect():
-            print("ERROR: Gagal connect ke serial port")
-            return
+        coil_sim = SimData(address=0, count=128, values=[0] * 128,
+                           datatype=DataType.BITS)
+        di_sim = SimData(address=0, count=128, values=[0] * 128,
+                         datatype=DataType.BITS)
+        hr_sim = SimData(address=0, count=64, values=[0] * 64,
+                         datatype=DataType.REGISTERS)
+        ir_sim = SimData(address=0, count=64, values=[0] * 64,
+                         datatype=DataType.REGISTERS)
+        device = SimDevice(id=self._slave_id,
+                           simdata=([coil_sim], [di_sim], [hr_sim], [ir_sim]))
 
-        print(f"  Terhubung ke {self._port}")
-        print("  Tekan Ctrl+C untuk berhenti\n")
+        # Program awal = 1 (register 10) — di-set setelah server siap
+
+        # Server jalan di thread (event loop sendiri), main thread untuk
+        # keyboard + display
+        def _serve():
+            async def _start():
+                srv = ModbusSerialServer(
+                    [device], framer=FramerType.RTU,
+                    device_address=self._slave_id,
+                    port=self._port,
+                    baudrate=9600, bytesize=8, parity="N",
+                    stopbits=1, timeout=1.0,
+                )
+                self._server = srv
+                await srv.serve_forever()
+            asyncio.run(_start())
+
+        server_thread = threading.Thread(target=_serve, daemon=True)
+        server_thread.start()
+        time.sleep(0.5)
+
+        self._running = True
+        display_thread = threading.Thread(target=self._display_loop, daemon=True)
+        display_thread.start()
 
         try:
-            if self._protocol == "ascii":
-                self._run_ascii()
-            elif self._protocol == "modbus":
-                self._run_modbus()
-            else:
-                print(f"ERROR: Protokol tidak dikenal: {self._protocol}")
+            self._keyboard_loop()
         except KeyboardInterrupt:
-            print("\n  Simulator dihentikan oleh user")
+            pass
         finally:
-            self._serial.disconnect()
-            self._print_stats()
-
-    def _run_ascii(self):
-        """ASCII protocol mode - polling dan kirim trigger."""
-        trigger_count = 0
-        last_trigger_time = 0
-
-        while True:
-            # Kirim trigger setiap 3 detik
-            now = time.monotonic()
-            if now - last_trigger_time >= 3.0:
-                trigger_count += 1
-                self._inspections_requested += 1
-                frame = ASCIIProtocolManager.make_frame("TRG")
-                print(f"\n[Trigger #{trigger_count}] Kirim TRG...")
-                self._serial.send(frame)
-                last_trigger_time = now
-
-            # Baca response
-            data = self._serial.read(64)
-            if data:
-                parsed = self._ascii.process_received_data(data)
-                if parsed:
-                    print(f"  Response: {parsed}")
-                    if parsed.get("command") == "ack":
-                        self._results_received += 1
-                        self._print_status()
-
-            time.sleep(0.1)
-
-    def _run_modbus(self):
-        """Modbus RTU mode - baca register periodik."""
-        try:
-            from pymodbus.client import ModbusSerialClient
-            from pymodbus.exceptions import ModbusException
-
-            client = ModbusSerialClient(
-                port=self._port,
-                baudrate=9600,
-                timeout=1.0,
-            )
-            client.connect()
-            print("  Modbus client connected")
-
-            while True:
-                # Baca holding register
-                try:
-                    # Register 0: system status
-                    rr = client.read_holding_registers(0, 6, slave=self._slave_id)
-                    if not rr.isError():
-                        status = rr.registers[0]
-                        result = rr.registers[1]
-                        score = rr.registers[2] / 100.0
-                        total = rr.registers[3]
-                        ng = rr.registers[4]
-                        prog = rr.registers[5]
-
-                        print(f"  Status={status} | Result={result} | Score={score:.2f} | "
-                              f"Total={total} | NG={ng} | Program={prog}")
-
-                except ModbusException as e:
-                    print(f"  Read error: {e}")
-
-                time.sleep(2.0)
-
-        except ImportError:
-            print("ERROR: pymodbus tidak terinstall")
-            print("Install: pip install pymodbus")
-
-    def _on_trigger(self):
-        """Callback saat trigger diterima dari VisionInspect (ACK)."""
-        self._inspections_requested += 1
-        self._print_status()
-
-    def _print_status(self):
-        print(f"  >> Stats: {self._inspections_requested} triggered, "
-              f"{self._results_received} results")
-
-    def _print_stats(self):
-        print(f"\n{'='*60}")
-        print(f"  STATISTIK SIMULATOR")
-        print(f"  Trigger dikirim: {self._inspections_requested}")
-        print(f"  Hasil diterima: {self._results_received}")
-        print(f"{'='*60}\n")
+            self._running = False
+            print("\n  Simulator dihentikan")
+            try:
+                asyncio.run(self._server.shutdown())
+            except Exception:
+                pass
+            sys.exit(0)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="VisionInspect PLC Simulator")
+    parser = argparse.ArgumentParser(description="VisionInspect PLC Simulator (SLAVE)")
     parser.add_argument("--port", default="COM3",
-                        help="Serial port (default: COM3 for Windows). "
-                             "Linux: /tmp/ttyV0 for virtual pair")
-    parser.add_argument("--protocol", choices=["ascii", "modbus"], default="ascii",
-                        help="Protocol (default: ascii)")
+                        help="Serial port (Windows: COM3, Linux: /tmp/ttyV0)")
+    parser.add_argument("--protocol", choices=["ascii", "modbus"], default="modbus",
+                        help="Protocol (default: modbus; ascii belum di-support slave mode)")
     parser.add_argument("--slave-id", type=int, default=1,
                         help="Modbus slave ID (default: 1)")
     args = parser.parse_args()
 
-    sim = PLCSimulator(
-        port=args.port,
-        protocol=args.protocol,
-        slave_id=args.slave_id,
-    )
+    if args.protocol != "modbus":
+        print("⚠️  Mode ASCII di simulator lama (master) sudah diganti: "
+              "sistem sekarang MASTER, jadi simulator harus SLAVE (modbus).")
+        print("    Pakai --protocol modbus.")
+        sys.exit(1)
+
+    sim = PLCSimulator(port=args.port, slave_id=args.slave_id)
     sim.run()
 
 

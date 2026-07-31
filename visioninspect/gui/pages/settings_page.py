@@ -4,6 +4,7 @@ Pengaturan kamera, ROI, PLC, model, retensi, Flask API.
 """
 
 from PySide6.QtCore import Slot
+from PySide6.QtGui import QStandardItemModel
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -119,6 +120,12 @@ class SettingsPage(QWidget):
         self._plc_enabled = QCheckBox("Enable PLC")
         plc_layout.addWidget(self._plc_enabled)
 
+        self._plc_status_label = QLabel("Tidak aktif")
+        self._plc_status_label.setStyleSheet(
+            "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
+            "color: #9FB3C8; background-color: #1A2A44;")
+        plc_layout.addWidget(self._plc_status_label)
+
         plc_mode_row = QHBoxLayout()
         plc_mode_row.addWidget(QLabel("Mode:"))
         self._plc_mode = QComboBox()
@@ -128,6 +135,14 @@ class SettingsPage(QWidget):
         plc_mode_row.addWidget(QLabel("Protocol:"))
         self._plc_protocol = QComboBox()
         self._plc_protocol.addItems([self._tr.tr("plc_modbus"), self._tr.tr("plc_ascii")])
+        # ASCII deprecated — hanya Modbus RTU yang didukung saat ini
+        _proto_model = self._plc_protocol.model()
+        if isinstance(_proto_model, QStandardItemModel):
+            _item = _proto_model.item(1)
+            if _item is not None:
+                _item.setEnabled(False)
+        self._plc_protocol.setToolTip(
+            "Protocol ASCII tidak lagi didukung — hanya Modbus RTU.")
         plc_mode_row.addWidget(self._plc_protocol)
         plc_mode_row.addStretch()
         plc_layout.addLayout(plc_mode_row)
@@ -148,7 +163,97 @@ class SettingsPage(QWidget):
         plc_params.addStretch()
         plc_layout.addLayout(plc_params)
 
+        plc_addr_row = QHBoxLayout()
+        plc_addr_row.addWidget(QLabel("Slave ID:"))
+        self._plc_slave_id = QSpinBox()
+        self._plc_slave_id.setRange(1, 247)
+        self._plc_slave_id.setValue(1)
+        self._plc_slave_id.setToolTip(
+            "Modbus slave ID (device address) PLC — default 1 untuk Mitsubishi.")
+        plc_addr_row.addWidget(self._plc_slave_id)
+        plc_addr_row.addWidget(QLabel("Scan range:"))
+        self._plc_scan_range = QSpinBox()
+        self._plc_scan_range.setRange(0, 9999)
+        self._plc_scan_range.setValue(127)
+        self._plc_scan_range.setToolTip(
+            "Batas atas probe alamat coil saat Scan/Deteksi Aktif.")
+        plc_addr_row.addWidget(self._plc_scan_range)
+        plc_addr_row.addStretch()
+        plc_layout.addLayout(plc_addr_row)
+
+        # --- IO Mapping (Modbus) — alamat bisa diganti tanpa edit kode ---
+        io_hint = QLabel(
+            "IO Mapping (Modbus RTU) — coil yang sistem tulis/ baca.\n"
+            "Klik 'Scan Coils' untuk cari alamat valid, atau ketik manual.")
+        io_hint.setWordWrap(True)
+        io_hint.setObjectName("secondaryText")
+        plc_layout.addWidget(io_hint)
+
+        self._plc_pulse_ms = _add_spin_row(plc_layout, "Pulse durasi (ms):", 0, 5000, 300)
+
+        self._io_combos: dict = {}
+        io_rows = [
+            ("result_ok",     "Output OK coil:",         1),
+            ("result_ng",     "Output NG coil:",         2),
+            ("part_ready",    "Output Part Ready coil:", 3),
+            ("busy",          "Output Busy coil:",       4),
+            ("trigger",       "Input Trigger coil:",     0),
+            ("reset_result",  "Input Reset coil:",       5),
+            ("switch_program","Input Ganti Prog coil:",  6),
+        ]
+        for key, label, default_addr in io_rows:
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label))
+            combo = QComboBox()
+            combo.setEditable(True)
+            combo.setCurrentText(str(default_addr))
+            row.addWidget(combo)
+            row.addStretch()
+            plc_layout.addLayout(row)
+            self._io_combos[key] = combo
+
+        self._plc_program_register = _add_spin_row(
+            plc_layout, "Program Register:", 0, 9999, 10)
+
+        scan_row = QHBoxLayout()
+        self._scan_btn = QPushButton("Scan Coils...")
+        self._scan_btn.setMinimumHeight(32)
+        self._detect_btn = QPushButton("Deteksi Aktif")
+        self._detect_btn.setMinimumHeight(32)
+        scan_row.addWidget(self._scan_btn)
+        scan_row.addWidget(self._detect_btn)
+        scan_row.addStretch()
+        plc_layout.addLayout(scan_row)
+        self._scan_result_label = QLabel("")
+        self._scan_result_label.setObjectName("secondaryText")
+        self._scan_result_label.setWordWrap(True)
+        plc_layout.addWidget(self._scan_result_label)
+
         main_layout.addWidget(plc_group)
+
+        # === Inference Settings ===
+        infer_group = QGroupBox("Inference")
+        infer_layout = QVBoxLayout(infer_group)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Trigger Mode:"))
+        self._inference_mode = QComboBox()
+        self._inference_mode.addItems(["Continuous", "PLC Trigger", "Manual"])
+        self._inference_mode.setToolTip(
+            "Continuous: inspeksi tiap frame.\n"
+            "PLC Trigger: inspeksi hanya saat coil trigger PLC ON.\n"
+            "Manual: inspeksi hanya saat tombol Trigger ditekan.")
+        mode_row.addWidget(self._inference_mode)
+        mode_row.addStretch()
+        infer_layout.addLayout(mode_row)
+
+        mode_help = QLabel(
+            "PLC Trigger membutuhkan PLC aktif (Settings → PLC → Enable PLC).")
+        mode_help.setObjectName("secondaryText")
+        mode_help.setWordWrap(True)
+        infer_layout.addWidget(mode_help)
+
+        main_layout.addWidget(infer_group)
 
         # === Model Settings ===
         model_group = QGroupBox(self._tr.tr("settings_model"))
@@ -193,6 +298,12 @@ class SettingsPage(QWidget):
 
         self._flask_enabled = QCheckBox("Enable Flask API")
         flask_layout.addWidget(self._flask_enabled)
+
+        self._flask_status_label = QLabel("Tidak aktif")
+        self._flask_status_label.setStyleSheet(
+            "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
+            "color: #9FB3C8; background-color: #1A2A44;")
+        flask_layout.addWidget(self._flask_status_label)
 
         self._flask_port = _add_spin_row(flask_layout, "Port:", 1024, 65535, 5000)
 
@@ -380,6 +491,14 @@ class SettingsPage(QWidget):
                 "port": self._plc_port.text(),
                 "baudrate": int(self._plc_baud.currentText()),
                 "parity": self._plc_parity.currentText(),
+                "modbus_slave_id": self._plc_slave_id.value(),
+                "scan_range": self._plc_scan_range.value(),
+                "pulse_ms": self._plc_pulse_ms.value(),
+                "io_map": self.get_plc_io_map(),
+            },
+            "inference": {
+                "mode": ["continuous", "plc_trigger", "manual"][self._inference_mode.currentIndex()],
+                "cycle_delay_ms": self._cycle_delay_spin.value(),
             },
             "model": {
                 "algorithm": self._model_algo.currentText().lower(),
@@ -407,7 +526,6 @@ class SettingsPage(QWidget):
             },
             "language": "id" if self._lang_combo.currentIndex() == 0 else "en",
             "ng_debounce_ms": self._ng_delay_spin.value(),
-            "cycle_delay_ms": self._cycle_delay_spin.value(),
             "show_debug": self._show_debug_cb.isChecked(),
         }
 
@@ -424,6 +542,109 @@ class SettingsPage(QWidget):
     def get_cycle_delay_ms(self) -> int:
         """Get cycle delay from config (ms). 0 = no delay."""
         return self._config.get("inference.cycle_delay_ms", 1000)
+
+    # ---- PLC IO Mapping API ----
+
+    def _set_io_combo(self, key: str, addr) -> None:
+        """Set combo address value (internal). Non-int → fallback 0."""
+        combo = self._io_combos.get(key)
+        if combo is None:
+            return
+        try:
+            combo.setCurrentText(str(int(addr)))
+        except (ValueError, TypeError):
+            combo.setCurrentText("0")
+
+    def _parse_io_addr(self, combo) -> int:
+        """Parse combo text ke int alamat (aman: non-numeric → 0)."""
+        text = combo.currentText().strip()
+        try:
+            return max(0, int(text))
+        except ValueError:
+            return 0
+
+    def get_plc_io_map(self) -> dict:
+        """Read current IO mapping from UI (untuk disimpan ke config)."""
+        return {
+            "outputs": {
+                "result_ok": self._parse_io_addr(self._io_combos["result_ok"]),
+                "result_ng": self._parse_io_addr(self._io_combos["result_ng"]),
+                "part_ready": self._parse_io_addr(self._io_combos["part_ready"]),
+                "busy": self._parse_io_addr(self._io_combos["busy"]),
+            },
+            "inputs": {
+                "trigger": self._parse_io_addr(self._io_combos["trigger"]),
+                "reset_result": self._parse_io_addr(self._io_combos["reset_result"]),
+                "switch_program": self._parse_io_addr(self._io_combos["switch_program"]),
+            },
+            "program_register": self._plc_program_register.value(),
+        }
+
+    def get_plc_pulse_ms(self) -> int:
+        return self._plc_pulse_ms.value()
+
+    def get_scan_button(self) -> QPushButton:
+        return self._scan_btn
+
+    def get_detect_button(self) -> QPushButton:
+        return self._detect_btn
+
+    def set_scan_coil_options(self, valid_coils: list) -> None:
+        """Tambahkan alamat coil valid hasil scan ke semua combo (tanpa
+        mengubah pilihan yang sedang aktif)."""
+        for combo in self._io_combos.values():
+            current = combo.currentText()
+            for addr in valid_coils:
+                s = str(int(addr))
+                if combo.findText(s) < 0:
+                    combo.addItem(s)
+            idx = combo.findText(current)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+
+    def set_scan_result_label(self, text: str) -> None:
+        self._scan_result_label.setText(text)
+
+    def set_plc_status(self, connected: bool, detail: str = "") -> None:
+        """Update PLC connection status indicator di group PLC."""
+        if connected:
+            self._plc_status_label.setText(f"Terhubung{(' — ' + detail) if detail else ''}")
+            self._plc_status_label.setStyleSheet(
+                "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
+                "color: #22C55E; background-color: #1A2A44;")
+        elif detail == "Tidak diaktifkan":
+            # PLC sengaja dimatikan — status netral, bukan error
+            self._plc_status_label.setText(detail)
+            self._plc_status_label.setStyleSheet(
+                "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
+                "color: #9FB3C8; background-color: #1A2A44;")
+        else:
+            text = detail or "Tidak terhubung"
+            self._plc_status_label.setText(f"Gagal: {text}")
+            self._plc_status_label.setStyleSheet(
+                "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
+                "color: #EF4444; background-color: #1A2A44;")
+
+    def set_flask_status(self, running: bool, detail: str = "") -> None:
+        """Update Flask API status indicator di group Flask."""
+        if running:
+            self._flask_status_label.setText(f"Jalan{(' — ' + detail) if detail else ''}")
+            self._flask_status_label.setStyleSheet(
+                "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
+                "color: #22C55E; background-color: #1A2A44;")
+        else:
+            text = detail or "Tidak aktif"
+            self._flask_status_label.setText(text)
+            self._flask_status_label.setStyleSheet(
+                "font-weight: bold; padding: 2px 8px; border-radius: 3px; "
+                "color: #9FB3C8; background-color: #1A2A44;")
+
+    def get_inference_mode(self) -> str:
+        """Get selected inference mode (continuous|plc_trigger|manual)."""
+        return ["continuous", "plc_trigger", "manual"][self._inference_mode.currentIndex()]
+
+    def get_program_register_spin(self) -> QSpinBox:
+        return self._plc_program_register
 
     def set_runtime_status(self, has_openvino: bool, has_torch: bool,
                            active_runtime: str = "",
@@ -542,6 +763,35 @@ class SettingsPage(QWidget):
         idx = self._plc_parity.findText(parity)
         if idx >= 0:
             self._plc_parity.setCurrentIndex(idx)
+
+        # PLC IO Mapping
+        self._plc_pulse_ms.setValue(self._config.get("plc.pulse_ms", 300))
+        io_map = self._config.get("plc.io_map", {})
+        if not isinstance(io_map, dict):
+            io_map = {}
+        outputs = io_map.get("outputs", {})
+        inputs = io_map.get("inputs", {})
+        if not isinstance(outputs, dict):
+            outputs = {}
+        if not isinstance(inputs, dict):
+            inputs = {}
+        self._set_io_combo("result_ok", outputs.get("result_ok", 1))
+        self._set_io_combo("result_ng", outputs.get("result_ng", 2))
+        self._set_io_combo("part_ready", outputs.get("part_ready", 3))
+        self._set_io_combo("busy", outputs.get("busy", 4))
+        self._set_io_combo("trigger", inputs.get("trigger", 0))
+        self._set_io_combo("reset_result", inputs.get("reset_result", 5))
+        self._set_io_combo("switch_program", inputs.get("switch_program", 6))
+        self._plc_program_register.setValue(io_map.get("program_register", 10))
+
+        # PLC Slave ID + Scan range
+        self._plc_slave_id.setValue(self._config.get("plc.modbus_slave_id", 1))
+        self._plc_scan_range.setValue(self._config.get("plc.scan_range", 127))
+
+        # Inference mode
+        infer_mode = self._config.get("inference.mode", "continuous")
+        self._inference_mode.setCurrentIndex(
+            {"continuous": 0, "plc_trigger": 1, "manual": 2}.get(infer_mode, 0))
 
         # Model
         algo = self._config.get("model.algorithm", "patchcore")

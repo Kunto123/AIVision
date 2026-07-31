@@ -43,6 +43,8 @@ from visioninspect.gui.camera_worker import CameraThread, CameraWorker
 from visioninspect.gui.training_worker import TrainingThread, TrainingWorker
 from visioninspect.gui.widgets.roi_editor import ROIData
 from visioninspect.gui.pages.run_page import RunPage
+from visioninspect.plc.modbus_rtu import ModbusRTUManager, HAS_MODBUS
+from visioninspect.api.flask_app import FlaskAPI, HAS_FLASK
 from visioninspect.gui.pages.teach_page import TeachPage
 from visioninspect.gui.pages.history_page import HistoryPage
 from visioninspect.gui.pages.settings_page import SettingsPage
@@ -68,6 +70,8 @@ class MainWindow(QMainWindow):
     _wsl_train_done_signal = Signal()
     _wsl_train_error_signal = Signal(str)
     _wsl_train_progress_signal = Signal(str)
+    _plc_scan_done_signal = Signal(list)
+    _plc_detect_done_signal = Signal(list)
 
     def __init__(self, config: Config, translator: Translator):
         super().__init__()
@@ -175,6 +179,17 @@ class MainWindow(QMainWindow):
         # Part name untuk push ke PG (di-set saat ganti template)
         self._active_partname = ""
 
+        # ── PLC (Modbus master) ──
+        self._plc_modbus: Optional[ModbusRTUManager] = None
+        self._plc_poll_timer: Optional[QTimer] = None
+        self._plc_trigger_pending = False
+
+        # ── Flask API (opsional, bind 127.0.0.1) ──
+        self._flask_api: Optional[FlaskAPI] = None
+
+        # Judgement terakhir untuk endpoint /last_result
+        self._last_judgement = "—"
+
         self._setup_window()
         self._setup_tabs()
         self._setup_statusbar()
@@ -184,6 +199,14 @@ class MainWindow(QMainWindow):
         self._init_camera()
         self._start_perf_monitor()
         self._init_programs()
+        self._init_plc()
+        self._init_flask()
+
+        # Sync label Trigger mode + status PLC di Settings saat startup
+        self._run_page.set_trigger_mode(
+            self._config.get("inference.mode", "continuous"))
+        if not self._config.get("plc.enabled", False):
+            self._settings_page.set_plc_status(False, "Tidak diaktifkan")
 
         # Apply saved debug logging setting on startup
         import logging
@@ -390,6 +413,15 @@ class MainWindow(QMainWindow):
         # Settings
         self._settings_page.get_save_button().clicked.connect(self._on_settings_save)
         self._tabs.currentChanged.connect(self._on_tab_changed)
+
+        # PLC scan (Settings → PLC) — hasil dari thread worker
+        self._settings_page.get_scan_button().clicked.connect(self._on_plc_scan)
+        self._settings_page.get_detect_button().clicked.connect(self._on_plc_detect_active)
+        self._plc_scan_done_signal.connect(self._on_plc_scan_done)
+        self._plc_detect_done_signal.connect(self._on_plc_detect_done)
+
+        # Manual trigger (Run page 'Trigger Now' — juga dipakai mode manual)
+        self._run_page.get_trigger_button().clicked.connect(self._on_trigger_now)
 
         # WSL training results (emitted from a plain background thread —
         # see _train_via_wsl)
@@ -674,6 +706,18 @@ class MainWindow(QMainWindow):
 
     # ---- Inference ----
 
+    def _on_trigger_now(self):
+        """Trigger inspeksi manual — tombol 'Trigger Now' / POST /trigger.
+
+        Di mode manual/plc_trigger: frame berikutnya di-inspeksi sekali.
+        Di mode continuous: hanya log (inspeksi sudah jalan terus).
+        """
+        self._plc_trigger_pending = True
+        mode = self._config.get("inference.mode", "continuous")
+        logger.info("Manual trigger dikirim (mode=%s)", mode)
+        self.statusBar().showMessage(
+            f"Trigger dikirim ({mode})", 3000)
+
     def _on_frame_for_inference(self, frame):
         """Run inference on frame from camera — per-ROI + aggregate.
         Only runs when on RUN tab. Respects cycle delay between inspections."""
@@ -687,6 +731,13 @@ class MainWindow(QMainWindow):
         # Skip frame if in cycle delay (jeda antar siklus)
         if self._cycle_delay_active:
             return
+        # Mode plc_trigger/manual: inspeksi hanya saat ada trigger
+        # (coil trigger PLC ON, tombol Trigger Now, atau POST /trigger).
+        infer_mode = self._config.get("inference.mode", "continuous")
+        if infer_mode in ("plc_trigger", "manual"):
+            if not self._plc_trigger_pending:
+                return
+            self._plc_trigger_pending = False
 
         # ── Step 1: Part Presence Check (fail-safe gating) ──
         pc_cfg = self._current_part_check_cfg
@@ -716,7 +767,11 @@ class MainWindow(QMainWindow):
                     self._ng_interval_active = False
                 self._run_page.set_waiting_for_part()
                 return
+            _prev_ready = self._last_part_ready
             self._last_part_ready = True
+            if not _prev_ready:
+                # Transisi part belum-ready → ready: pulse coil part_ready ke PLC
+                self._plc_pulse("part_ready")
             # Capture part check score untuk PG push
             m = pc_result.method
             if m == 'color' and pc_result.color_score is not None:
@@ -798,6 +853,8 @@ class MainWindow(QMainWindow):
             self._run_page.update_roi_results(roi_results)
 
             # ---- NG Interval Timer ----
+            self._last_judgement = raw_judgement
+            self._last_worst_score = worst_score
             if raw_judgement == "OK":
                 # Stop interval timer — anomaly cleared
                 if self._ng_interval_timer.isActive():
@@ -808,6 +865,8 @@ class MainWindow(QMainWindow):
                 self._inspection_ok += 1
                 self._run_page.update_counters(
                     self._inspection_ok, self._inspection_ng)
+                # Feedback ke PLC: pulse coil result_ok (durasi = plc.pulse_ms)
+                self._plc_pulse("result_ok")
 
             else:  # raw_judgement == "NG"
                 if not self._ng_interval_timer.isActive():
@@ -818,6 +877,8 @@ class MainWindow(QMainWindow):
                     self._ng_interval_active = True
                     # Show NG immediately on display (counter hanya bertambah via timer tick)
                     self._run_page.update_judgement("NG", worst_score)
+                    # Feedback ke PLC: pulse coil result_ng (sekali per kejadian NG)
+                    self._plc_pulse("result_ng")
                     # Save frame untuk tuning
                     img_path = self._save_inspection_frame(
                         frame, "NG", worst_score, roi_results, avg_latency)
@@ -1218,6 +1279,333 @@ class MainWindow(QMainWindow):
         self._load_template_model()
         self._program_label.setText(f"Program: {self._active_program}")
         logger.info("Active program: %s, template: %s", self._active_program, self._active_template)
+
+    # ═══════════════════════════ PLC — Modbus Master ═══════════════════════════
+    # Sistem = MASTER, PLC = slave. Semua alamat coil/register dari
+    # config "plc.io_map" (Settings → PLC → IO Mapping) — ganti PLC tinggal
+    # ganti angka di config, tanpa edit kode.
+
+    def _build_plc_config(self) -> dict:
+        """Kumpulkan konfigurasi PLC dari Config → dict untuk ModbusRTUManager."""
+        return {
+            "port": self._config.get("plc.port", "COM1"),
+            "baudrate": self._config.get("plc.baudrate", 9600),
+            "parity": self._config.get("plc.parity", "N"),
+            "bytesize": 8,
+            "stopbits": 1,
+            "timeout": 1.0,
+            "modbus_slave_id": self._config.get("plc.modbus_slave_id", 1),
+            "pulse_ms": self._config.get("plc.pulse_ms", 300),
+            "io_map": self._config.get("plc.io_map", {}),
+        }
+
+    def _init_plc(self):
+        """Inisialisasi ModbusRTUManager dari config + connect + start poll."""
+        if not self._config.get("plc.enabled", False):
+            return
+        if not HAS_MODBUS:
+            logger.warning("PLC enabled tapi pymodbus tidak terinstall")
+            return
+        try:
+            self._plc_modbus = ModbusRTUManager(self._build_plc_config())
+        except Exception as e:
+            logger.error("PLC init error: %s", e)
+            return
+        self._plc_modbus.set_on_status_change(self._on_plc_status_change)
+        if not self._plc_modbus.connect():
+            # Gagal connect — ModbusRTUManager akan auto-retry saat
+            # user tekan tombol Scan/Deteksi atau restart app.
+            logger.warning("PLC connect gagal saat startup")
+            return
+        self._start_plc_polling()
+
+    def _start_plc_polling(self):
+        if self._plc_poll_timer is None:
+            self._plc_poll_timer = QTimer(self)
+            self._plc_poll_timer.setInterval(200)  # 5 Hz — poll input PLC
+            self._plc_poll_timer.timeout.connect(self._on_plc_poll_tick)
+        self._plc_poll_timer.start()
+
+    def _stop_plc_polling(self):
+        if self._plc_poll_timer is not None:
+            self._plc_poll_timer.stop()
+
+    def _on_plc_status_change(self, connected: bool):
+        """Status PLC berubah — update label di RUN page + mulai/henti poll."""
+        try:
+            self._run_page.set_plc_status(connected)
+        except Exception:
+            pass
+        try:
+            if connected:
+                self._settings_page.set_plc_status(
+                    True, str(self._config.get("plc.port", "")))
+            else:
+                self._settings_page.set_plc_status(False)
+        except Exception:
+            pass
+        if connected:
+            self._start_plc_polling()
+        else:
+            self._stop_plc_polling()
+
+    def _on_plc_poll_tick(self):
+        """Poll input PLC tiap 200ms — deteksi trigger/reset/switch program."""
+        if not self._plc_modbus or not self._plc_modbus.is_connected:
+            return
+        # Sync coil busy dengan state kamera (level, bukan pulse)
+        busy = bool(self._camera_worker and self._camera_worker.is_running)
+        self._plc_modbus.set_output("busy", busy)
+        try:
+            events = self._plc_modbus.read_inputs()
+        except Exception as e:
+            logger.warning("PLC read inputs error: %s", e)
+            return
+        if events.get("trigger"):
+            self._on_plc_trigger()
+        if events.get("reset_result"):
+            self._on_plc_reset()
+        if events.get("switch_program"):
+            prog = self._plc_modbus.read_program_register()
+            if prog is not None:
+                self._on_plc_switch_program(prog)
+
+    def _on_plc_trigger(self):
+        """PLC minta 1 siklus inspeksi (coil trigger ON)."""
+        mode = self._config.get("inference.mode", "continuous")
+        if mode == "plc_trigger":
+            self._plc_trigger_pending = True
+            self.set_status("PLC: trigger inspeksi", 2000)
+        # Mode continuous: trigger hanya melewati cycle delay
+        self._cycle_delay_active = False
+
+    def _on_plc_reset(self):
+        """IN reset: matikan semua coil hasil + reset counter."""
+        if self._plc_modbus:
+            self._plc_modbus.reset_outputs()
+        self._inspection_ok = 0
+        self._inspection_ng = 0
+        try:
+            self._run_page.update_counters(0, 0)
+        except Exception:
+            pass
+        self.set_status("PLC: reset OK", 3000)
+
+    def _on_plc_switch_program(self, program_number: int):
+        """IN switch program: ganti template aktif dari nomor register PLC."""
+        try:
+            programs = self._pm.list_programs()
+            if not programs:
+                return
+            idx = program_number - 1  # PLC: 1 = program pertama
+            if not (0 <= idx < len(programs)):
+                self.set_status(f"PLC: program #{program_number} tidak ada", 3000)
+                return
+            prog = programs[idx]
+            if prog["name"] == self._active_program:
+                return
+            self._active_program = prog["name"]
+            templates = self._pm.list_templates(self._active_program)
+            if templates:
+                active_id = self._pm.get_active_template(self._active_program)
+                if active_id and any(t["id"] == active_id for t in templates):
+                    self._active_template = active_id
+                else:
+                    self._active_template = templates[0]["id"]
+                    self._pm.set_active_template(self._active_program,
+                                                 self._active_template)
+            self._refresh_template_ui()
+            self._load_template_model()
+            self._program_label.setText(f"Program: {self._active_program}")
+            self.set_status(f"PLC: program → {self._active_program}", 3000)
+        except Exception as e:
+            logger.warning("PLC switch program error: %s", e)
+
+    def _plc_pulse(self, name: str):
+        """Pulse coil output tanpa memblokir UI: ON → QTimer singleShot → OFF."""
+        if not self._plc_modbus or not self._plc_modbus.is_connected:
+            return
+        ms = max(0, int(self._config.get("plc.pulse_ms", 300)))
+        if not self._plc_modbus.set_output(name, True):
+            return
+        if ms > 0:
+            QTimer.singleShot(ms, lambda: self._safe_plc_output_off(name))
+
+    def _safe_plc_output_off(self, name: str):
+        if self._plc_modbus:
+            self._plc_modbus.set_output(name, False)
+
+    def _on_plc_scan(self):
+        """Tombol 'Scan Coils': probe alamat valid di background thread."""
+        if not self._plc_modbus or not self._plc_modbus.is_connected:
+            self._settings_page.set_scan_result_label(
+                "⚠️ PLC belum connect — cek Settings → PLC → Save")
+            return
+        max_addr = max(0, int(self._config.get("plc.scan_range", 127)))
+        self._settings_page.set_scan_result_label(
+            f"Scan coil 0-{max_addr}... (bisa ±15-30 detik)")
+        self._settings_page.get_scan_button().setEnabled(False)
+
+        def _worker():
+            valid = self._plc_modbus.scan_coils(max_addr)
+            self._plc_scan_done_signal.emit(valid)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_plc_detect_active(self):
+        """Tombol 'Deteksi Aktif': cari coil yang sedang ON (input aktif)."""
+        if not self._plc_modbus or not self._plc_modbus.is_connected:
+            self._settings_page.set_scan_result_label(
+                "⚠️ PLC belum connect — cek Settings → PLC → Save")
+            return
+        max_addr = max(0, int(self._config.get("plc.scan_range", 127)))
+        self._settings_page.set_scan_result_label(
+            f"Deteksi coil aktif 0-{max_addr}... tekan tombol fisik di PLC")
+        self._settings_page.get_detect_button().setEnabled(False)
+
+        def _worker():
+            active = self._plc_modbus.find_active_coils(max_addr)
+            self._plc_detect_done_signal.emit(active)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_plc_scan_done(self, valid_coils: list):
+        self._settings_page.get_scan_button().setEnabled(True)
+        if valid_coils:
+            self._settings_page.set_scan_coil_options(valid_coils)
+            n = len(valid_coils)
+            shown = ", ".join(str(c) for c in valid_coils[:20])
+            more = f" ... (+{n - 20})" if n > 20 else ""
+            self._settings_page.set_scan_result_label(
+                f"✓ {n} coil valid: {shown}{more} — pilih alamat di dropdown")
+        else:
+            self._settings_page.set_scan_result_label(
+                "⚠️ Tidak ada coil valid — cek port/ID slave/kabel")
+
+    def _on_plc_detect_done(self, active_coils: list):
+        self._settings_page.get_detect_button().setEnabled(True)
+        if active_coils:
+            self._settings_page.set_scan_coil_options(active_coils)
+            self._settings_page.set_scan_result_label(
+                f"⚡ {len(active_coils)} coil aktif: "
+                + ", ".join(str(c) for c in active_coils)
+                + " — cocokkan dengan input fisik PLC")
+        else:
+            self._settings_page.set_scan_result_label(
+                "Tidak ada coil aktif — pastikan tombol fisik ditekan saat scan")
+
+    def _shutdown_plc(self):
+        """Matikan semua coil output + tutup port (dipanggil saat keluar)."""
+        self._stop_plc_polling()
+        if self._plc_modbus:
+            self._plc_modbus.reset_outputs()
+            self._plc_modbus.disconnect()
+            self._plc_modbus = None
+
+    # ═══════════════════════════ Flask API (opsional) ═══════════════════════════
+    # REST API lokal di 127.0.0.1 untuk integrasi eksternal.
+    # Aktif hanya jika "Enable Flask API" di Settings dicentang.
+
+    def _init_flask(self):
+        """Init FlaskAPI dari config saat startup. Bind HANYA 127.0.0.1."""
+        if not HAS_FLASK:
+            self._settings_page.set_flask_status(False, "Flask belum terinstall")
+            return
+        cfg = self._config.get("flask_api", {})
+        if not cfg.get("enabled", False):
+            self._settings_page.set_flask_status(False)
+            return
+        self._start_flask(
+            port=int(cfg.get("port", 5000)),
+            api_key=str(cfg.get("api_key", "")),
+        )
+
+    def _start_flask(self, port: int, api_key: str) -> None:
+        if not HAS_FLASK:
+            self._settings_page.set_flask_status(False, "Flask belum terinstall")
+            return
+        if self._flask_api and self._flask_api.is_running:
+            # Server tidak bisa pindah port tanpa restart — kasih tahu user.
+            if self._flask_api._port != port:
+                self._settings_page.set_flask_status(
+                    False, f"Port berubah — restart aplikasi (masih jalan di {self._flask_api._port})")
+            else:
+                self._settings_page.set_flask_status(True, f"127.0.0.1:{port}")
+            return
+        self._shutdown_flask()
+        self._flask_api = FlaskAPI(
+            port=port,
+            api_key=api_key,
+            get_status_fn=self._api_get_status,
+            get_last_result_fn=self._api_get_last_result,
+            trigger_inspection_fn=self._on_trigger_now,
+            get_history_fn=self._api_get_history,
+            activate_program_fn=self._api_activate_program,
+        )
+        self._flask_api.start()
+        if self._flask_api.is_running:
+            self._settings_page.set_flask_status(True, f"127.0.0.1:{port}")
+        else:
+            self._settings_page.set_flask_status(False, "gagal start — cek log")
+
+    def _shutdown_flask(self):
+        if self._flask_api:
+            self._flask_api.stop()
+            self._flask_api = None
+        self._settings_page.set_flask_status(False)
+
+    def _apply_flask_settings(self, settings: dict):
+        """Terapkan config Flask dari Settings saat save."""
+        if not HAS_FLASK:
+            self._settings_page.set_flask_status(False, "Flask belum terinstall")
+            return
+        fl = settings.get("flask_api", {})
+        if not fl.get("enabled", False):
+            self._shutdown_flask()
+            return
+        # api_key tidak ada di UI — ambil dari config tersimpan agar tidak
+        # berganti tiap save (FlaskAPI akan generate key baru kalau kosong)
+        api_key = str(self._config.get("flask_api.api_key", ""))
+        self._start_flask(
+            port=int(fl.get("port", 5000)),
+            api_key=api_key,
+        )
+
+    # ---- Callbacks untuk endpoint Flask ----
+
+    def _api_get_status(self) -> dict:
+        return {
+            "app": "VisionInspect",
+            "program": self._active_program,
+            "template": self._active_template,
+            "camera_running": bool(self._camera_thread and self._camera_thread.isRunning()),
+            "plc_enabled": bool(self._plc_modbus and self._plc_modbus.is_connected),
+            "inference_mode": self._config.get("inference.mode", "continuous"),
+        }
+
+    def _api_get_last_result(self) -> dict:
+        return {
+            "judgement": self._last_judgement,
+            "score": round(self._last_worst_score, 4),
+            "program": self._active_program,
+            "template": self._active_template,
+        }
+
+    def _api_get_history(self, limit: int = 100) -> list:
+        try:
+            return self._db.get_history(limit=max(1, min(int(limit), 500)))
+        except Exception as e:
+            logger.warning("Flask /history error: %s", e)
+            return []
+
+    def _api_activate_program(self, name: str) -> None:
+        # Cari template (di program aktif) yang id atau nama-nya cocok
+        for t in self._pm.list_templates(self._active_program):
+            cfg = self._pm.get_template_config(self._active_program, t["id"])
+            if t["id"] == name or cfg.get("name") == name:
+                self._activate_template(t["id"])
+                return
+        raise ValueError(f"Template tidak ditemukan: {name}")
 
     def _refresh_template_ui(self):
         """Sync template selector (TEACH + RUN) + counts from disk."""
@@ -2530,6 +2918,28 @@ class MainWindow(QMainWindow):
         else:
             self._settings_page.set_pg_status(False, "Tidak diaktifkan")
 
+        # Re-init PLC dengan config terbaru dari UI (io_map/pulse/port)
+        self._shutdown_plc()
+        plc_cfg = settings.get("plc", {})
+        if plc_cfg.get("enabled"):
+            self._config.set("plc.io_map", plc_cfg.get("io_map", {}))
+            self._config.set("plc.pulse_ms", plc_cfg.get("pulse_ms", 300))
+            self._init_plc()
+        else:
+            try:
+                self._run_page.set_plc_status(False)
+            except Exception:
+                pass
+            self._settings_page.set_plc_status(False, "Tidak diaktifkan")
+
+        # Inference mode → label Trigger di Run page
+        infer_mode = settings.get("inference", {}).get("mode", "continuous")
+        self._run_page.set_trigger_mode(infer_mode)
+
+        # Flask API — start/stop sesuai config UI (api_key tetap dari config
+        # tersimpan agar tidak berganti tiap save)
+        self._apply_flask_settings(settings)
+
     def _on_tab_changed(self, index: int):
         page_names = ["Run", "Teach", "History", "Settings", "Diagnostics", "Akun"]
         name = page_names[index] if index < len(page_names) else f"Tab {index}"
@@ -2774,6 +3184,11 @@ class MainWindow(QMainWindow):
         if self._camera_worker:
             self._camera_worker.stop_camera()
         self._perf_timer.stop()
+        # Tutup port PLC + matikan coil output (biar PLC tidak menerima
+        # sinyal OK/NG dari sistem yang sudah mati)
+        self._shutdown_plc()
+        # Matikan Flask API (thread daemon + server shutdown)
+        self._shutdown_flask()
         for t, name in [(self._camera_thread, "camera"),
                         (self._training_thread, "training")]:
             if t and t.isRunning():

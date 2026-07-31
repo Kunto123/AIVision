@@ -146,7 +146,7 @@ class HistoryPage(QWidget):
     def get_selected_row_data(self) -> dict | None:
         """Get data from selected row, or None.
 
-        Returns dict with id, judgement, image_path (from table columns).
+        Returns dict with id, judgement, image_path, corrected (from table columns).
         """
         row = self._table.currentRow()
         if row < 0:
@@ -155,6 +155,7 @@ class HistoryPage(QWidget):
             "id": int(self._table.item(row, 0).text()),
             "judgement": self._table.item(row, 4).text(),
             "image_path": self._table.item(row, 5).text() if self._table.item(row, 5) else "",
+            "corrected": self._table.item(row, 6).text() == "✓",
         }
 
     def _on_tuning(self):

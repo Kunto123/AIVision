@@ -475,6 +475,10 @@ class MainWindow(QMainWindow):
         self._teach_page.get_augmentation_regenerate_button().clicked.connect(
             self._on_augmentation_regenerate)
 
+        # HISTORY: Filter
+        self._history_page.get_filter_combo().currentIndexChanged.connect(
+            self._on_history_filter_changed)
+
         # HISTORY: Correction buttons
         self._history_page.get_correct_ok_button().clicked.connect(
             lambda: self._on_correct_history("OK"))
@@ -484,6 +488,9 @@ class MainWindow(QMainWindow):
 
         # HISTORY: Tuning
         self._history_page.tuning_requested.connect(self._on_tuning_requested)
+
+        # HISTORY: Rollback
+        self._history_page.get_rollback_button().clicked.connect(self._on_rollback)
 
         # HISTORY: Selection changed
         self._history_page.get_table().itemSelectionChanged.connect(
@@ -744,7 +751,7 @@ class MainWindow(QMainWindow):
 
         try:
             overall_ng = False
-            worst_score = 0.0
+            worst_score = 1.0  # similarity: 1.0=terbaik, dicari terendah (paling anomali)
             total_latency = 0.0
             roi_results = []
 
@@ -763,7 +770,7 @@ class MainWindow(QMainWindow):
                     "latency": result.latency_ms,
                 })
                 total_latency += result.latency_ms
-                if result.score > worst_score:
+                if result.score < worst_score:
                     worst_score = result.score
                     self._last_heatmap = result.heatmap
                     self._last_frame = frame
@@ -812,8 +819,28 @@ class MainWindow(QMainWindow):
                     # Show NG immediately on display (counter hanya bertambah via timer tick)
                     self._run_page.update_judgement("NG", worst_score)
                     # Save frame untuk tuning
-                    self._save_inspection_frame(frame, "NG", worst_score,
-                                                 roi_results, avg_latency)
+                    img_path = self._save_inspection_frame(
+                        frame, "NG", worst_score, roi_results, avg_latency)
+                    # Simpan ke SQLite agar entry bisa di-tuning
+                    roi_region = json.dumps([{
+                        "x": r["roi"][0], "y": r["roi"][1],
+                        "width": r["roi"][2], "height": r["roi"][3],
+                        "score": r["score"], "judgement": r["judgement"],
+                    } for r in roi_results])
+                    self._db.add_inspection({
+                        "program": self._active_program,
+                        "score": worst_score,
+                        "judgement": "NG",
+                        "threshold": self._inference_engine.threshold,
+                        "latency_ms": avg_latency,
+                        "image_path": img_path or "",
+                        "roi_region": roi_region,
+                        "metadata": {
+                            "num_rois": len(roi_results),
+                            "template": self._active_template,
+                            "template_name": self._active_partname,
+                        },
+                    })
                 else:
                     # Timer already running — update display (worse score)
                     self._run_page.update_judgement("NG", worst_score)
@@ -2182,12 +2209,15 @@ class MainWindow(QMainWindow):
     # ---- Redefinition (History Corrections) ----
 
     def _on_history_selection_changed(self):
-        """Enable/disable correction + tuning buttons based on selection."""
+        """Enable/disable buttons based on selection + corrected state."""
         data = self._history_page.get_selected_row_data()
         has_selection = data is not None
         self._history_page.get_correct_ok_button().setEnabled(has_selection)
         self._history_page.get_correct_ng_button().setEnabled(has_selection)
         self._history_page.get_tuning_button().setEnabled(has_selection)
+        # Rollback hanya aktif jika entry sudah dikoreksi
+        self._history_page.get_rollback_button().setEnabled(
+            bool(data and data.get("corrected")))
 
     def _on_correct_history(self, correct_judgement: str):
         """Mark selected history entry as correction."""
@@ -2214,6 +2244,32 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error("Correction DB error: %s", e)
             self.set_status(f"Gagal menyimpan koreksi: {e}", 5000)
+
+    def _on_rollback(self):
+        """Rollback koreksi pada entry yang dipilih."""
+        data = self._history_page.get_selected_row_data()
+        if not data:
+            return
+        entry_id = data["id"]
+        if not data.get("corrected"):
+            self.set_status(f"Entry #{entry_id} belum dikoreksi", 3000)
+            return
+
+        try:
+            self._db.rollback_correction(entry_id)
+            self._db.add_audit(self._active_program, "rollback",
+                         {"entry_id": entry_id})
+            self._refresh_history()
+            self.set_status(f"Koreksi entry #{entry_id} dibatalkan", 3000)
+        except Exception as e:
+            logger.error("Rollback DB error: %s", e)
+            self.set_status(f"Gagal rollback: {e}", 5000)
+
+    def _on_history_filter_changed(self):
+        """Filter history berdasarkan pilihan combo (All/OK/NG)."""
+        idx = self._history_page.get_filter_combo().currentIndex()
+        judgement = {0: None, 1: "OK", 2: "NG"}.get(idx)
+        self._refresh_history(judgement=judgement)
 
     # ---- Tuning (Per-ROI Correction + Additional Learning) ----
 
@@ -2393,13 +2449,15 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.Yes:
             self._on_train()
 
-    def _refresh_history(self):
-        """Refresh history page from database (PostgreSQL first if enabled)."""
+    def _refresh_history(self, judgement: Optional[str] = None):
+        """Refresh history page from local SQLite (PG hanya untuk push eksternal).
+
+        Args:
+            judgement: Filter — None=tampil semua, "OK"=hanya OK, "NG"=hanya NG.
+        """
         try:
-            if self._pg.is_enabled:
-                entries = self._pg.get_history(limit=100)
-            else:
-                entries = self._db.get_history(program=self._active_program, limit=100)
+            entries = self._db.get_history(
+                program=self._active_program, judgement=judgement, limit=100)
             self._history_page.clear()
             for e in entries:
                 self._history_page.add_entry(

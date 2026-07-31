@@ -220,6 +220,17 @@ class Database:
         """, (correct_judgement, time.strftime("%Y-%m-%d %H:%M:%S"), entry_id))
         self.conn.commit()
 
+    def rollback_correction(self, entry_id: int) -> None:
+        """Revert a previously corrected entry back to original state."""
+        self.conn.execute("""
+            UPDATE inspection_history
+            SET corrected = 0,
+                correct_judgement = NULL,
+                corrected_at = NULL
+            WHERE id = ?
+        """, (entry_id,))
+        self.conn.commit()
+
     def delete_old_entries(self, before_timestamp: str) -> int:
         """Delete entries older than given timestamp. Returns count deleted."""
         cursor = self.conn.execute(

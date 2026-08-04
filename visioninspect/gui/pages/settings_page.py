@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -257,6 +258,57 @@ class SettingsPage(QWidget):
 
         main_layout.addWidget(infer_group)
 
+        # === YOLO Class Filter (opsional) ===
+        # Form lengkap hanya muncul saat checkbox diaktifkan ("setting lengkap
+        # namun hanya muncul ketika dipilih model yolo").
+        yolo_group = QGroupBox("Filter Kelas (YOLO)")
+        yolo_layout = QVBoxLayout(yolo_group)
+
+        self._yolo_enabled = QCheckBox("Aktifkan filter kelas YOLO")
+        self._yolo_enabled.setToolTip(
+            "Pre-filter: frame dicek dulu dengan model YOLO custom (.pt/.onnx).\n"
+            "Kalau kelas yang diharapkan tidak terdeteksi → NG langsung, tanpa\n"
+            "scoring anomali. Butuh: pip install ultralytics + model terlatih.")
+        yolo_layout.addWidget(self._yolo_enabled)
+
+        self._yolo_form = QWidget()
+        yf = QVBoxLayout(self._yolo_form)
+        yf.setContentsMargins(0, 0, 0, 0)
+
+        path_row = QHBoxLayout()
+        path_row.addWidget(QLabel("Model path (.pt/.onnx):"))
+        self._yolo_model_path = QLineEdit("")
+        self._yolo_model_path.setPlaceholderText("mis. data/yolo/best.pt")
+        path_row.addWidget(self._yolo_model_path, 1)
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self._on_yolo_browse)
+        path_row.addWidget(browse_btn)
+        yf.addLayout(path_row)
+
+        yf.addWidget(QLabel("Kelas yang diizinkan (pisah koma):"))
+        self._yolo_classes = QLineEdit("")
+        self._yolo_classes.setPlaceholderText("mis. coca_cola_bottle, cap")
+        self._yolo_classes.setToolTip(
+            "Nama kelas harus sama persis dengan nama kelas di model YOLO.\n"
+            "Kosong = tidak menyaring (semua kelas lolos filter).")
+        yf.addWidget(self._yolo_classes)
+
+        conf_row = QHBoxLayout()
+        conf_row.addWidget(QLabel("Min confidence:"))
+        self._yolo_min_conf = QDoubleSpinBox()
+        self._yolo_min_conf.setRange(0.05, 0.95)
+        self._yolo_min_conf.setSingleStep(0.05)
+        self._yolo_min_conf.setDecimals(2)
+        self._yolo_min_conf.setValue(0.25)
+        conf_row.addWidget(self._yolo_min_conf)
+        conf_row.addStretch()
+        yf.addLayout(conf_row)
+
+        yolo_layout.addWidget(self._yolo_form)
+        self._yolo_enabled.toggled.connect(self._update_yolo_form_visibility)
+
+        main_layout.addWidget(yolo_group)
+
         # === Model Settings ===
         model_group = QGroupBox(self._tr.tr("settings_model"))
         model_layout = QVBoxLayout(model_group)
@@ -468,6 +520,18 @@ class SettingsPage(QWidget):
 
     # ---- Public API ----
 
+    def _on_yolo_browse(self):
+        """Pilih file model YOLO (.pt/.onnx) lewat dialog."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Pilih model YOLO", "",
+            "YOLO models (*.pt *.onnx);;All files (*)")
+        if path:
+            self._yolo_model_path.setText(path)
+
+    def _update_yolo_form_visibility(self):
+        """Form setting YOLO hanya tampil saat filter diaktifkan."""
+        self._yolo_form.setVisible(self._yolo_enabled.isChecked())
+
     @Slot()
     def get_settings_dict(self) -> dict:
         """Return dict of current settings values."""
@@ -501,6 +565,13 @@ class SettingsPage(QWidget):
             "inference": {
                 "mode": ["continuous", "plc_trigger", "manual"][self._inference_mode.currentIndex()],
                 "cycle_delay_ms": self._cycle_delay_spin.value(),
+            },
+            "yolo": {
+                "enabled": self._yolo_enabled.isChecked(),
+                "model_path": self._yolo_model_path.text().strip(),
+                "expected_classes": [
+                    c.strip() for c in self._yolo_classes.text().split(",") if c.strip()],
+                "min_conf": self._yolo_min_conf.value(),
             },
             "model": {
                 "algorithm": self._model_algo.currentText().lower(),
@@ -544,6 +615,12 @@ class SettingsPage(QWidget):
     def get_cycle_delay_ms(self) -> int:
         """Get cycle delay from config (ms). 0 = no delay."""
         return self._config.get("inference.cycle_delay_ms", 1000)
+
+    def get_yolo_enabled_checkbox(self) -> QCheckBox:
+        return self._yolo_enabled
+
+    def get_yolo_form(self) -> QWidget:
+        return self._yolo_form
 
     # ---- PLC IO Mapping API ----
 
@@ -830,6 +907,15 @@ class SettingsPage(QWidget):
 
         # Cycle Delay
         self._cycle_delay_spin.setValue(self._config.get("inference.cycle_delay_ms", 1000))
+
+        # YOLO class filter
+        self._yolo_enabled.setChecked(self._config.get("yolo.enabled", False))
+        self._yolo_model_path.setText(self._config.get("yolo.model_path", ""))
+        yolo_classes = self._config.get("yolo.expected_classes", [])
+        self._yolo_classes.setText(
+            ", ".join(yolo_classes) if isinstance(yolo_classes, list) else "")
+        self._yolo_min_conf.setValue(self._config.get("yolo.min_conf", 0.25))
+        self._update_yolo_form_visibility()
 
         # Logging
         self._show_debug_cb.setChecked(self._config.get("show_debug", False))

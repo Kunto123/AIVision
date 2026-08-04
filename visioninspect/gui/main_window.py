@@ -3173,6 +3173,10 @@ class MainWindow(QMainWindow):
         for key, value in self._flatten_dict(settings):
             self._config.set(key, value)
         self._config.save()
+        # YOLO config bisa berubah di Settings → muat ulang detektor (lazy)
+        # pada frame berikutnya, tanpa perlu restart aplikasi
+        self._yolo_det = None
+        self._last_class_filter_ng = False
         self._statusbar.showMessage(self._tr.tr("settings_saved"), 3000)
 
         lang = settings.get("language", "id")

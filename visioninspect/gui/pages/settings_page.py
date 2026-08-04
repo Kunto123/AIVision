@@ -236,13 +236,15 @@ class SettingsPage(QWidget):
         infer_layout = QVBoxLayout(infer_group)
 
         mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Trigger Mode:"))
+        mode_row.addWidget(QLabel("Start Cycle Mode:"))
         self._inference_mode = QComboBox()
-        self._inference_mode.addItems(["Continuous", "PLC Trigger", "Manual"])
+        self._inference_mode.addItems(
+            ["Auto Sequence (jalan terus)", "PLC Trigger", "Start Cycle (tombol)"])
         self._inference_mode.setToolTip(
-            "Continuous: inspeksi tiap frame.\n"
-            "PLC Trigger: inspeksi hanya saat coil trigger PLC ON.\n"
-            "Manual: inspeksi hanya saat tombol Trigger ditekan.")
+            "Auto Sequence: inspeksi tiap frame tanpa trigger (jalan terus).\n"
+            "PLC Trigger: inspeksi hanya saat coil trigger PLC ON — timing "
+            "antar part di ladder PLC (filosofi Keyence IV3).\n"
+            "Start Cycle: inspeksi hanya saat tombol Start Cycle ditekan.")
         mode_row.addWidget(self._inference_mode)
         mode_row.addStretch()
         infer_layout.addLayout(mode_row)

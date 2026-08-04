@@ -24,6 +24,7 @@ class ROIListPanel(QFrame):
     roi_selected = Signal(int)      # index
     roi_added = Signal()
     roi_delete_requested = Signal(int)  # index
+    roi_rename_requested = Signal(int)  # index
     roi_toggle_all = Signal(bool)   # True=enable, False=disable
 
     def __init__(self, parent=None):
@@ -47,6 +48,9 @@ class ROIListPanel(QFrame):
         self._list.setSelectionMode(QAbstractItemView.SingleSelection)
         self._list.setMaximumHeight(200)
         self._list.itemClicked.connect(self._on_item_clicked)
+        self._list.itemDoubleClicked.connect(self._on_item_double_clicked)
+        # Nonaktifkan edit in-place bawaan — double-click dipakai untuk dialog rename
+        self._list.setEditTriggers(QAbstractItemView.NoEditTriggers)
         layout.addWidget(self._list)
 
         # Buttons
@@ -57,6 +61,11 @@ class ROIListPanel(QFrame):
         self._add_btn.setObjectName("successButton")
         self._add_btn.clicked.connect(self.roi_added.emit)
         btn_layout.addWidget(self._add_btn)
+
+        self._rename_btn = QPushButton("Rename")
+        self._rename_btn.setObjectName("primaryButton")
+        self._rename_btn.clicked.connect(self._request_rename)
+        btn_layout.addWidget(self._rename_btn)
 
         self._del_btn = QPushButton("Hapus")
         self._del_btn.setObjectName("dangerButton")
@@ -114,6 +123,18 @@ class ROIListPanel(QFrame):
             return
         row = self._list.row(item)
         self.roi_selected.emit(row)
+
+    def _on_item_double_clicked(self, item):
+        if self._updating:
+            return
+        row = self._list.row(item)
+        if row >= 0:
+            self.roi_rename_requested.emit(row)
+
+    def _request_rename(self):
+        row = self._list.currentRow()
+        if row >= 0:
+            self.roi_rename_requested.emit(row)
 
     def _request_delete(self):
         row = self._list.currentRow()

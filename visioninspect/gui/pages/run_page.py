@@ -85,8 +85,11 @@ class RunPage(QWidget):
         self._trigger_mode_label.setObjectName("secondaryText")
         ctrl_layout.addWidget(self._trigger_mode_label)
 
-        self._trigger_btn = QPushButton(self._tr.tr("run_trigger_now"))
+        self._trigger_btn = QPushButton("Start Cycle")
         self._trigger_btn.setObjectName("primaryButton")
+        self._trigger_btn.setToolTip(
+            "Jalankan 1 siklus sensing manual (mode 'Start Cycle' / "
+            "'PLC Trigger' — tombol tetap bisa dipakai untuk tes cepat).")
         ctrl_layout.addWidget(self._trigger_btn)
         layout.addWidget(cam_ctrl)
 
@@ -365,13 +368,14 @@ class RunPage(QWidget):
         return self._trigger_btn
 
     def set_trigger_mode(self, mode: str) -> None:
-        """Update label Trigger sesuai mode inference (continuous/plc_trigger/manual)."""
+        """Update label Start Cycle sesuai mode (continuous/plc_trigger/manual)."""
         labels = {
-            "continuous": self._tr.tr("run_trigger_continuous"),
+            "continuous": "Auto Sequence (jalan terus)",
             "plc_trigger": "PLC Trigger",
-            "manual": "Manual",
+            "manual": "Start Cycle (tombol)",
         }
-        self._trigger_mode_label.setText(labels.get(mode, self._tr.tr("run_trigger_continuous")))
+        self._trigger_mode_label.setText(
+            labels.get(mode, "Auto Sequence (jalan terus)"))
 
     def get_heatmap_button(self) -> QPushButton:
         return self._heatmap_btn

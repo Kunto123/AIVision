@@ -10,6 +10,7 @@ import time
 import json
 import uuid
 import threading
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -38,16 +39,20 @@ from visioninspect.utils.logging_setup import setup_logging, get_logger
 
 from visioninspect.core.program import ProgramManager
 from visioninspect.core.inference import InferenceEngine, overlay_heatmap
+from visioninspect.core.yolo_filter import YOLODetector, class_filter_matches
 from visioninspect.core import part_check as pc_module
 from visioninspect.gui.camera_worker import CameraThread, CameraWorker
 from visioninspect.gui.training_worker import TrainingThread, TrainingWorker
 from visioninspect.gui.widgets.roi_editor import ROIData
 from visioninspect.gui.pages.run_page import RunPage
-from visioninspect.plc.modbus_rtu import ModbusRTUManager, HAS_MODBUS
+from visioninspect.plc.modbus_rtu import (
+    ModbusRTUManager, HAS_MODBUS, build_io_mode,
+)
 from visioninspect.api.flask_app import FlaskAPI, HAS_FLASK
 from visioninspect.gui.pages.teach_page import TeachPage
 from visioninspect.gui.pages.history_page import HistoryPage
 from visioninspect.gui.pages.settings_page import SettingsPage
+from visioninspect.gui.pages.io_settings_page import IOSettingsPage
 from visioninspect.gui.pages.diagnostics_page import DiagnosticsPage
 from visioninspect.gui.pages.account_page import AccountPage
 from visioninspect.gui.dialogs.login_dialog import LoginDialog
@@ -128,9 +133,13 @@ class MainWindow(QMainWindow):
 
         # Inference engine
         self._inference_engine = InferenceEngine(input_size=256)
+        # Detektor YOLO (filter kelas) — lazy load, None bila nonaktif/gagal
+        self._yolo_det = None
+        self._last_class_filter_ng = False
         self._current_roi: Optional[tuple] = None
         self._current_all_rois: list = []
         self._current_all_roi_uids: list = []
+        self._current_all_roi_labels: list = []
         self._heatmap_enabled = False
         self._last_frame: Optional[object] = None
         self._last_heatmap: Optional[object] = None
@@ -252,6 +261,7 @@ class MainWindow(QMainWindow):
         self._diagnostics_page = DiagnosticsPage(self._tr)
         auth_db = self._pg if self._pg.is_enabled else self._db
         self._account_page = AccountPage(auth_db)
+        self._io_page = IOSettingsPage(self._tr, self._config)
 
         self._tabs.addTab(self._run_page, self._tr.tr("nav_run"))
         self._tabs.addTab(self._teach_page, self._tr.tr("nav_teach"))
@@ -259,6 +269,8 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._settings_page, self._tr.tr("nav_settings"))
         self._tabs.addTab(self._diagnostics_page, self._tr.tr("nav_diagnostics"))
         self._tabs.addTab(self._account_page, "👥 Akun")
+        self._tabs.addTab(self._io_page, "I/O Settings")
+        self._io_page.apply_requested.connect(self._on_io_settings_apply)
 
         # By default hide admin-only tabs; shown after login if role=admin
         for idx in range(1, self._tabs.count()):
@@ -465,6 +477,7 @@ class MainWindow(QMainWindow):
         self._teach_page.get_roi_panel().roi_added.connect(self._on_roi_add)
         self._teach_page.get_roi_panel().roi_selected.connect(self._on_roi_select)
         self._teach_page.get_roi_panel().roi_delete_requested.connect(self._on_roi_delete)
+        self._teach_page.get_roi_panel().roi_rename_requested.connect(self._on_roi_rename)
         self._teach_page.get_roi_panel().roi_toggle_all.connect(self._on_roi_toggle_all)
 
         # TEACH: Threshold slider → live update inference threshold,
@@ -472,6 +485,9 @@ class MainWindow(QMainWindow):
         # (sliderReleased, bukan tiap tick, agar tidak menulis file terus-menerus)
         self._teach_page.get_threshold_slider().valueChanged.connect(self._on_threshold_slider)
         self._teach_page.get_threshold_slider().sliderReleased.connect(self._on_threshold_released)
+        # Commit threshold yang diketik manual — editingFinished = Enter/focus-out,
+        # setara sliderReleased untuk jalur keyboard
+        self._teach_page.get_threshold_spin().editingFinished.connect(self._on_threshold_released)
 
         # TEACH: Image deleted from gallery
         self._teach_page.image_deleted.connect(self._on_gallery_image_deleted)
@@ -504,8 +520,6 @@ class MainWindow(QMainWindow):
         # TEACH: Augmentasi Data signals
         self._teach_page.augmentation_config_changed.connect(
             self._on_augmentation_config_changed)
-        self._teach_page.get_augmentation_regenerate_button().clicked.connect(
-            self._on_augmentation_regenerate)
 
         # HISTORY: Filter
         self._history_page.get_filter_combo().currentIndexChanged.connect(
@@ -623,7 +637,11 @@ class MainWindow(QMainWindow):
                     label_x = x + 3
                     label_y = y - 4 if y >= 16 else y + 13
                     qp.setPen(QColor(color))
-                    qp.drawText(label_x, label_y, f"ROI{i+1}")
+                    if i < len(self._current_all_roi_labels):
+                        label = self._current_all_roi_labels[i]
+                    else:
+                        label = f"ROI{i+1}"  # fallback template lama tanpa label custom
+                    qp.drawText(label_x, label_y, label)
                 qp.end()
             except Exception as e:
                 logger.warning("ROI overlay draw error: %s", e)
@@ -769,8 +787,9 @@ class MainWindow(QMainWindow):
                 return
             _prev_ready = self._last_part_ready
             self._last_part_ready = True
-            if not _prev_ready:
+            if not _prev_ready and self._get_io_mode()["part_ready_output"]:
                 # Transisi part belum-ready → ready: pulse coil part_ready ke PLC
+                # (opsional — default hanya OK/NG, sesuai konfigurasi io_mode)
                 self._plc_pulse("part_ready")
             # Capture part check score untuk PG push
             m = pc_result.method
@@ -810,7 +829,23 @@ class MainWindow(QMainWindow):
             total_latency = 0.0
             roi_results = []
 
-            for idx, roi_rect in enumerate(self._current_all_rois):
+            # ── Step 1.5: YOLO class pre-filter (opsional) ──
+            # Kalau aktif: cek dulu part kelas yang diharapkan terdeteksi.
+            # Kelas tidak cocok → NG langsung (tanpa scoring anomali).
+            class_ng = False
+            yc = self._yolo_cfg()
+            if yc.get("enabled"):
+                det = self._ensure_yolo_detector()
+                if det is not None:
+                    dets = det.detect(frame)
+                    if dets is not None and not class_filter_matches(
+                            dets, yc.get("expected_classes", []),
+                            min_conf=float(yc.get("min_conf", 0.25))):
+                        class_ng = True
+
+            # ROI hanya dicek bila lolos filter kelas
+            rois_to_check = [] if class_ng else self._current_all_rois
+            for idx, roi_rect in enumerate(rois_to_check):
                 roi_dict = {
                     "x": roi_rect[0], "y": roi_rect[1],
                     "width": roi_rect[2], "height": roi_rect[3],
@@ -820,6 +855,9 @@ class MainWindow(QMainWindow):
                 result = self._inference_engine.infer(frame, roi=roi_dict)
                 roi_results.append({
                     "roi": roi_rect,
+                    "label": (self._current_all_roi_labels[idx]
+                              if idx < len(self._current_all_roi_labels)
+                              else f"ROI{idx + 1}"),
                     "score": result.score,
                     "judgement": result.judgement,
                     "latency": result.latency_ms,
@@ -832,8 +870,10 @@ class MainWindow(QMainWindow):
                 if result.judgement == "NG":
                     overall_ng = True
 
-            raw_judgement = "NG" if overall_ng else "OK"
+            raw_judgement = "NG" if (overall_ng or class_ng) else "OK"
             self._last_worst_score = worst_score
+            # Catat alasan NG karena filter kelas (untuk tampilan/status)
+            self._last_class_filter_ng = bool(class_ng)
 
             # Simpan judgement per-ROI beserta timestamp untuk warna live
             self._roi_col_judgement = {}
@@ -865,8 +905,8 @@ class MainWindow(QMainWindow):
                 self._inspection_ok += 1
                 self._run_page.update_counters(
                     self._inspection_ok, self._inspection_ng)
-                # Feedback ke PLC: pulse coil result_ok (durasi = plc.pulse_ms)
-                self._plc_pulse("result_ok")
+                # Feedback ke PLC: publikasi hasil OK (latching/one-shot sesuai io_mode)
+                self._publish_result("OK")
 
             else:  # raw_judgement == "NG"
                 if not self._ng_interval_timer.isActive():
@@ -877,8 +917,8 @@ class MainWindow(QMainWindow):
                     self._ng_interval_active = True
                     # Show NG immediately on display (counter hanya bertambah via timer tick)
                     self._run_page.update_judgement("NG", worst_score)
-                    # Feedback ke PLC: pulse coil result_ng (sekali per kejadian NG)
-                    self._plc_pulse("result_ng")
+                    # Feedback ke PLC: publikasi hasil NG (latching/one-shot sesuai io_mode)
+                    self._publish_result("NG")
                     # Save frame untuk tuning
                     img_path = self._save_inspection_frame(
                         frame, "NG", worst_score, roi_results, avg_latency)
@@ -886,8 +926,9 @@ class MainWindow(QMainWindow):
                     roi_region = json.dumps([{
                         "x": r["roi"][0], "y": r["roi"][1],
                         "width": r["roi"][2], "height": r["roi"][3],
+                        "label": r.get("label", f"ROI{i + 1}"),
                         "score": r["score"], "judgement": r["judgement"],
-                    } for r in roi_results])
+                    } for i, r in enumerate(roi_results)])
                     self._db.add_inspection({
                         "program": self._active_program,
                         "score": worst_score,
@@ -907,17 +948,24 @@ class MainWindow(QMainWindow):
                     self._run_page.update_judgement("NG", worst_score)
 
             # ── Cycle delay: jeda antar siklus inspeksi ──
-            cycle_delay = self._settings_page.get_cycle_delay_ms()
-            if cycle_delay > 0:
-                # Stop NG interval timer so it doesn't phantom-count during delay
-                if self._ng_interval_timer.isActive():
-                    self._ng_interval_timer.stop()
-                    self._ng_interval_active = False
-                self._cycle_delay_timer.start(cycle_delay)
-                self._cycle_delay_active = True
-                self._run_page.set_status_message(
-                    f"Cycle delay {cycle_delay} ms...")
+            # Hanya berlaku di mode continuous (auto sequence). Di mode
+            # plc_trigger/manual, timing antar part dipegang ladder PLC —
+            # aplikasi tidak boleh menahan siklus (filosofi Keyence IV3).
+            if self._config.get("inference.mode", "continuous") == "continuous":
+                cycle_delay = self._settings_page.get_cycle_delay_ms()
+                if cycle_delay > 0:
+                    # Stop NG interval timer so it doesn't phantom-count during delay
+                    if self._ng_interval_timer.isActive():
+                        self._ng_interval_timer.stop()
+                        self._ng_interval_active = False
+                    self._cycle_delay_timer.start(cycle_delay)
+                    self._cycle_delay_active = True
+                    self._run_page.set_status_message(
+                        f"Cycle delay {cycle_delay} ms...")
+                else:
+                    self._cycle_delay_active = False
             else:
+                # plc_trigger/manual: timing antar siklus dari PLC — tanpa jeda
                 self._cycle_delay_active = False
 
             # Diagnostics latency
@@ -936,8 +984,9 @@ class MainWindow(QMainWindow):
                     roi_region = json.dumps([{
                         "x": r["roi"][0], "y": r["roi"][1],
                         "width": r["roi"][2], "height": r["roi"][3],
+                        "label": r.get("label", f"ROI{i + 1}"),
                         "score": r["score"], "judgement": r["judgement"],
-                    } for r in roi_results])
+                    } for i, r in enumerate(roi_results)])
                     self._db.add_inspection({
                         "program": self._active_program,
                         "score": worst_score,
@@ -1105,16 +1154,6 @@ class MainWindow(QMainWindow):
                 self._active_program, self._active_template, updates)
         except Exception as e:
             logger.warning("Augmentation config save error: %s", e)
-
-    def _on_augmentation_regenerate(self):
-        """Force-regenerate augmented images right away (starts training),
-        even if the augmentation config hasn't changed since last generation —
-        e.g. user just wants a fresh draw of the Acak/random parameters."""
-        if not self._active_template:
-            self.set_status("Tidak ada template aktif!", 3000)
-            return
-        self._force_regenerate_augmentation = True
-        self._on_train()
 
     def _on_gate_roi_changed(self):
         """Save gate ROI from editor to template config."""
@@ -1348,14 +1387,42 @@ class MainWindow(QMainWindow):
             self._start_plc_polling()
         else:
             self._stop_plc_polling()
+        # Sinkronkan I/O Monitor (halaman I/O Settings) dgn status koneksi
+        try:
+            self._io_page.refresh_monitor_connection()
+        except Exception:
+            pass
+
+    def _on_io_settings_apply(self, io_map: dict, io_mode: dict):
+        """Terapkan pemetaan coil & perilaku hasil dari halaman I/O Settings."""
+        try:
+            self._config.set("plc.io_map", io_map)
+            self._config.set("plc.io_mode", io_mode)
+            self._config.save()
+        except Exception as e:
+            logger.warning("I/O settings save error: %s", e)
+            self.set_status("I/O Settings gagal disimpan", 3000)
+            return
+        # Re-init PLC agar io_map baru berlaku di ModbusRTUManager
+        plc_cfg = self._config.get("plc") or {}
+        self._shutdown_plc()
+        if plc_cfg.get("enabled"):
+            self._init_plc()
+        try:
+            self._io_page.refresh_monitor_connection()
+        except Exception:
+            pass
+        self.set_status("I/O Settings tersimpan & diterapkan", 3000)
 
     def _on_plc_poll_tick(self):
         """Poll input PLC tiap 200ms — deteksi trigger/reset/switch program."""
         if not self._plc_modbus or not self._plc_modbus.is_connected:
             return
-        # Sync coil busy dengan state kamera (level, bukan pulse)
-        busy = bool(self._camera_worker and self._camera_worker.is_running)
-        self._plc_modbus.set_output("busy", busy)
+        # Sync coil busy dengan state kamera (level, bukan pulse) — hanya
+        # bila konfigurasi io_mode menyalakan busy_output (default hanya OK/NG).
+        if self._get_io_mode()["busy_output"]:
+            busy = bool(self._camera_worker and self._camera_worker.is_running)
+            self._plc_modbus.set_output("busy", busy)
         try:
             events = self._plc_modbus.read_inputs()
         except Exception as e:
@@ -1420,6 +1487,79 @@ class MainWindow(QMainWindow):
             self.set_status(f"PLC: program → {self._active_program}", 3000)
         except Exception as e:
             logger.warning("PLC switch program error: %s", e)
+
+    def _get_io_mode(self) -> dict:
+        """I/O behaviour mode aktif (dari config plc.io_mode, selalu lengkap)."""
+        return build_io_mode(self._config.get("plc"))
+
+    # ---- YOLO class filter (Fase D) ----
+
+    def _yolo_cfg(self) -> dict:
+        cfg = self._config.get("yolo")
+        return cfg if isinstance(cfg, dict) else {}
+
+    def _ensure_yolo_detector(self):
+        """Lazy-load YOLODetector dari config yolo.model_path (None bila gagal)."""
+        if self._yolo_det is not None:
+            return self._yolo_det
+        cfg = self._yolo_cfg()
+        path = str(cfg.get("model_path") or "").strip()
+        if not cfg.get("enabled") or not path:
+            return None
+        try:
+            det = YOLODetector(path)
+            if not det.available:
+                logger.warning("YOLO filter nonaktif: %s", det.error)
+                return None
+            self._yolo_det = det
+            logger.info(
+                "YOLO filter aktif: %s | kelas: %s | min_conf: %s",
+                path, cfg.get("expected_classes"), cfg.get("min_conf"))
+        except Exception as e:
+            logger.warning("YOLO load error: %s", e)
+            return None
+        return self._yolo_det
+
+    def _publish_result(self, judgement: str):
+        """Publikasi hasil OK/NG ke PLC sesuai `plc.io_mode.output_mode`.
+
+        - latching: coil OK/NG di-hold sebagai LEVEL sampai hasil berikutnya
+          ditulis / PLC reset (persis "kept until next status result" IV3).
+        - one_shot: pulse — tunda `one_shot_delay_ms`, lalu ON selama
+          `one_shot_on_time_ms` (mirip "One-Shot" IV3).
+        PLC yang memegang timing antar part; aplikasi hanya memublikasikan hasil.
+        """
+        if not self._plc_modbus or not self._plc_modbus.is_connected:
+            return
+        io = self._get_io_mode()
+        if io["output_mode"] == "one_shot":
+            self._publish_one_shot(judgement, io)
+        else:
+            self._publish_latching(judgement)
+
+    def _publish_latching(self, judgement: str):
+        """Tulis hasil sebagai LEVEL; coil lawan di-OFF-kan agar PLC bisa
+        deteksi rising/falling edge (pola ladder KV Keyence: INC pd edge OK/NG)."""
+        ok = (judgement == "OK")
+        self._plc_modbus.set_output("result_ok", ok)
+        self._plc_modbus.set_output("result_ng", not ok)
+
+    def _publish_one_shot(self, judgement: str, io: dict):
+        """Pulse singkat sesuai io_mode (delay + ON time) tanpa blokir UI."""
+        name = "result_ok" if judgement == "OK" else "result_ng"
+        duration = max(0, int(io.get("one_shot_on_time_ms", 300)))
+        delay = max(0, int(io.get("one_shot_delay_ms", 0)))
+
+        def _fire():
+            if self._plc_modbus and self._plc_modbus.set_output(name, True):
+                if duration > 0:
+                    QTimer.singleShot(duration,
+                                      lambda: self._safe_plc_output_off(name))
+
+        if delay > 0:
+            QTimer.singleShot(delay, _fire)
+        else:
+            _fire()
 
     def _plc_pulse(self, name: str):
         """Pulse coil output tanpa memblokir UI: ON → QTimer singleShot → OFF."""
@@ -1669,10 +1809,12 @@ class MainWindow(QMainWindow):
                 self._current_roi = enabled[0].rect()
                 self._current_all_rois = [r.rect() for r in enabled]
                 self._current_all_roi_uids = [r.uid for r in enabled]
+                self._current_all_roi_labels = [r.label for r in enabled]
             else:
                 self._current_roi = None
                 self._current_all_rois = []
                 self._current_all_roi_uids = []
+                self._current_all_roi_labels = []
 
             # Gallery thumbnails
             self._teach_page.clear_galleries()
@@ -2297,6 +2439,52 @@ class MainWindow(QMainWindow):
             self._teach_page.get_roi_editor().delete_selected_roi()
             self._on_rois_changed()
 
+    # Karakter yang diizinkan di label ROI: huruf/angka + - _ $ | (tanpa spasi).
+    # Label dipakai sebagai nama folder per-ROI ({label}_per_roi), jadi karakter
+    # ilegal Windows otomatis dibuang.
+    _ROI_LABEL_RE = re.compile(r"[^A-Za-z0-9_$\-|]")
+
+    def _sanitize_roi_label(self, raw: str) -> str:
+        """Bersihkan label ROI: buang spasi & karakter selain - _ $ |."""
+        return self._ROI_LABEL_RE.sub("", raw.strip())
+
+    def _on_roi_rename(self, index: int):
+        """Rename label ROI (visual only — geometri/logika tidak berubah).
+
+        Aturan: tanpa spasi, karakter spesial hanya -, _, $, |; label harus unik.
+        """
+        rois = self._teach_page.get_roi_editor().get_rois()
+        if not (0 <= index < len(rois)):
+            return
+        roi = rois[index]
+        new_label, ok = QInputDialog.getText(
+            self, "Rename ROI",
+            "Nama baru (tanpa spasi; hanya huruf/angka dan - _ $ |):",
+            text=roi.label)
+        if not ok:
+            return
+        cleaned = self._sanitize_roi_label(new_label)
+        if not cleaned:
+            QMessageBox.warning(
+                self, "Rename ROI",
+                "Nama tidak valid: kosong setelah karakter ilegal dibuang.")
+            return
+        if cleaned != new_label:
+            self.set_status(
+                f"Karakter ilegal/spasi dibuang: '{new_label}' → '{cleaned}'", 4000)
+        if cleaned == roi.label:
+            return  # tidak berubah
+        if any(r.uid != roi.uid and r.label == cleaned for r in rois):
+            QMessageBox.warning(
+                self, "Rename ROI",
+                f"Nama '{cleaned}' sudah dipakai ROI lain. Gunakan nama unik.")
+            return
+        roi.label = cleaned
+        self._teach_page.get_roi_editor().set_rois(rois)
+        self._teach_page.get_roi_panel().set_rois(rois, selected=index)
+        self._save_rois(rois)
+        self.set_status(f"ROI diganti: '{roi.label}'", 3000)
+
     def _on_roi_toggle_all(self, enabled: bool):
         """Enable or disable all ROIs."""
         rois = self._teach_page.get_roi_editor().get_rois()
@@ -2320,10 +2508,12 @@ class MainWindow(QMainWindow):
             self._current_roi = enabled[0].rect()
             self._current_all_rois = [r.rect() for r in enabled]
             self._current_all_roi_uids = [r.uid for r in enabled]
+            self._current_all_roi_labels = [r.label for r in enabled]
         else:
             self._current_roi = None
             self._current_all_rois = []
             self._current_all_roi_uids = []
+            self._current_all_roi_labels = []
         self.set_status(f"{len(rois)} ROI ({len(enabled)} aktif)", 3000)
 
     def _reset_counters(self):
@@ -2689,6 +2879,40 @@ class MainWindow(QMainWindow):
 
     # ---- Tuning (Per-ROI Correction + Additional Learning) ----
 
+    @staticmethod
+    def _parse_roi_region(value) -> list:
+        """Parse kolom `roi_region` DB → list dict per-ROI.
+
+        Robust terhadap double-encode (entry lama tersimpan sebagai JSON
+        string di dalam JSON string — `'"[{...}]"'`) dan tipe tak terduga:
+        None/"" → [], dict → [dict], list → list-of-dict, garbage → [].
+        """
+        if not value:
+            return []
+        data = value
+        for _ in range(3):
+            if not isinstance(data, str):
+                break
+            try:
+                data = json.loads(data)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return []
+        if isinstance(data, list):
+            return [d for d in data if isinstance(d, dict)]
+        if isinstance(data, dict):
+            return [data]
+        return []
+
+    @staticmethod
+    def _format_roi_detail(rois: list) -> str:
+        """Format ringkas per-ROI untuk kolom history: 'Label1:OK · Label2:NG'."""
+        parts = []
+        for i, r in enumerate(rois):
+            label = str(r.get("label") or f"ROI{i + 1}")
+            judgement = str(r.get("judgement") or "?")
+            parts.append(f"{label}:{judgement}")
+        return " · ".join(parts)
+
     def _on_tuning_requested(self, entry_id: int):
         """Open Tuning dialog for a history entry, apply per-ROI corrections.
 
@@ -2723,8 +2947,9 @@ class MainWindow(QMainWindow):
         if metadata:
             try:
                 meta = json.loads(metadata) if isinstance(metadata, str) else metadata
-                tmpl_id = meta.get("template", "")
-            except (json.JSONDecodeError, TypeError):
+                if isinstance(meta, dict):
+                    tmpl_id = str(meta.get("template", "") or "")
+            except (json.JSONDecodeError, TypeError, ValueError):
                 tmpl_id = ""
 
         if tmpl_id and tmpl_id != self._active_template:
@@ -2736,14 +2961,8 @@ class MainWindow(QMainWindow):
             else:
                 logger.warning("Tuning: original template %s not found, using current", tmpl_id)
 
-        # Parse per-ROI data
-        rois_data = []
-        if roi_region_str:
-            try:
-                rois_data = json.loads(roi_region_str) if isinstance(roi_region_str, str) else roi_region_str
-            except (json.JSONDecodeError, TypeError):
-                rois_data = []
-
+        # Parse per-ROI data (robust terhadap double-encode entry lama)
+        rois_data = self._parse_roi_region(roi_region_str)
         if not rois_data:
             self.set_status(f"Tidak ada data ROI untuk entry #{entry_id}", 3000)
             return
@@ -2799,6 +3018,40 @@ class MainWindow(QMainWindow):
                             self._active_template, w, h)
             except Exception as e:
                 logger.warning("Tuning: gagal simpan ROI crop: %s", e)
+
+        # ── Update history entry: judgement terkoreksi + per-ROI terbaru ──
+        # (sebelumnya TIDAK ada — entry di tabel tidak pernah berubah setelah
+        #  koreksi; mark_correction hanya menyimpan di kolom terpisah, kolom
+        #  judgement asli tetap utuh dan tampilan memakai COALESCE)
+        if corrections:
+            new_overall = "NG" if any(
+                roi.current_judgement == "NG" for roi in dialog._rois
+            ) else "OK"
+            original = entry.get("judgement", "")
+            try:
+                self._db.mark_correction(entry_id, new_overall)
+                self._db.add_audit(
+                    self._active_program, "correction",
+                    {"entry_id": entry_id, "from": original,
+                     "to": new_overall, "source": "tuning"})
+                logger.info("Tuning: entry #%d dikoreksi %s → %s",
+                            entry_id, original, new_overall)
+            except Exception as e:
+                logger.error("Tuning: gagal mark correction: %s", e)
+
+            # Per-ROI breakdown terbaru (hasil terkoreksi) untuk kolom Per-ROI
+            try:
+                new_roi_region = json.dumps([{
+                    "x": roi.x, "y": roi.y,
+                    "width": roi.w, "height": roi.h,
+                    "label": roi.label, "score": roi.score,
+                    "judgement": roi.current_judgement,
+                } for roi in dialog._rois])
+                self._db.update_roi_region(entry_id, new_roi_region)
+            except Exception as e:
+                logger.error("Tuning: gagal update roi_region: %s", e)
+
+            self._refresh_history()
 
         # ── Additional Learning: retrain on this specific template ──
         if saved_count > 0:
@@ -2876,14 +3129,24 @@ class MainWindow(QMainWindow):
                 program=self._active_program, judgement=judgement, limit=100)
             self._history_page.clear()
             for e in entries:
+                # Tampilkan hasil TERKOREKSI (kalau ada) — judgement asli
+                # tetap utuh di DB, hanya tampilan yang mengikuti koreksi
+                corrected = bool(e.get("corrected", 0))
+                if corrected and e.get("correct_judgement"):
+                    display_judgement = str(e["correct_judgement"])
+                else:
+                    display_judgement = str(e.get("judgement", ""))
+                roi_detail = self._format_roi_detail(
+                    self._parse_roi_region(e.get("roi_region")))
                 self._history_page.add_entry(
                     entry_id=int(e["id"]),
                     timestamp=str(e.get("timestamp", "")),
                     program=str(e.get("program", "")),
                     score=float(e.get("score", 0.0)),
-                    judgement=str(e.get("judgement", "")),
+                    judgement=display_judgement,
                     image_path=str(e.get("image_path", "")),
-                    corrected=bool(e.get("corrected", 0)),
+                    corrected=corrected,
+                    roi_detail=roi_detail,
                 )
             self._history_page.set_status(f"{len(entries)} entries")
         except Exception as ex:
@@ -2969,7 +3232,8 @@ class MainWindow(QMainWindow):
         self._apply_flask_settings(settings)
 
     def _on_tab_changed(self, index: int):
-        page_names = ["Run", "Teach", "History", "Settings", "Diagnostics", "Akun"]
+        page_names = ["Run", "Teach", "History", "Settings", "Diagnostics",
+                      "Akun", "I/O Settings"]
         name = page_names[index] if index < len(page_names) else f"Tab {index}"
         logger.debug("Switched to %s tab", name)
 
@@ -2988,6 +3252,9 @@ class MainWindow(QMainWindow):
         # Refresh account page when switching to AKUN tab
         elif index == 5:
             self._account_page.refresh()
+        # Refresh I/O Monitor saat beralih ke tab I/O Settings
+        elif index == 6:
+            self._io_page.refresh_monitor_connection()
 
     def _show_about(self):
         QMessageBox.about(

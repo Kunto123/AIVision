@@ -80,9 +80,45 @@ def build_io_map(plc_config: Optional[dict]) -> dict:
         for section in ("outputs", "inputs"):
             if isinstance(io.get(section), dict):
                 default[section].update(io[section])
-        if isinstance(io.get("program_register"), int):
-            default["program_register"] = io["program_register"]
+    if isinstance(io.get("program_register"), int):
+        default["program_register"] = io["program_register"]
     return default
+
+
+# Mode output hasil (mirip "Output Settings" di sensor Keyence IV3).
+# Aplikasi sudah jadi "sensor": PLC yg pegang timing/urutan. Hasil OK/NG bisa:
+#   - latching: dibiarkan LEVEL sampai hasil berikutnya / PLC reset (paling
+#     persis IV3 — "kept until next status result").
+#   - one_shot : pulse singkat (`one_shot_delay` lalu ON selama `one_shot_on_time`).
+DEFAULT_IO_MODE: dict = {
+    "output_mode": "latching",         # "latching" | "one_shot"
+    "one_shot_on_time_ms": 300,        # durasi coil ON pd one_shot (≤ pulse_ms lama)
+    "one_shot_delay_ms": 0,            # tunda sebelum coil ON (one_shot)
+    "part_ready_output": False,        # default hanya OK/NG; nyalakan utk kirim coil part_ready
+    "busy_output": False,              # default hanya OK/NG; nyalakan utk kirim coil busy
+}
+
+
+def build_io_mode(plc_config: Optional[dict] = None) -> dict:
+    """I/O behaviour mode (default), override dari config `plc.io_mode`.
+
+    Mode disimpan di config per-keberadaan; function ini menjamin selalu ada
+    field lengkap (backward-compat utk config lama yang belum punya io_mode).
+    """
+    out = DEFAULT_IO_MODE.copy()
+    pl = plc_config or {}
+    mode = pl.get("io_mode")
+    if isinstance(mode, dict):
+        for key, value in mode.items():
+            if key in out and value is not None:
+                out[key] = value
+    if out["output_mode"] not in ("latching", "one_shot"):
+        out["output_mode"] = "latching"
+    out["one_shot_on_time_ms"] = max(0, int(out["one_shot_on_time_ms"]))
+    out["one_shot_delay_ms"] = max(0, int(out["one_shot_delay_ms"]))
+    out["part_ready_output"] = bool(out["part_ready_output"])
+    out["busy_output"] = bool(out["busy_output"])
+    return out
 
 
 class ModbusRTUManager:
@@ -246,6 +282,33 @@ class ModbusRTUManager:
         """Baca holding register nomor program tujuan (untuk switch_program)."""
         addr = self._io_map.get("program_register", 10)
         return self._read_holding_register(addr)
+
+    # ---- Monitor coil (untuk tab I/O Monitor) ----
+
+    def read_coil_state(self, name: str) -> Optional[bool]:
+        """Baca state coil by nama (output ATAU input) — untuk I/O Monitor.
+
+        Returns None bila coil tidak dikenal / baca gagal.
+        """
+        outputs = self._io_map.get("outputs", {})
+        inputs = self._io_map.get("inputs", {})
+        if name in outputs:
+            return self._read_coil(outputs[name])
+        if name in inputs:
+            return self._read_coil(inputs[name])
+        return None
+
+    def read_all_coil_states(self) -> dict:
+        """Baca semua coil (outputs + inputs) — {nama: bool|None}.
+
+        Untuk live I/O Monitor; None = tidak terhubung / gagal baca.
+        """
+        states: dict[str, Optional[bool]] = {}
+        for name, addr in self._io_map.get("outputs", {}).items():
+            states[name] = self._read_coil(addr)
+        for name, addr in self._io_map.get("inputs", {}).items():
+            states[name] = self._read_coil(addr)
+        return states
 
     # ---- Scan coil (untuk dropdown di Settings) ----
 

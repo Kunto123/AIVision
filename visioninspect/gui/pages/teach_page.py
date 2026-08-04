@@ -440,12 +440,6 @@ class TeachPage(QWidget):
             self._build_augmentation_range_row(
                 aug_outer, "Contrast", "%", 1, 100, 20)
 
-        self._aug_regenerate_btn = QPushButton("Regenerate")
-        self._aug_regenerate_btn.setToolTip(
-            "Paksa generate ulang augmentasi walau setting tidak berubah "
-            "(misal cuma ingin nilai Acak yang baru).")
-        aug_outer.addWidget(self._aug_regenerate_btn)
-
         right_layout.addWidget(aug_group)
 
         # Train button + progress stacked
@@ -582,10 +576,19 @@ class TeachPage(QWidget):
 
         tv = QHBoxLayout()
         tv.addWidget(QLabel("0.0"))
-        self._threshold_value_label = QLabel("0.500")
-        self._threshold_value_label.setAlignment(Qt.AlignCenter)
-        self._threshold_value_label.setObjectName("bigCounter")
-        tv.addWidget(self._threshold_value_label)
+        # Bisa diketik ATAU di-slide: spin sinkron dua arah dengan slider.
+        # keyboardTracking(False) → valueChanged hanya saat Enter/panah/focus-out,
+        # jadi mengetik angka tidak melompat-lompat tiap karakter.
+        self._threshold_spin = QDoubleSpinBox()
+        self._threshold_spin.setRange(0.0, 1.0)
+        self._threshold_spin.setDecimals(3)
+        self._threshold_spin.setSingleStep(0.005)
+        self._threshold_spin.setKeyboardTracking(False)
+        self._threshold_spin.setValue(0.500)
+        self._threshold_spin.setAlignment(Qt.AlignCenter)
+        self._threshold_spin.setObjectName("bigCounter")
+        self._threshold_spin.valueChanged.connect(self._on_threshold_spin_changed)
+        tv.addWidget(self._threshold_spin)
         tv.addWidget(QLabel("1.0"))
         th_layout.addLayout(tv)
         right_layout.addWidget(threshold_group)
@@ -714,13 +717,26 @@ class TeachPage(QWidget):
 
     @Slot()
     def set_threshold(self, value: float):
-        self._threshold_value_label.setText(f"{value:.3f}")
+        """Set threshold dari config (load template) — sinkron slider + spin,
+        sinyal diblok agar tidak memicu handler saat inisialisasi."""
         self._threshold_slider.blockSignals(True)
         self._threshold_slider.setValue(int(value * 1000))
         self._threshold_slider.blockSignals(False)
+        self._threshold_spin.blockSignals(True)
+        self._threshold_spin.setValue(round(value, 3))
+        self._threshold_spin.blockSignals(False)
 
     def _on_threshold_changed(self, value: int):
-        self._threshold_value_label.setText(f"{value / 1000.0:.3f}")
+        """Slider digeser → update spin (diblok anti-loop) + label besar."""
+        self._threshold_spin.blockSignals(True)
+        self._threshold_spin.setValue(value / 1000.0)
+        self._threshold_spin.blockSignals(False)
+
+    def _on_threshold_spin_changed(self, value: float):
+        """Spin diketik/diubah → geser slider. Tanpa blockSignals: valueChanged
+        slider memicu _on_threshold_changed (yang mem-block spin → anti-loop),
+        plus main_window._on_threshold_slider untuk update engine live."""
+        self._threshold_slider.setValue(int(round(value * 1000)))
 
     @Slot()
     def set_warning(self, message: str):
@@ -983,9 +999,6 @@ class TeachPage(QWidget):
     def _on_augmentation_field_changed(self, *_):
         self.augmentation_config_changed.emit()
 
-    def get_augmentation_regenerate_button(self) -> QPushButton:
-        return self._aug_regenerate_btn
-
     def _update_pc_field_visibility(self, *_):
         """Show only the threshold/canny rows relevant to the selected method."""
         method = self._pc_method_combo.currentData()
@@ -1003,6 +1016,8 @@ class TeachPage(QWidget):
     def get_test_model_button(self): return self._test_model_btn
     def get_train_button(self): return self._train_btn
     def get_threshold_slider(self): return self._threshold_slider
+
+    def get_threshold_spin(self): return self._threshold_spin
     def get_progress_bar(self): return self._progress_bar
     def get_template_combo(self): return self._template_combo
     def get_add_template_button(self): return self._add_template_btn

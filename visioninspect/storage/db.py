@@ -133,6 +133,19 @@ class Database:
 
     # ---- Inspection History ----
 
+    @staticmethod
+    def _json_or_str(value):
+        """Normalisasi kolom JSON: str diteruskan apa adanya (hindari double-
+        encode), dict/list di-dump, None/empty → None."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value if value.strip() else None
+        try:
+            return json.dumps(value)
+        except (TypeError, ValueError):
+            return None
+
     def add_inspection(self, entry: dict) -> int:
         """Add an inspection result. Returns entry ID."""
         self.conn.execute("""
@@ -149,8 +162,8 @@ class Database:
             entry.get("latency_ms"),
             entry.get("image_path"),
             entry.get("thumbnail_path"),
-            json.dumps(entry.get("roi_region")) if entry.get("roi_region") else None,
-            json.dumps(entry.get("metadata")) if entry.get("metadata") else None,
+            self._json_or_str(entry.get("roi_region")),
+            self._json_or_str(entry.get("metadata")),
         ))
         self.conn.commit()
 
@@ -184,7 +197,8 @@ class Database:
             query += " AND program = ?"
             params.append(program)
         if judgement:
-            query += " AND judgement = ?"
+            # Filter mengikuti hasil TERKOREKSI (kolom tampilan)
+            query += " AND COALESCE(correct_judgement, judgement) = ?"
             params.append(judgement)
 
         query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
@@ -210,7 +224,12 @@ class Database:
         return self.conn.execute(query, params).fetchone()[0]
 
     def mark_correction(self, entry_id: int, correct_judgement: str) -> None:
-        """Mark a history entry as corrected."""
+        """Mark a history entry as corrected.
+
+        Catatan: kolom `judgement` (hasil asli inspeksi) TIDAK ditimpa —
+        nilai koreksi disimpan di `correct_judgement`. Tampilan tabel
+        memakai COALESCE(correct_judgement, judgement).
+        """
         self.conn.execute("""
             UPDATE inspection_history
             SET corrected = 1,
@@ -218,6 +237,14 @@ class Database:
                 corrected_at = ?
             WHERE id = ?
         """, (correct_judgement, time.strftime("%Y-%m-%d %H:%M:%S"), entry_id))
+        self.conn.commit()
+
+    def update_roi_region(self, entry_id: int, roi_region) -> None:
+        """Update per-ROI breakdown (kolom roi_region) — dipakai setelah
+        koreksi tuning agar kolom Per-ROI menampilkan hasil terkoreksi."""
+        self.conn.execute(
+            "UPDATE inspection_history SET roi_region = ? WHERE id = ?",
+            (self._json_or_str(roi_region), entry_id))
         self.conn.commit()
 
     def rollback_correction(self, entry_id: int) -> None:

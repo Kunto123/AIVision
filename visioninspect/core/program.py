@@ -122,6 +122,31 @@ class ProgramManager:
         shutil.rmtree(prog_dir)
         logger.info("Program deleted: %s", name)
 
+    # ------------------------------------------------------------------
+    # Helpers — rename dengan retry (Windows file-lock: antivirus/Explorer
+    # bisa menahan handle folder sesaat → WinError 5 Access is denied)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _rename_dir_with_retry(old_dir: Path, new_dir: Path,
+                               attempts: int = 4) -> None:
+        """Rename folder dengan retry singkat + backoff.
+
+        Windows menolak rename folder yang berisi file di-lock proses lain
+        (mis. model.bin yang di-mmap OpenVINO, atau sedang dipindai antivirus).
+        Retry singkat biasanya cukup; error terakhir tetap di-raise.
+        """
+        last_err: Optional[Exception] = None
+        for i in range(attempts):
+            try:
+                old_dir.rename(new_dir)
+                return
+            except OSError as e:
+                last_err = e
+                if i < attempts - 1:
+                    time.sleep(0.3 * (i + 1))
+        if last_err is not None:
+            raise last_err
+
     def rename_program(self, old_name: str, new_name: str) -> None:
         """Rename a program."""
         old_dir = self._get_program_dir(old_name)
@@ -130,7 +155,7 @@ class ProgramManager:
             raise ProgramError(f"Program '{old_name}' tidak ditemukan")
         if new_dir.exists():
             raise ProgramError(f"Program '{new_name}' sudah ada")
-        old_dir.rename(new_dir)
+        self._rename_dir_with_retry(old_dir, new_dir)
         config = self._load_json(self._get_config_path(new_name), {})
         config["name"] = new_name
         self._atomic_write(self._get_config_path(new_name), config)
@@ -239,8 +264,8 @@ class ProgramManager:
             new_dir = tmpl_dir_base / new_id
             counter += 1
 
-        # Rename folder
-        old_dir.rename(new_dir)
+        # Rename folder (retry untuk Windows file-lock: WinError 5)
+        self._rename_dir_with_retry(old_dir, new_dir)
 
         # Update config
         cfg_path = new_dir / "config.json"

@@ -2097,7 +2097,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Error", str(e))
 
     def _on_rename_template(self):
-        """Rename active template: folder + config."""
+        """Rename active template: folder + config.
+
+        Model OpenVINO di-unload dulu: folder berisi model.bin yang sedang
+        di-mmap — Windows menolak rename folder berisi file yang di-lock
+        proses sendiri (WinError 5 Access is denied, terutama di Windows
+        native). Setelah rename, model di-load ulang dari folder baru.
+        """
         if not self._active_program or not self._active_template:
             QMessageBox.warning(self, "Rename Template",
                                 "Pilih template terlebih dahulu.")
@@ -2109,6 +2115,11 @@ class MainWindow(QMainWindow):
             self, "Rename Template",
             "Nama baru:", text=current_name)
         if ok and new_name.strip() and new_name.strip() != current_name:
+            # Lepas handle model.bin agar folder bisa di-rename di Windows
+            try:
+                self._inference_engine.unload_model()
+            except Exception:
+                pass
             try:
                 result = self._pm.rename_template(
                     self._active_program, old_id, new_name.strip())
@@ -2116,9 +2127,26 @@ class MainWindow(QMainWindow):
                 self._pm.set_active_template(
                     self._active_program, self._active_template)
                 self._refresh_template_ui()
-                self.set_status(f"Template diganti: '{current_name}' → '{result['name']}'", 3000)
+                # Muat ulang model dari folder baru (path berubah)
+                try:
+                    self._load_template_model()
+                except Exception:
+                    logger.warning("Gagal reload model setelah rename template",
+                                   exc_info=True)
+                self.set_status(
+                    f"Template diganti: '{current_name}' → '{result['name']}'", 3000)
             except Exception as e:
-                QMessageBox.warning(self, "Error", str(e))
+                # Rename gagal (mis. antivirus masih memindai) — kembalikan
+                # model lama supaya aplikasi tetap jalan.
+                try:
+                    self._load_template_model()
+                except Exception:
+                    pass
+                hint = ""
+                if getattr(e, "winerror", None) == 5:
+                    hint = ("\n\nCoba: tutup jendela Explorer yang membuka folder "
+                            "template ini, atau tunggu antivirus selesai memindai.")
+                QMessageBox.warning(self, "Error", f"{e}{hint}")
 
     def _on_template_changed(self, index: int):
         """Switch active template — triggered by either TEACH or RUN combo."""

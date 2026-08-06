@@ -44,6 +44,27 @@ class CameraWorker(QObject):
         self._target_fps = 30
         self._running = False
         self._device_index = 0
+        # F2: param kamera dari Settings (exposure/gain/white_balance)
+        self._camera_params: dict = {}
+
+    # ---- F2: kamera config dari Settings ----
+
+    def set_camera_config(self, cfg: dict) -> None:
+        """Terapkan config kamera (exposure/gain/WB) dari Settings (F2).
+
+        Sebelum fix ini, CameraConfig hanya dibuat dari device_index —
+        exposure/gain/white_balance di Settings TIDAK pernah sampai ke
+        kamera (semua auto). Param ini diteruskan ke CameraConfig saat
+        start; dipanggil ulang setelah save settings (restart kamera).
+        """
+        self._camera_params = {
+            k: cfg.get(k)
+            for k in ("resolution_width", "resolution_height",
+                      "fps_target", "exposure", "gain", "white_balance")
+            if cfg.get(k) is not None
+        }
+        if "fps_target" in self._camera_params:
+            self._target_fps = int(self._camera_params["fps_target"])
 
     # ---- Private: start/stop timer (timer sudah dibuat di __init__) ----
 
@@ -71,12 +92,24 @@ class CameraWorker(QObject):
             return
         self._do_start(device_index)
 
+    def restart_camera(self, device_index: int = 0):
+        """Stop lalu start ulang kamera (dipakai saat settings kamera berubah,
+        supaya exposure/gain/WB yang baru benar-benar diterapkan — F2)."""
+        if self.thread() is not QThread.currentThread():
+            QMetaObject.invokeMethod(
+                self, "restart_camera", Qt.QueuedConnection,
+                Q_ARG(int, device_index))
+            return
+        self.stop_camera()
+        QTimer.singleShot(250, lambda: self._do_start(device_index))
+
     def _do_start(self, device_index: int):
         """Internal: benar-benar start kamera. HARUS di CameraThread."""
         self._device_index = device_index
 
         try:
-            config = CameraConfig(device_index=device_index)
+            config = CameraConfig(device_index=device_index,
+                                  **self._camera_params)
             self._camera = CameraDevice(config)
             self._camera.open()
 

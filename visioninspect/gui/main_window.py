@@ -103,6 +103,7 @@ class MainWindow(QMainWindow):
         # Database (shared instance for history, counters, corrections, users)
         from visioninspect.storage.db import Database
         from visioninspect.storage.postgres_db import PostgresDB
+        from visioninspect.storage import secret_store
         self._db = Database(data_dir / "database.db")
         # PostgreSQL connection (optional — enabled via config).
         # WAJIB sub-dict "postgresql" (PostgresDB baca config["enabled"]/["host"]/dst);
@@ -111,6 +112,23 @@ class MainWindow(QMainWindow):
         if self._pg.is_enabled:
             # Pastikan DB siap pakai (tabel ada, admin ter-seed) begitu terhubung
             self._pg.ensure_ready()
+
+        # C4: migrasi kredensial — password PG plaintext lama dienkripsi sekali
+        pg_cfg = self._config.get("postgresql", {})
+        pg_pw = pg_cfg.get("password", "")
+        if pg_pw and not secret_store.is_encrypted(pg_pw):
+            try:
+                self._config.set("postgresql.password", secret_store.encrypt(pg_pw))
+                self._config.save()
+                logger.info("Migrasi C4: password PostgreSQL dienkripsi (bukan plaintext)")
+            except Exception as e:
+                logger.warning("Migrasi enkripsi password PG gagal: %s", e)
+
+        # C3: flush sisa outbox saat startup + tick berkala 30 detik
+        self._pg_flush_timer = QTimer(self)
+        self._pg_flush_timer.timeout.connect(self._flush_pg_outbox)
+        self._pg_flush_timer.start(30000)
+        QTimer.singleShot(1500, self._flush_pg_outbox)
 
         # Authentication state
         self._current_user: Optional[dict] = None
@@ -350,7 +368,16 @@ class MainWindow(QMainWindow):
 
     def _show_login(self):
         """Show login dialog, apply role visibility after success."""
-        auth_db = self._pg if self._pg.is_enabled else self._db
+        # C2: is_enabled hanya flag config — server bisa mati. Cek koneksi
+        # hidup; kalau PG tidak terjangkau, fallback ke autentikasi SQLite
+        # lokal supaya lini tidak berhenti (server DB mati ≠ nobody can login).
+        if self._pg.is_enabled and self._pg.is_alive(timeout=2.0):
+            auth_db = self._pg
+        else:
+            if self._pg.is_enabled:
+                logger.warning(
+                    "PostgreSQL tidak terjangkau — fallback autentikasi SQLite lokal (C2)")
+            auth_db = self._db
         dialog = LoginDialog(auth_db, self)
         if dialog.exec():
             self._current_user = dialog.user
@@ -405,6 +432,9 @@ class MainWindow(QMainWindow):
         self._tabs.setTabVisible(4, is_admin)      # DIAGNOSTICS
         self._tabs.setTabVisible(5, is_admin)      # AKUN
         self._tabs.setTabVisible(6, is_admin)      # GLOBAL SETTINGS
+        # View operator = 1 tab saja → sembunyikan tab bar (hilangkan
+        # tulisan "RUN"); admin butuh tab bar untuk navigasi.
+        self._tabs.tabBar().setVisible(is_admin)
 
         if is_admin:
             self._account_page.refresh()
@@ -426,9 +456,9 @@ class MainWindow(QMainWindow):
         self._settings_page.get_save_button().clicked.connect(self._on_settings_save)
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
-        # PLC scan (Settings → PLC) — hasil dari thread worker
-        self._settings_page.get_scan_button().clicked.connect(self._on_plc_scan)
-        self._settings_page.get_detect_button().clicked.connect(self._on_plc_detect_active)
+        # PLC scan (I/O Settings → Scan Coils) — hasil dari thread worker
+        self._io_page.scan_requested.connect(self._on_plc_scan)
+        self._io_page.detect_requested.connect(self._on_plc_detect_active)
         self._plc_scan_done_signal.connect(self._on_plc_scan_done)
         self._plc_detect_done_signal.connect(self._on_plc_detect_done)
 
@@ -555,6 +585,9 @@ class MainWindow(QMainWindow):
         self._camera_thread = CameraThread(self)
         self._camera_thread.init_worker()
         self._camera_worker = self._camera_thread.worker
+        # F2: terusan config kamera (exposure/gain/WB) — sebelumnya hanya
+        # device_index, sehingga exposure di Settings tidak pernah berlaku
+        self._camera_worker.set_camera_config(self._config.get("camera", {}))
         self._camera_thread.start()
 
         self._camera_worker.frame_ready.connect(self._on_frame_received)
@@ -881,13 +914,11 @@ class MainWindow(QMainWindow):
                 self._roi_col_judgement[idx] = r.get("judgement", "OK")
             self._roi_col_timestamp = time.monotonic()
 
-            # Push SETIAP hasil inferensi ke PostgreSQL (OK & NG).
-            # partname = nama template, mpcheck = nama operator (lihat helper).
-            # Non-blocking (daemon thread) agar koneksi DB tidak membekukan
-            # thread GUI saat frame-rate tinggi.
-            self._push_inspection_async(worst_score)
+            # Push ke PostgreSQL TIDAK di sini (per-frame = boros + tanpa
+            # backpressure, lihat PRD R4). Push dilakukan per verdict-event
+            # di blok add_inspection (NG pertama / OK throttled) via outbox.
 
-            # Always update latency and ROI info (informational)
+
             avg_latency = total_latency / len(roi_results) if roi_results else 0.0
             self._run_page.update_latency(avg_latency)
             self._run_page.update_roi_results(roi_results)
@@ -929,7 +960,7 @@ class MainWindow(QMainWindow):
                         "label": r.get("label", f"ROI{i + 1}"),
                         "score": r["score"], "judgement": r["judgement"],
                     } for i, r in enumerate(roi_results)])
-                    self._db.add_inspection({
+                    ng_entry_id = self._db.add_inspection({
                         "program": self._active_program,
                         "score": worst_score,
                         "judgement": "NG",
@@ -943,6 +974,10 @@ class MainWindow(QMainWindow):
                             "template_name": self._active_partname,
                         },
                     })
+                    # Sink ke PostgreSQL via outbox (C1/C3) — local_id = id SQLite
+                    # agar koreksi operator bisa di-propagasi (C0).
+                    self._push_inspection_async(self._build_push_entry(
+                        "NG", worst_score, img_path, avg_latency, ng_entry_id))
                 else:
                     # Timer already running — update display (worse score)
                     self._run_page.update_judgement("NG", worst_score)
@@ -987,7 +1022,7 @@ class MainWindow(QMainWindow):
                         "label": r.get("label", f"ROI{i + 1}"),
                         "score": r["score"], "judgement": r["judgement"],
                     } for i, r in enumerate(roi_results)])
-                    self._db.add_inspection({
+                    ok_entry_id = self._db.add_inspection({
                         "program": self._active_program,
                         "score": worst_score,
                         "judgement": "OK",
@@ -999,38 +1034,89 @@ class MainWindow(QMainWindow):
                                       'template': self._active_template,
                                       'template_name': self._active_partname},
                     })
+                    self._push_inspection_async(self._build_push_entry(
+                        "OK", worst_score, img_path, avg_latency, ok_entry_id))
 
         except Exception as e:
             logger.warning("Inference error: %s", e)
 
-    def _push_inspection_async(self, score: float) -> None:
-        """Push satu hasil inferensi ke PostgreSQL tanpa blok thread GUI.
+    def _build_push_entry(self, judgement: str, score: float,
+                          img_path: str, latency: float, local_id: int) -> dict:
+        """Bangun dict kwargs untuk ``PostgresDB.push_inspection`` (C1).
 
-        Mapping kolom qc_inspection_push:
-          partname = nama template (bukan id)
-          mpcheck  = nama akun operator yang login (bukan OK/NG)
-          data1    = part-ready difference score (0=siap, makin besar = makin beda)
-          data2    = similarity score (1.0=mirip OK, 0.0=anomali total)
-
-        push_inspection membuka koneksi baru tiap panggil; menjalankannya
-        langsung di thread GUI (per frame) bisa membekukan UI. Jadi dijalankan
-        fire-and-forget di daemon thread. Aman karena tiap push memakai koneksi
-        sendiri (tanpa shared state).
+        Perbaikan mapping lama: ``mpcheck`` = verdict OK/NG (sebelumnya
+        salah diisi nama operator). Nama operator pindah ke kolom ``operator``;
+        ``line`` diambil dari config (sebelumnya tidak pernah ditulis).
         """
-        if not self._pg.is_enabled:
-            return
-        partname = self._active_partname or self._active_program  # nama template
         operator = ""
         if self._current_user:
             operator = (self._current_user.get("display_name")
                         or self._current_user.get("username", ""))
-        data1 = self._last_part_check_score
-        threading.Thread(
-            target=self._pg.push_inspection,
-            kwargs=dict(partname=partname, mpcheck=operator,
-                        data1=data1, data2=score),
-            daemon=True,
-        ).start()
+        return {
+            "partname": self._active_partname or self._active_program,
+            "mpcheck": judgement,                                   # verdict OK/NG
+            "operator": operator,
+            "data1": self._last_part_check_score or 0.0,
+            "data2": float(score),
+            "image_path": img_path or "",
+            "threshold": getattr(self._inference_engine, "threshold", None),
+            "latency_ms": float(latency) if latency is not None else None,
+            "local_id": int(local_id) if local_id is not None else None,
+            "line": (self._config.get("postgresql.line", "")
+                     or self._config.get("line_name", "") or ""),
+        }
+
+    def _push_inspection_async(self, entry: dict) -> None:
+        """Enqueue hasil inspeksi ke outbox SQLite, lalu flush ke PostgreSQL (C3).
+
+        Outbox tahan-restart: bila PG/jaringan bermasalah, entry tetap
+        tersimpan dan di-retry oleh ``_flush_pg_outbox`` (dipanggil dari
+        thread ini, QTimer 30 detik, dan saat startup). Hasil tidak pernah
+        hilang diam-diam.
+        """
+        if not self._pg.is_enabled:
+            return
+        try:
+            self._db.add_outbox(entry)
+        except Exception as e:
+            logger.warning("Outbox enqueue error: %s", e)
+            return
+        threading.Thread(target=self._flush_pg_outbox, daemon=True).start()
+
+    def _flush_pg_outbox(self) -> None:
+        """Kirim batch outbox ke PostgreSQL; sukses → hapus (nol duplikat).
+
+        Satu worker + batch berbatas (PRD R4): tidak ada satu koneksi per
+        frame, tidak ada thread menumpuk. Antrian bounded: bila membengkak,
+        entry tertua dibuang dan dicatat.
+        """
+        if not self._pg.is_enabled:
+            return
+        try:
+            batch = self._db.get_outbox(limit=200)
+            if not batch:
+                return
+            ok_ids = []
+            for item in batch:
+                try:
+                    rid = self._pg.push_inspection(**item["entry"])
+                    if rid is not None:
+                        ok_ids.append(item["id"])
+                except Exception as e:
+                    logger.warning("Push outbox item %s gagal: %s", item["id"], e)
+            if ok_ids:
+                self._db.delete_outbox(ok_ids)
+            failed = [i["id"] for i in batch if i["id"] not in ok_ids]
+            if failed:
+                self._db.bump_outbox_attempts(failed)
+                logger.warning(
+                    "Outbox: %d entry tertunda (PostgreSQL tidak terjangkau?)",
+                    len(failed))
+                total = self._db.count_outbox()
+                if total > 5000:
+                    self._db.drop_oldest_outbox(total - 5000)
+        except Exception as e:
+            logger.warning("Flush outbox error: %s", e)
 
     # ---- Save Inspection Frame (untuk Tuning) ----
 
@@ -1531,6 +1617,13 @@ class MainWindow(QMainWindow):
         """
         if not self._plc_modbus or not self._plc_modbus.is_connected:
             return
+        # Rollout shadow mode: NG hanya ditampilkan & dicatat, coil result_ng
+        # TIDAK ditulis — lini tidak berhenti sebelum akurasi terbukti.
+        # OK tetap dipublikasikan normal (coil result_ok).
+        if judgement == "NG" and self._config.get("rollout.shadow_mode", False):
+            logger.warning(
+                "SHADOW MODE: NG ditekan dari coil (tidak diteruskan ke PLC)")
+            return
         io = self._get_io_mode()
         if io["output_mode"] == "one_shot":
             self._publish_one_shot(judgement, io)
@@ -1576,15 +1669,15 @@ class MainWindow(QMainWindow):
             self._plc_modbus.set_output(name, False)
 
     def _on_plc_scan(self):
-        """Tombol 'Scan Coils': probe alamat valid di background thread."""
+        """Tombol 'Scan Coils' (I/O Settings): probe alamat valid di background."""
         if not self._plc_modbus or not self._plc_modbus.is_connected:
-            self._settings_page.set_scan_result_label(
-                "⚠️ PLC belum connect — cek Settings → PLC → Save")
+            self._io_page.set_scan_result(
+                "⚠️ PLC belum connect — cek Settings → PLC → Enable + Save")
             return
         max_addr = max(0, int(self._config.get("plc.scan_range", 127)))
-        self._settings_page.set_scan_result_label(
+        self._io_page.set_scan_result(
             f"Scan coil 0-{max_addr}... (bisa ±15-30 detik)")
-        self._settings_page.get_scan_button().setEnabled(False)
+        self._io_page.set_scan_busy(True)
 
         def _worker():
             valid = self._plc_modbus.scan_coils(max_addr)
@@ -1593,15 +1686,15 @@ class MainWindow(QMainWindow):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_plc_detect_active(self):
-        """Tombol 'Deteksi Aktif': cari coil yang sedang ON (input aktif)."""
+        """Tombol 'Deteksi Aktif' (I/O Settings): cari coil yang sedang ON."""
         if not self._plc_modbus or not self._plc_modbus.is_connected:
-            self._settings_page.set_scan_result_label(
-                "⚠️ PLC belum connect — cek Settings → PLC → Save")
+            self._io_page.set_scan_result(
+                "⚠️ PLC belum connect — cek Settings → PLC → Enable + Save")
             return
         max_addr = max(0, int(self._config.get("plc.scan_range", 127)))
-        self._settings_page.set_scan_result_label(
+        self._io_page.set_scan_result(
             f"Deteksi coil aktif 0-{max_addr}... tekan tombol fisik di PLC")
-        self._settings_page.get_detect_button().setEnabled(False)
+        self._io_page.set_scan_busy(True)
 
         def _worker():
             active = self._plc_modbus.find_active_coils(max_addr)
@@ -1610,28 +1703,28 @@ class MainWindow(QMainWindow):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_plc_scan_done(self, valid_coils: list):
-        self._settings_page.get_scan_button().setEnabled(True)
+        self._io_page.set_scan_busy(False)
         if valid_coils:
-            self._settings_page.set_scan_coil_options(valid_coils)
             n = len(valid_coils)
             shown = ", ".join(str(c) for c in valid_coils[:20])
             more = f" ... (+{n - 20})" if n > 20 else ""
-            self._settings_page.set_scan_result_label(
-                f"✓ {n} coil valid: {shown}{more} — pilih alamat di dropdown")
+            self._io_page.set_scan_result(
+                f"✓ {n} coil valid: {shown}{more} — ketik alamatnya "
+                "di Output/Input Assign di atas")
         else:
-            self._settings_page.set_scan_result_label(
+            self._io_page.set_scan_result(
                 "⚠️ Tidak ada coil valid — cek port/ID slave/kabel")
 
     def _on_plc_detect_done(self, active_coils: list):
-        self._settings_page.get_detect_button().setEnabled(True)
+        self._io_page.set_scan_busy(False)
         if active_coils:
-            self._settings_page.set_scan_coil_options(active_coils)
-            self._settings_page.set_scan_result_label(
+            self._io_page.set_scan_result(
                 f"⚡ {len(active_coils)} coil aktif: "
                 + ", ".join(str(c) for c in active_coils)
-                + " — cocokkan dengan input fisik PLC")
+                + " — cocokkan dengan input fisik PLC, lalu ketik di "
+                  "Input Assign di atas")
         else:
-            self._settings_page.set_scan_result_label(
+            self._io_page.set_scan_result(
                 "Tidak ada coil aktif — pastikan tombol fisik ditekan saat scan")
 
     def _shutdown_plc(self):
@@ -1788,6 +1881,9 @@ class MainWindow(QMainWindow):
             # Load ROIs from template config
             tmpl_cfg = self._pm.get_template_config(
                 self._active_program, self._active_template)
+            # Label nama template aktif — besar di tengah view operator
+            self._run_page.set_active_template(
+                tmpl_cfg.get("name", self._active_template))
             roi_dicts = tmpl_cfg.get("rois", [])
             # Support legacy single ROI format
             if not roi_dicts and "roi" in tmpl_cfg:
@@ -2845,6 +2941,12 @@ class MainWindow(QMainWindow):
             self._db.mark_correction(entry_id, correct_judgement)
             self._db.add_audit(self._active_program, "correction",
                          {"entry_id": entry_id, "from": original, "to": correct_judgement})
+            # C0: propagasi koreksi ke PostgreSQL (local_id = id SQLite).
+            # Non-blocking — PG boleh lambat/mati; sink ulang via outbox tick.
+            if self._pg.is_enabled:
+                threading.Thread(
+                    target=self._pg.mark_correction_pg,
+                    args=(entry_id, correct_judgement), daemon=True).start()
             self._refresh_history()
             self.set_status(f"Entry #{entry_id} dikoreksi ke {correct_judgement}", 3000)
         except Exception as e:
@@ -2865,6 +2967,11 @@ class MainWindow(QMainWindow):
             self._db.rollback_correction(entry_id)
             self._db.add_audit(self._active_program, "rollback",
                          {"entry_id": entry_id})
+            # C0: batalkan koreksi di PostgreSQL juga
+            if self._pg.is_enabled:
+                threading.Thread(
+                    target=self._pg.rollback_correction_pg,
+                    args=(entry_id,), daemon=True).start()
             self._refresh_history()
             self.set_status(f"Koreksi entry #{entry_id} dibatalkan", 3000)
         except Exception as e:
@@ -3170,9 +3277,36 @@ class MainWindow(QMainWindow):
 
     def _on_settings_save(self):
         settings = self._settings_page.get_settings_dict()
+        # C4: kredensial tidak plaintext — enkripsi password PG sebelum disimpan
+        pg_settings = settings.get("postgresql", {})
+        pg_pass = pg_settings.get("password", "")
+        if pg_pass and not secret_store.is_encrypted(pg_pass):
+            try:
+                settings["postgresql"]["password"] = secret_store.encrypt(pg_pass)
+            except Exception as e:
+                logger.error("Enkripsi password PG gagal: %s", e)
+                self.set_status("Gagal mengenkripsi password PostgreSQL", 5000)
+                return
         for key, value in self._flatten_dict(settings):
             self._config.set(key, value)
         self._config.save()
+
+        # F2: camera settings berubah → restart kamera supaya exposure/gain/WB
+        # yang baru benar-benar diterapkan (sebelumnya tidak pernah berlaku).
+        if settings.get("camera") is not None and self._camera_worker:
+            old_cam = {k: self._config.get(f"camera.{k}")
+                       for k in ("resolution_width", "resolution_height",
+                                 "fps_target", "exposure", "gain",
+                                 "white_balance")}
+            new_cam = settings.get("camera", {})
+            changed = any(new_cam.get(k) != old_cam.get(k) for k in old_cam)
+            if changed:
+                self._camera_worker.set_camera_config(new_cam)
+                dev = self._config.get("camera.device_index", 0)
+                QTimer.singleShot(
+                    400, lambda: self._camera_worker.restart_camera(dev))
+                self.set_status("Kamera di-restart (setting exposure/gain/WB)",
+                                4000)
         # YOLO config bisa berubah di Settings → muat ulang detektor (lazy)
         # pada frame berikutnya, tanpa perlu restart aplikasi
         self._yolo_det = None

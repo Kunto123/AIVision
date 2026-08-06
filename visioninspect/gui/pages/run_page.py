@@ -93,6 +93,15 @@ class RunPage(QWidget):
         ctrl_layout.addWidget(self._trigger_btn)
         layout.addWidget(cam_ctrl)
 
+        # === Active Template: besar di tengah (mudah terbaca operator) ===
+        self._template_title = QLabel("Template: —")
+        self._template_title.setAlignment(Qt.AlignCenter)
+        self._template_title.setStyleSheet(
+            "color: #E2E8F0; font-size: 34px; font-weight: bold;"
+            " letter-spacing: 1px;")
+        layout.addWidget(self._template_title)
+        layout.addSpacing(4)
+
         # === Main: Live View + Right Panel ===
         main_layout = QHBoxLayout()
         main_layout.setSpacing(16)
@@ -300,6 +309,10 @@ class RunPage(QWidget):
     @Slot()
     def set_status_message(self, msg: str):
         self._status_msg.setText(msg)
+
+    def set_active_template(self, name: str) -> None:
+        """Tampilkan nama template aktif — besar di tengah view operator."""
+        self._template_title.setText(name if name else "—")
 
     @Slot()
     def update_roi_results(self, results: list):

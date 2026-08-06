@@ -81,6 +81,8 @@ class SettingsPage(QWidget):
         self._cam_height = _add_spin_row(cam_layout, "Resolution Height", 240, 3072, 1080)
         self._cam_fps = _add_spin_row(cam_layout, "Target FPS", 1, 120, 30)
         self._cam_exposure = _add_spin_row(cam_layout, "Exposure (-1=auto)", -1, 100000, -1)
+        self._cam_gain = _add_spin_row(cam_layout, "Gain (-1=auto)", -1, 100000, -1)
+        self._cam_wb = _add_spin_row(cam_layout, "White Balance (-1=auto, Kelvin)", -1, 20000, -1)
 
         main_layout.addWidget(cam_group)
 
@@ -182,53 +184,10 @@ class SettingsPage(QWidget):
         plc_addr_row.addStretch()
         plc_layout.addLayout(plc_addr_row)
 
-        # --- IO Mapping (Modbus) — alamat bisa diganti tanpa edit kode ---
-        io_hint = QLabel(
-            "IO Mapping (Modbus RTU) — coil yang sistem tulis/ baca.\n"
-            "Klik 'Scan Coils' untuk cari alamat valid, atau ketik manual.")
-        io_hint.setWordWrap(True)
-        io_hint.setObjectName("secondaryText")
-        plc_layout.addWidget(io_hint)
-
+        # --- Pulse durasi (ms) — dipakai pulse part_ready (opsional).
+        # Mapping coil TIDAK lagi di sini — pindah ke tab I/O Settings
+        # (Output/Input Assign) supaya tidak dobel sumber config plc.io_map.
         self._plc_pulse_ms = _add_spin_row(plc_layout, "Pulse durasi (ms):", 0, 5000, 300)
-
-        self._io_combos: dict = {}
-        io_rows = [
-            ("result_ok",     "Output OK coil:",         1),
-            ("result_ng",     "Output NG coil:",         2),
-            ("part_ready",    "Output Part Ready coil:", 3),
-            ("busy",          "Output Busy coil:",       4),
-            ("trigger",       "Input Trigger coil:",     0),
-            ("reset_result",  "Input Reset coil:",       5),
-            ("switch_program","Input Ganti Prog coil:",  6),
-        ]
-        for key, label, default_addr in io_rows:
-            row = QHBoxLayout()
-            row.addWidget(QLabel(label))
-            combo = QComboBox()
-            combo.setEditable(True)
-            combo.setCurrentText(str(default_addr))
-            row.addWidget(combo)
-            row.addStretch()
-            plc_layout.addLayout(row)
-            self._io_combos[key] = combo
-
-        self._plc_program_register = _add_spin_row(
-            plc_layout, "Program Register:", 0, 9999, 10)
-
-        scan_row = QHBoxLayout()
-        self._scan_btn = QPushButton("Scan Coils...")
-        self._scan_btn.setMinimumHeight(32)
-        self._detect_btn = QPushButton("Deteksi Aktif")
-        self._detect_btn.setMinimumHeight(32)
-        scan_row.addWidget(self._scan_btn)
-        scan_row.addWidget(self._detect_btn)
-        scan_row.addStretch()
-        plc_layout.addLayout(scan_row)
-        self._scan_result_label = QLabel("")
-        self._scan_result_label.setObjectName("secondaryText")
-        self._scan_result_label.setWordWrap(True)
-        plc_layout.addWidget(self._scan_result_label)
 
         main_layout.addWidget(plc_group)
 
@@ -542,6 +501,8 @@ class SettingsPage(QWidget):
                 "resolution_height": self._cam_height.value(),
                 "fps_target": self._cam_fps.value(),
                 "exposure": self._cam_exposure.value(),
+                "gain": self._cam_gain.value(),
+                "white_balance": self._cam_wb.value(),
             },
             "roi": {
                 "enabled": self._roi_enabled.isChecked(),
@@ -560,7 +521,6 @@ class SettingsPage(QWidget):
                 "modbus_slave_id": self._plc_slave_id.value(),
                 "scan_range": self._plc_scan_range.value(),
                 "pulse_ms": self._plc_pulse_ms.value(),
-                "io_map": self.get_plc_io_map(),
             },
             "inference": {
                 "mode": ["continuous", "plc_trigger", "manual"][self._inference_mode.currentIndex()],
@@ -622,67 +582,7 @@ class SettingsPage(QWidget):
     def get_yolo_form(self) -> QWidget:
         return self._yolo_form
 
-    # ---- PLC IO Mapping API ----
-
-    def _set_io_combo(self, key: str, addr) -> None:
-        """Set combo address value (internal). Non-int → fallback 0."""
-        combo = self._io_combos.get(key)
-        if combo is None:
-            return
-        try:
-            combo.setCurrentText(str(int(addr)))
-        except (ValueError, TypeError):
-            combo.setCurrentText("0")
-
-    def _parse_io_addr(self, combo) -> int:
-        """Parse combo text ke int alamat (aman: non-numeric → 0)."""
-        text = combo.currentText().strip()
-        try:
-            return max(0, int(text))
-        except ValueError:
-            return 0
-
-    def get_plc_io_map(self) -> dict:
-        """Read current IO mapping from UI (untuk disimpan ke config)."""
-        return {
-            "outputs": {
-                "result_ok": self._parse_io_addr(self._io_combos["result_ok"]),
-                "result_ng": self._parse_io_addr(self._io_combos["result_ng"]),
-                "part_ready": self._parse_io_addr(self._io_combos["part_ready"]),
-                "busy": self._parse_io_addr(self._io_combos["busy"]),
-            },
-            "inputs": {
-                "trigger": self._parse_io_addr(self._io_combos["trigger"]),
-                "reset_result": self._parse_io_addr(self._io_combos["reset_result"]),
-                "switch_program": self._parse_io_addr(self._io_combos["switch_program"]),
-            },
-            "program_register": self._plc_program_register.value(),
-        }
-
-    def get_plc_pulse_ms(self) -> int:
-        return self._plc_pulse_ms.value()
-
-    def get_scan_button(self) -> QPushButton:
-        return self._scan_btn
-
-    def get_detect_button(self) -> QPushButton:
-        return self._detect_btn
-
-    def set_scan_coil_options(self, valid_coils: list) -> None:
-        """Tambahkan alamat coil valid hasil scan ke semua combo (tanpa
-        mengubah pilihan yang sedang aktif)."""
-        for combo in self._io_combos.values():
-            current = combo.currentText()
-            for addr in valid_coils:
-                s = str(int(addr))
-                if combo.findText(s) < 0:
-                    combo.addItem(s)
-            idx = combo.findText(current)
-            if idx >= 0:
-                combo.setCurrentIndex(idx)
-
-    def set_scan_result_label(self, text: str) -> None:
-        self._scan_result_label.setText(text)
+    # ---- PLC status (koneksi) — mapping coil ada di tab I/O Settings ----
 
     def set_plc_status(self, connected: bool, detail: str = "") -> None:
         """Update PLC connection status indicator di group PLC."""
@@ -721,9 +621,6 @@ class SettingsPage(QWidget):
     def get_inference_mode(self) -> str:
         """Get selected inference mode (continuous|plc_trigger|manual)."""
         return ["continuous", "plc_trigger", "manual"][self._inference_mode.currentIndex()]
-
-    def get_program_register_spin(self) -> QSpinBox:
-        return self._plc_program_register
 
     def set_runtime_status(self, has_openvino: bool, has_torch: bool,
                            active_runtime: str = "",
@@ -819,6 +716,8 @@ class SettingsPage(QWidget):
         self._cam_height.setValue(self._config.get("camera.resolution_height", 1080))
         self._cam_fps.setValue(self._config.get("camera.fps_target", 30))
         self._cam_exposure.setValue(self._config.get("camera.exposure", -1))
+        self._cam_gain.setValue(self._config.get("camera.gain", -1))
+        self._cam_wb.setValue(self._config.get("camera.white_balance", -1))
 
         # ROI
         self._roi_enabled.setChecked(self._config.get("roi.enabled", True))
@@ -843,25 +742,10 @@ class SettingsPage(QWidget):
         if idx >= 0:
             self._plc_parity.setCurrentIndex(idx)
 
-        # PLC IO Mapping
+        # PLC IO Mapping — TIDAK di sini lagi (tab I/O Settings yang pegang).
+        # io_map hanya bisa diubah lewat halaman I/O Settings → Apply,
+        # supaya tidak ada dua sumber config plc.io_map.
         self._plc_pulse_ms.setValue(self._config.get("plc.pulse_ms", 300))
-        io_map = self._config.get("plc.io_map", {})
-        if not isinstance(io_map, dict):
-            io_map = {}
-        outputs = io_map.get("outputs", {})
-        inputs = io_map.get("inputs", {})
-        if not isinstance(outputs, dict):
-            outputs = {}
-        if not isinstance(inputs, dict):
-            inputs = {}
-        self._set_io_combo("result_ok", outputs.get("result_ok", 1))
-        self._set_io_combo("result_ng", outputs.get("result_ng", 2))
-        self._set_io_combo("part_ready", outputs.get("part_ready", 3))
-        self._set_io_combo("busy", outputs.get("busy", 4))
-        self._set_io_combo("trigger", inputs.get("trigger", 0))
-        self._set_io_combo("reset_result", inputs.get("reset_result", 5))
-        self._set_io_combo("switch_program", inputs.get("switch_program", 6))
-        self._plc_program_register.setValue(io_map.get("program_register", 10))
 
         # PLC Slave ID + Scan range
         self._plc_slave_id.setValue(self._config.get("plc.modbus_slave_id", 1))

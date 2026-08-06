@@ -59,6 +59,9 @@ QTableWidget { background-color: #0F172A; alternate-background-color: #16213A;
 class IOSettingsPage(QWidget):
     # (io_map, io_mode) — dipancarkan saat tombol Apply; main_window yang simpan.
     apply_requested = Signal(dict, dict)
+    # Tombol scan coil — main_window yang menjalankan thread + isi hasil.
+    scan_requested = Signal()
+    detect_requested = Signal()
 
     def __init__(self, translator, config, parent=None):
         super().__init__(parent)
@@ -174,6 +177,26 @@ class IOSettingsPage(QWidget):
         gi.setColumnStretch(0, 1)
         layout.addWidget(grp_in)
 
+        # ---- Scan Coils (pindah dari Settings → PLC) ----
+        grp_scan = QGroupBox("Scan Coils (cari alamat coil yang valid/aktif)")
+        gs = QVBoxLayout(grp_scan)
+        row_scan = QHBoxLayout()
+        self._btn_scan = QPushButton("Scan Coils...")
+        self._btn_scan.setToolTip("Probe alamat coil 0..scan_range — cari coil yang merespon")
+        self._btn_scan.clicked.connect(self.scan_requested)
+        row_scan.addWidget(self._btn_scan)
+        self._btn_detect = QPushButton("Deteksi Aktif")
+        self._btn_detect.setToolTip("Cari coil yang sedang ON — tekan tombol fisik di PLC saat scan")
+        self._btn_detect.clicked.connect(self.detect_requested)
+        row_scan.addWidget(self._btn_detect)
+        row_scan.addStretch()
+        gs.addLayout(row_scan)
+        self._scan_result_label = QLabel("")
+        self._scan_result_label.setWordWrap(True)
+        self._scan_result_label.setStyleSheet("color: #94A3B8;")
+        gs.addWidget(self._scan_result_label)
+        layout.addWidget(grp_scan)
+
         # ---- I/O Monitor ----
         grp_mon = QGroupBox("I/O Monitor (status coil real-time — 1 detik)")
         gmon = QGridLayout(grp_mon)
@@ -259,6 +282,17 @@ class IOSettingsPage(QWidget):
 
     def _on_apply(self):
         self.apply_requested.emit(self.get_io_map(), self.get_io_mode())
+
+    # ------------------------------------------------------------ scan
+
+    def set_scan_result(self, text: str) -> None:
+        """Tampilkan hasil Scan Coils / Deteksi Aktif di label group scan."""
+        self._scan_result_label.setText(text)
+
+    def set_scan_busy(self, active: bool) -> None:
+        """Enable/disable tombol scan saat thread worker sedang jalan."""
+        self._btn_scan.setEnabled(not active)
+        self._btn_detect.setEnabled(not active)
 
     # ------------------------------------------------------------ monitor
 

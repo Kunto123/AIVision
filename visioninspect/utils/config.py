@@ -51,7 +51,16 @@ class Config:
             "resolution_width": 1920,
             "resolution_height": 1080,
             "fps_target": 30,
-            "exposure": -1,  # -1 = auto
+            "exposure": -1,  # -1 = auto; >=0 = kunci nilai tetap (F2)
+            "gain": -1,  # -1 = auto; >=0 = kunci gain (F2)
+            "white_balance": -1,  # -1 = auto; >=0 = kunci Kelvin (F2)
+        },
+
+        # Rollout / deploy bertahap
+        "rollout": {
+            "shadow_mode": False,
+            # True: NG hanya ditampilkan & dicatat, coil result_ng TIDAK
+            # ditulis — lini tidak berhenti sebelum akurasi terbukti.
         },
 
         # ROI

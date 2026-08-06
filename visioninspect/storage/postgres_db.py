@@ -21,9 +21,18 @@ Tabel skema:
     id              BIGINT PK
     partname        TEXT
     datecheckmc     TIMESTAMPTZ
-    mpcheck         TEXT (OK/NG)
-    data1           DOUBLE PRECISION (part ready confidence)
-    data2           DOUBLE PRECISION (anomaly score)
+    mpcheck         TEXT (OK/NG verdict)
+    data1           DOUBLE PRECISION (part ready difference)
+    data2           DOUBLE PRECISION (anomaly/similarity score)
+    line            TEXT (nama lini produksi)
+    operator        TEXT (nama akun operator yang login)
+    image_path      TEXT (path frame tersimpan)
+    threshold       DOUBLE PRECISION (threshold aktif saat inspeksi)
+    latency_ms      DOUBLE PRECISION
+    local_id        BIGINT (id entry SQLite — untuk propagasi koreksi C0)
+    corrected       BOOLEAN DEFAULT FALSE
+    correct_judgement TEXT
+    corrected_at    TIMESTAMPTZ
 """
 
 import hashlib
@@ -31,6 +40,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from visioninspect.storage import secret_store
 from visioninspect.utils.logging_setup import get_logger
 
 logger = get_logger("app")
@@ -102,6 +112,9 @@ class PostgresDB:
         """
         self._cfg = config
         self._enabled = config.get("enabled", False) and HAS_PSYCOPG2
+        # C4: password non-plaintext — decrypt token "enc:v1:" (DPAPI/Fernet).
+        # Token plaintext lama di-pass-through (migrasi saat save settings).
+        self._password = secret_store.decrypt(config.get("password", ""))
 
         if self._enabled:
             logger.info(
@@ -120,8 +133,12 @@ class PostgresDB:
 
     # ── Connection ───────────────────────────────────────────────────
 
-    def _connect(self):
-        """Create a new connection. Raises PostgresConnectionError on failure."""
+    def _connect(self, timeout: Optional[float] = None):
+        """Create a new connection. Raises PostgresConnectionError on failure.
+
+        Args:
+            timeout: connect_timeout override (detik). None = pakai config.
+        """
         if not self._enabled:
             raise PostgresConnectionError("PostgreSQL not enabled")
         try:
@@ -130,9 +147,10 @@ class PostgresDB:
                 port=self._cfg.get("port", 5432),
                 dbname=self._cfg.get("dbname", "visioninspect"),
                 user=self._cfg.get("user", "postgres"),
-                password=self._cfg.get("password", ""),
+                password=self._password,
                 sslmode=self._cfg.get("sslmode", "prefer"),
-                connect_timeout=self._cfg.get("connect_timeout", 10),
+                connect_timeout=(timeout if timeout is not None
+                                 else self._cfg.get("connect_timeout", 10)),
             )
             conn.autocommit = False
             return conn
@@ -233,8 +251,44 @@ class PostgresDB:
                     mpcheck TEXT,
                     data1 DOUBLE PRECISION,
                     data2 DOUBLE PRECISION,
-                    line TEXT
+                    line TEXT,
+                    operator TEXT,
+                    image_path TEXT,
+                    threshold DOUBLE PRECISION,
+                    latency_ms DOUBLE PRECISION,
+                    local_id BIGINT,
+                    corrected BOOLEAN NOT NULL DEFAULT FALSE,
+                    correct_judgement TEXT,
+                    corrected_at TIMESTAMPTZ
                 )""")
+
+            # C1: migrasi tabel produksi lama (CREATE IF NOT EXISTS tidak
+            # menambah kolom) — ADD COLUMN IF NOT EXISTS = no-op bila sudah ada.
+            for col, coltype in (
+                ("line", "TEXT"),
+                ("operator", "TEXT"),
+                ("image_path", "TEXT"),
+                ("threshold", "DOUBLE PRECISION"),
+                ("latency_ms", "DOUBLE PRECISION"),
+                ("local_id", "BIGINT"),
+                ("corrected", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("correct_judgement", "TEXT"),
+                ("corrected_at", "TIMESTAMPTZ"),
+            ):
+                try:
+                    self._execute(
+                        f"ALTER TABLE qc_inspection_push ADD COLUMN IF NOT EXISTS "
+                        f"{col} {coltype}")
+                except PostgresError as e:
+                    logger.warning("Migrasi kolom %s gagal: %s", col, e)
+
+            # C4: kolom must_change_password untuk akun seed (paksa ganti)
+            try:
+                self._execute(
+                    "ALTER TABLE qc_user_accounts ADD COLUMN IF NOT EXISTS "
+                    "must_change_password BOOLEAN NOT NULL DEFAULT FALSE")
+            except PostgresError as e:
+                logger.warning("Migrasi kolom must_change_password gagal: %s", e)
 
             # 2) Verifikasi tabel benar-benar ada
             missing = []
@@ -254,10 +308,12 @@ class PostgresDB:
                 now = _now()
                 self._execute(
                     """INSERT INTO qc_user_accounts
-                       (username, password_hash, role, is_active, created_at, updated_at)
-                       VALUES (%s, %s, 'admin', TRUE, %s, %s)""",
+                       (username, password_hash, role, is_active,
+                        must_change_password, created_at, updated_at)
+                       VALUES (%s, %s, 'admin', TRUE, TRUE, %s, %s)""",
                     ("admin", _hash_password("admin"), now, now))
-                logger.info("Seed admin default (admin/admin) ke qc_user_accounts")
+                logger.info("Seed admin default ke qc_user_accounts "
+                            "(admin/admin — WAJIB ganti password saat login pertama)")
 
             logger.info("PostgreSQL SIAP: tabel qc_user_accounts & "
                         "qc_inspection_push OK")
@@ -283,7 +339,7 @@ class PostgresDB:
         pw_hash = _hash_password(password)
         try:
             user = self._execute(
-                """SELECT id, username, role, is_active, created_at
+                """SELECT id, username, role, is_active, must_change_password, created_at
                    FROM qc_user_accounts
                    WHERE username = %s AND password_hash = %s""",
                 (username, pw_hash),
@@ -436,6 +492,8 @@ class PostgresDB:
         if password is not None:
             fields.append("password_hash = %s")
             values.append(_hash_password(password))
+            # C4: password baru di-set → flag paksa-ganti dimatikan
+            fields.append("must_change_password = FALSE")
         if role is not None:
             fields.append("role = %s")
             values.append(role.lower())
@@ -540,19 +598,28 @@ class PostgresDB:
     # ── Inspection Push ─────────────────────────────────────────────
 
     def push_inspection(self, partname: str, mpcheck: str,
-                        data1: float = 0.0, data2: float = 0.0) -> Optional[int]:
-        """
-        Push inspection result to qc_inspection_push.
+                        data1: float = 0.0, data2: float = 0.0,
+                        operator: str = "", image_path: str = "",
+                        threshold: Optional[float] = None,
+                        latency_ms: Optional[float] = None,
+                        local_id: Optional[int] = None,
+                        line: str = "") -> Optional[int]:
+        """Push inspection result to qc_inspection_push (C1: skema lengkap).
 
         Args:
             partname: Nama part/program/template
-            mpcheck: "OK" or "NG"
-            data1: Part ready confidence (0.0 = not ready, 1.0 = ready)
-                   — dari conf part ready / part check
-            data2: Similarity score — 1.0 = mirip OK, 0.0 = anomali total
+            mpcheck: Verdict "OK" atau "NG" (bukan nama operator)
+            data1: Part-ready difference score (0 = siap, makin besar beda)
+            data2: Anomaly/similarity score (1.0 = mirip OK, 0.0 = anomali)
+            operator: Nama akun operator yang login
+            image_path: Path frame tersimpan (bukti visual untuk audit)
+            threshold: Threshold aktif saat inspeksi
+            latency_ms: Latensi inferensi (ms)
+            local_id: ID entry di SQLite (untuk propagasi koreksi C0)
+            line: Nama lini produksi
 
         Returns:
-            Inserted row ID, or None on failure.
+            Inserted row ID, atau None on failure.
         """
         if not self._enabled:
             return None
@@ -561,10 +628,15 @@ class PostgresDB:
         try:
             row = self._execute(
                 """INSERT INTO qc_inspection_push
-                   (partname, datecheckmc, mpcheck, data1, data2)
-                   VALUES (%s, %s, %s, %s, %s)
+                   (partname, datecheckmc, mpcheck, data1, data2,
+                    line, operator, image_path, threshold, latency_ms, local_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
-                (partname, now, mpcheck, float(data1), float(data2)),
+                (partname, now, mpcheck, float(data1), float(data2),
+                 line or "", operator or "", image_path or "",
+                 float(threshold) if threshold is not None else None,
+                 float(latency_ms) if latency_ms is not None else None,
+                 int(local_id) if local_id is not None else None),
                 fetch_one=True,
             )
             if row:
@@ -576,6 +648,70 @@ class PostgresDB:
         except PostgresError as e:
             logger.warning("Push inspection error: %s", e)
             return None
+
+    # ── Correction Propagation (C0) ────────────────────────────────
+
+    def mark_correction_pg(self, local_id: int, correct_judgement: str) -> bool:
+        """Propagasi koreksi operator ke qc_inspection_push (C0).
+
+        Mencocokkan via local_id (id entry SQLite). Verdict asli (mpcheck)
+        TIDAK ditimpa — sama seperti SQLite: asli utuh, koreksi di kolom
+        terpisah. Returns True bila UPDATE dieksekusi.
+        """
+        if not self._enabled:
+            return False
+        try:
+            self._execute(
+                """UPDATE qc_inspection_push
+                   SET corrected = TRUE, correct_judgement = %s, corrected_at = %s
+                   WHERE local_id = %s""",
+                (correct_judgement, _now(), int(local_id)),
+            )
+            logger.info("PG correction: local_id=%d -> %s", local_id, correct_judgement)
+            return True
+        except PostgresError as e:
+            logger.warning("PG correction update gagal (local_id=%d): %s", local_id, e)
+            return False
+
+    def rollback_correction_pg(self, local_id: int) -> bool:
+        """Batalkan koreksi di qc_inspection_push (C0)."""
+        if not self._enabled:
+            return False
+        try:
+            self._execute(
+                """UPDATE qc_inspection_push
+                   SET corrected = FALSE, correct_judgement = NULL, corrected_at = NULL
+                   WHERE local_id = %s""",
+                (int(local_id),),
+            )
+            logger.info("PG correction rollback: local_id=%d", local_id)
+            return True
+        except PostgresError as e:
+            logger.warning("PG correction rollback gagal (local_id=%d): %s", local_id, e)
+            return False
+
+    # ── Liveness (C2) ──────────────────────────────────────────────
+
+    def is_alive(self, timeout: float = 2.0) -> bool:
+        """Cek apakah PostgreSQL benar-benar terjangkau (C2).
+
+        ``is_enabled`` hanya membaca flag config — server bisa saja mati.
+        Query ringan SELECT 1 dengan connect_timeout singkat; dipakai untuk
+        login fallback ke SQLite lokal dan indikator sink di DIAGNOSTICS.
+        """
+        if not self._enabled:
+            return False
+        try:
+            conn = self._connect(timeout=timeout)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+                return True
+            finally:
+                conn.close()
+        except Exception:
+            return False
 
     def get_history(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """

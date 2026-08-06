@@ -108,6 +108,16 @@ class Database:
             )
         """)
 
+        # Push outbox (C3 — antrian tahan-restart untuk sink PostgreSQL)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS push_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+
         # Users (authentication, roles, RFID)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -125,6 +135,14 @@ class Database:
         """)
 
         self.conn.commit()
+
+        # C4: migrasi kolom must_change_password (SQLite ADD COLUMN sekali)
+        try:
+            self.conn.execute(
+                "ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # kolom sudah ada
 
         # Seed default admin if no users exist
         cursor.execute("SELECT COUNT(*) FROM users")
@@ -331,14 +349,15 @@ class Database:
         return hashlib.sha256(f"visioninspect_2024_{password}".encode()).hexdigest()
 
     def _seed_default_admin(self):
-        """Create default admin account on first run."""
+        """Create default admin account on first run (C4: wajib ganti password)."""
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         self.conn.execute("""
-            INSERT INTO users (username, password_hash, display_name, role, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO users (username, password_hash, display_name, role,
+                               must_change_password, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 1, ?, ?)
         """, ("admin", self._hash_password("admin"), "Administrator", "admin", now, now))
         self.conn.commit()
-        logger.info("Default admin account created (admin/admin)")
+        logger.info("Default admin account created (admin/admin — WAJIB ganti password saat login pertama)")
 
     def authenticate(self, username: str, password: str) -> Optional[dict]:
         """Verify credentials. Returns user dict or None."""
@@ -376,7 +395,8 @@ class Database:
         return cursor.lastrowid
 
     def update_user(self, user_id: int, display_name: str = None,
-                    password: str = None, role: str = None) -> bool:
+                    password: str = None, role: str = None,
+                    must_change_password: bool = None) -> bool:
         """Update user fields. Returns True if changed."""
         fields = []
         values = []
@@ -386,9 +406,14 @@ class Database:
         if password is not None:
             fields.append("password_hash = ?")
             values.append(self._hash_password(password))
+            # Password baru di-set → flag paksa-ganti dimatikan (C4)
+            fields.append("must_change_password = 0")
         if role is not None:
             fields.append("role = ?")
             values.append(role)
+        if must_change_password is not None:
+            fields.append("must_change_password = ?")
+            values.append(1 if must_change_password else 0)
         if not fields:
             return False
         fields.append("updated_at = ?")
@@ -437,6 +462,80 @@ class Database:
         self.conn.commit()
         logger.info("User deleted: id=%d", user_id)
         return True
+
+    # ---- Push Outbox (C3 — antrian tahan-restart) ----
+
+    def add_outbox(self, entry: dict) -> int:
+        """Simpan satu entry push ke antrian outbox SQLite.
+
+        Entry adalah dict kwargs untuk ``PostgresDB.push_inspection``.
+        Tahan-restart: bila aplikasi mati sebelum sink selesai, entry tetap
+        ada dan di-flush saat startup berikutnya.
+        """
+        self.conn.execute("""
+            INSERT INTO push_outbox (entry_json, created_at)
+            VALUES (?, ?)
+        """, (json.dumps(entry), time.strftime("%Y-%m-%d %H:%M:%S")))
+        self.conn.commit()
+        return self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def get_outbox(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Ambil batch outbox (tertua dulu). Returns [{id, entry, attempts}, ...]."""
+        rows = self.conn.execute("""
+            SELECT id, entry_json, attempts FROM push_outbox
+            ORDER BY id LIMIT ?
+        """, (limit,)).fetchall()
+        result = []
+        for r in rows:
+            try:
+                entry = json.loads(r["entry_json"])
+            except (json.JSONDecodeError, TypeError, ValueError):
+                entry = {}
+            result.append({"id": r["id"], "entry": entry, "attempts": r["attempts"]})
+        return result
+
+    def delete_outbox(self, ids: List[int]) -> None:
+        """Hapus entry outbox yang sudah berhasil di-push (C3: nol duplikat)."""
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        self.conn.execute(
+            f"DELETE FROM push_outbox WHERE id IN ({placeholders})", ids)
+        self.conn.commit()
+
+    def bump_outbox_attempts(self, ids: List[int]) -> None:
+        """Naikkan hitungan percobaan entry yang gagal (retry tick berikutnya)."""
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        self.conn.execute(
+            f"UPDATE push_outbox SET attempts = attempts + 1 "
+            f"WHERE id IN ({placeholders})", ids)
+        self.conn.commit()
+
+    def count_outbox(self) -> int:
+        """Jumlah entry outbox yang belum ter-sink."""
+        return self.conn.execute(
+            "SELECT COUNT(*) AS c FROM push_outbox").fetchone()["c"]
+
+    def drop_oldest_outbox(self, n: int) -> None:
+        """Buang n entry tertua dari outbox (antrian bounded, C3).
+
+        Dilakukan hanya bila antrian membengkak (mis. PG mati berhari-hari);
+        entry terbaru dipertahankan. Baris yang dibuang dicatat ke audit log.
+        """
+        if n <= 0:
+            return
+        rows = self.conn.execute(
+            "SELECT id FROM push_outbox ORDER BY id LIMIT ?", (n,)).fetchall()
+        ids = [r["id"] for r in rows]
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        self.conn.execute(
+            f"DELETE FROM push_outbox WHERE id IN ({placeholders})", ids)
+        self.conn.commit()
+        logger.warning("Outbox bounded: %d entry tertua dibuang (antrian penuh)", n)
 
     # ---- Maintenance ----
 

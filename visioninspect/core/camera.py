@@ -42,6 +42,8 @@ class CameraConfig:
         height: int = 1080,
         fps_target: int = 30,
         exposure: int = -1,  # -1 = auto
+        gain: float = -1.0,  # -1 = auto (F2: kunci gain supaya kecerahan stabil)
+        white_balance: int = -1,  # -1 = auto, atau suhu Kelvin (F2)
         backend: Optional[int] = None,
     ):
         self.device_index = device_index
@@ -49,6 +51,8 @@ class CameraConfig:
         self.height = height
         self.fps_target = fps_target
         self.exposure = exposure
+        self.gain = gain
+        self.white_balance = white_balance
         # Auto-detect Windows backend if not specified
         if backend is None:
             import platform
@@ -71,6 +75,19 @@ class CameraConfig:
                 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # auto
             except AttributeError:
                 pass  # Some OpenCV builds don't have this constant
+        # F2: kunci gain & white-balance (>= 0 = nilai tetap, bukan auto).
+        # Auto adalah penyebab umum false-NG: cahaya berubah sedikit →
+        # histogram bergeser → model memberi NG palsu di kondisi lain.
+        if self.gain is not None and self.gain >= 0:
+            try:
+                cap.set(cv2.CAP_PROP_GAIN, self.gain)
+            except Exception:
+                pass  # backend tidak mendukung CAP_PROP_GAIN
+        if self.white_balance is not None and self.white_balance >= 0:
+            try:
+                cap.set(cv2.CAP_PROP_WB_TEMPERATURE, self.white_balance)
+            except Exception:
+                pass  # backend tidak mendukung CAP_PROP_WB_TEMPERATURE
 
 
 class CameraDevice:

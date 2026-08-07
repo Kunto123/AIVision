@@ -56,6 +56,7 @@ from visioninspect.gui.pages.io_settings_page import IOSettingsPage
 from visioninspect.gui.pages.diagnostics_page import DiagnosticsPage
 from visioninspect.gui.pages.account_page import AccountPage
 from visioninspect.gui.dialogs.login_dialog import LoginDialog
+from visioninspect.storage import secret_store
 
 logger = get_logger("app")
 

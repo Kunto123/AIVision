@@ -57,12 +57,17 @@ class CameraWorker(QObject):
         kamera (semua auto). Param ini diteruskan ke CameraConfig saat
         start; dipanggil ulang setelah save settings (restart kamera).
         """
-        self._camera_params = {
-            k: cfg.get(k)
-            for k in ("resolution_width", "resolution_height",
-                      "fps_target", "exposure", "gain", "white_balance")
-            if cfg.get(k) is not None
-        }
+        self._camera_params = {}
+        # Key config kamera: resolution_width/resolution_height — petakan ke
+        # param CameraConfig (width/height). Key lain langsung cocok.
+        if cfg.get("resolution_width") is not None:
+            self._camera_params["width"] = int(cfg["resolution_width"])
+        if cfg.get("resolution_height") is not None:
+            self._camera_params["height"] = int(cfg["resolution_height"])
+        for k in ("fps_target", "exposure", "gain", "white_balance"):
+            v = cfg.get(k)
+            if v is not None:
+                self._camera_params[k] = v
         if "fps_target" in self._camera_params:
             self._target_fps = int(self._camera_params["fps_target"])
 

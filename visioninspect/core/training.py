@@ -750,9 +750,16 @@ class TrainingPipeline:
 
         # yolo_meta.json — penanda mode YOLO untuk InferenceEngine (wajib
         # berada di folder openvino/ agar ikut tercopy ke template).
+        # PENTING: urutan classes DIAMBIL dari model hasil training
+        # (best_model.names), bukan hardcode. Ultralytics mengurutkan nama
+        # folder dataset secara alfabetis (NG sebelum OK → index 0 = NG,
+        # index 1 = OK). Hardcode ["OK","NG"] di sini dulu membuat
+        # klasifikasi terbalik: gambar NG dapat prob[0] tinggi → dijudge OK.
+        yolo_names = [str(best_model.names[i])
+                      for i in sorted(best_model.names)]
         with open(export_dir / "yolo_meta.json", "w") as f:
             json.dump({
-                "names": ["OK", "NG"],
+                "names": yolo_names,
                 "task": "classify",
                 "imgsz": imgsz,
             }, f, indent=2)
@@ -811,6 +818,21 @@ class TrainingPipeline:
             cm = core.compile_model(core.read_model(str(xml_path)), "CPU")
             size = self._config.yolo_imgsz
 
+            # Urutan kelas dibaca dari yolo_meta.json di samping model.xml
+            # (sama seperti runtime InferenceEngine). Index kelas "OK" TIDAK
+            # selalu 0 — ultralytics mengurutkan nama folder alfabetis
+            # (NG sebelum OK → index 0 = NG). Hardcode out[0] di sini dulu
+            # membuat histogram OK↔NG tertukar.
+            names = ["NG", "OK"]
+            try:
+                meta = json.loads(
+                    (xml_path.parent / "yolo_meta.json").read_text(
+                        encoding="utf-8"))
+                names = [str(n) for n in (meta.get("names") or names)]
+            except Exception:
+                pass
+            ok_idx = names.index("OK") if "OK" in names else 0
+
             def _predict(image_paths):
                 scores = []
                 for p in image_paths:
@@ -835,8 +857,8 @@ class TrainingPipeline:
                                 float(out.sum()), 1.0, atol=1e-2):
                             e = np.exp(out - out.max())
                             out = e / e.sum()
-                        # asumsi kelas 0 = OK (yolo_meta names: OK, NG)
-                        scores.append(max(0.0, min(1.0, float(out[0]))))
+                        # prob kelas "OK" sesuai urutan yolo_meta.json
+                        scores.append(max(0.0, min(1.0, float(out[ok_idx]))))
                     else:
                         scores.append(max(0.0, min(1.0, float(out[0]))))
                 return scores

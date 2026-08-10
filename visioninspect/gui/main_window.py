@@ -2529,7 +2529,7 @@ class MainWindow(QMainWindow):
             total, w, h, fps = probe.open(path)
         except Exception as e:
             QMessageBox.warning(self, "Uji Video", str(e))
-            probe.deleteLater()
+            self._release_probe(probe)
             return
 
         # Resolusi: ROI digambar di koordinat asli frame → harus match referensi
@@ -2543,7 +2543,7 @@ class MainWindow(QMainWindow):
                 "sama dengan pengambilan dataset.\n\nTetap lanjut?",
                 QMessageBox.Yes | QMessageBox.No)
             if ret != QMessageBox.Yes:
-                probe.deleteLater()
+                self._release_probe(probe)
                 return
 
         # Part-check belum lengkap → semua frame akan di-skip. Tawarkan bypass
@@ -2559,7 +2559,7 @@ class MainWindow(QMainWindow):
                 "Lewati part-check untuk sesi uji ini saja?",
                 QMessageBox.Yes | QMessageBox.No)
             skip_pc = (ret == QMessageBox.Yes)
-        probe.deleteLater()
+        self._release_probe(probe)
 
         # Stop kamera asli — jangan ada dua sumber frame sekaligus
         if self._camera_worker and self._camera_worker.is_running:
@@ -2639,6 +2639,21 @@ class MainWindow(QMainWindow):
         # benar-benar diproses (tombol Uji Video ada di tab TEACH).
         self._tabs.setCurrentIndex(0)
         self._replay_worker.start()
+
+    @staticmethod
+    def _release_probe(probe) -> None:
+        """Tutup VideoCapture milik worker probe.
+
+        ``deleteLater()`` saja TIDAK melepas handle file 1080p — capture
+        tetap terbuka sampai objek benar-benar dikumpulkan GC. Log
+        menunjukkan file video dibuka dua kali (probe + worker asli), jadi
+        yang probe harus ditutup eksplisit.
+        """
+        try:
+            probe.stop()
+        except Exception:
+            pass
+        probe.deleteLater()
 
     def _on_replay_frame_raw(self, frame):
         """Slot frame replay → jalur infer live yang sama persis (Tugas 3:
@@ -3952,12 +3967,19 @@ class MainWindow(QMainWindow):
         elif index == 6:
             self._io_page.refresh_monitor_connection()
 
-        # Tugas 2: polling kamera hanya saat ada konsumen frame (RUN/TEACH
-        # atau replay). Tab lain → kamera tetap terbuka tapi tidak membaca
-        # frame — kembali ke RUN langsung jalan tanpa restart.
+        # Tugas 2: polling kamera hanya saat ada konsumen frame (RUN/TEACH).
+        # KOREKSI: saat replay, sumber frame adalah file video — kamera
+        # SUDAH di-stop di _start_replay. Kondisi lama ("... or
+        # _replay_test_mode") justru menyalakan kembali timer 30 Hz di atas
+        # kamera yang sudah tertutup (log: "Camera polling ON" tepat setelah
+        # replay mulai) — 30 tick/detik sia-sia yang merebut CPU dari
+        # inference. Polling juga tidak ada gunanya kalau kamera tidak
+        # sedang berjalan.
         if self._camera_worker:
             self._camera_worker.set_polling(
-                index in (0, 1) or self._replay_test_mode)
+                index in (0, 1)
+                and not self._replay_test_mode
+                and self._camera_worker.is_running)
 
     def _show_about(self):
         QMessageBox.about(

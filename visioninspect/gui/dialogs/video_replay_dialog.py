@@ -43,6 +43,9 @@ class VideoReplayDialog(QDialog):
         self._last_ng_len = -1
         self._proc_start = None
         self._proc_start_idx = 0
+        self._proc_fps = 0.0     # laju maju video TERUKUR (frame/detik)
+        self._proc_step = 1      # nilai N saat pengukuran itu diambil
+        self._last_idx = 0       # posisi terakhir — untuk hitung sisa waktu
 
         self.setWindowTitle("Uji Model via Video — Replay")
         self.setMinimumWidth(460)
@@ -99,15 +102,13 @@ class VideoReplayDialog(QDialog):
         # berlaku — kalau berlaku, video 30 dtk hanya terperiksa ±30 frame
         # dari 900 (3%) dan kejadian NG < 1 dtk bisa terlewat total. Uji
         # offline tidak butuh real-time; yang dibutuhkan cakupan.
-        step_box = QGroupBox("Cakupan uji")
-        step_layout = QVBoxLayout(step_box)
         step_row = QHBoxLayout()
         step_row.addWidget(QLabel("Periksa tiap"))
         self._step_spin = QSpinBox()
-        self._step_spin.setRange(1, 100)
+        self._step_spin.setRange(1, 200)
         self._step_spin.setValue(1)
         self._step_spin.setSuffix(" frame")
-        self._step_spin.setFixedWidth(120)
+        self._step_spin.setFixedWidth(110)
         self._step_spin.setToolTip(
             "1 = semua frame diperiksa (cakupan penuh, paling lambat).\n"
             "N > 1 = periksa 1 dari tiap N frame; frame yang dilewati tidak\n"
@@ -116,13 +117,26 @@ class VideoReplayDialog(QDialog):
             "Kejadian NG yang lebih pendek dari N frame bisa TERLEWAT.")
         self._step_spin.valueChanged.connect(self._on_step_changed)
         step_row.addWidget(self._step_spin)
+        # Preset: dua kebutuhan berbeda, jangan dipaksa satu angka.
+        self._btn_full = QPushButton("Teliti")
+        self._btn_full.setToolTip(
+            "Periksa SEMUA frame (N=1). Cakupan penuh — untuk validasi model "
+            "sebelum deploy. Lambat: jalankan lalu tinggalkan.")
+        self._btn_full.clicked.connect(lambda: self._step_spin.setValue(1))
+        self._btn_smooth = QPushButton("Pratinjau lancar")
+        self._btn_smooth.setToolTip(
+            "Pilih N otomatis dari kecepatan proses yang TERUKUR sehingga "
+            "video berjalan ±sekecepatan aslinya. Untuk mengecek posisi ROI "
+            "/ part-check, bukan untuk menilai model.")
+        self._btn_smooth.clicked.connect(self._on_smooth_clicked)
+        step_row.addWidget(self._btn_full)
+        step_row.addWidget(self._btn_smooth)
         step_row.addStretch()
-        step_layout.addLayout(step_row)
+        root.addLayout(step_row)
         self._lbl_step_note = QLabel()
         self._lbl_step_note.setWordWrap(True)
         self._lbl_step_note.setStyleSheet("color: #6B7280; font-size: 11px;")
-        step_layout.addWidget(self._lbl_step_note)
-        root.addWidget(step_box)
+        root.addWidget(self._lbl_step_note)
         self._update_step_note()
 
         # Ringkasan live
@@ -189,6 +203,7 @@ class VideoReplayDialog(QDialog):
         if self._finished:
             return
         self._total = max(0, int(total))
+        self._last_idx = int(idx)
         self._lbl_progress.setText(f"Frame {idx + 1} / {self._total}")
         if self._slider.maximum() != max(1, self._total - 1):
             self._slider.setRange(0, max(1, self._total - 1))
@@ -206,12 +221,15 @@ class VideoReplayDialog(QDialog):
             dt = now - self._proc_start
             if dt >= 1.0:
                 proc_fps = (idx - self._proc_start_idx) / dt
+                self._proc_fps = proc_fps
+                self._proc_step = max(1, self._step_spin.value())
                 self._lbl_speed.setText(
                     f"{proc_fps:.1f} fps (video asli "
                     f"{self._video_fps:.0f} fps)" if self._video_fps > 0
                     else f"{proc_fps:.1f} fps")
                 self._proc_start = now
                 self._proc_start_idx = idx
+                self._update_step_note()   # segarkan estimasi sisa waktu
 
     def update_stats(self, stats: dict):
         if self._finished:
@@ -250,6 +268,8 @@ class VideoReplayDialog(QDialog):
         self._play_btn.setEnabled(False)
         self._slider.setEnabled(False)
         self._step_spin.setEnabled(False)
+        self._btn_full.setEnabled(False)
+        self._btn_smooth.setEnabled(False)
         self._stop_btn.setText("Tutup")
 
     # ---- Handlers ----
@@ -285,14 +305,55 @@ class VideoReplayDialog(QDialog):
         if not self._finished:
             self.frame_step_changed.emit(int(value))
 
+    def _on_smooth_clicked(self):
+        """Hitung N agar video berjalan ±sekecepatan aslinya.
+
+        Memakai kecepatan proses TERUKUR, bukan tebakan: laju maju video =
+        (frame diperiksa/detik) × N. Supaya = video_fps, N harus dikalikan
+        video_fps/laju_sekarang. Sebelum ada pengukuran, pakai perkiraan
+        konservatif 1 pemeriksaan/detik.
+        """
+        if self._proc_fps > 0 and self._video_fps > 0:
+            n = round(self._proc_step * self._video_fps / self._proc_fps)
+        elif self._video_fps > 0:
+            n = round(self._video_fps)      # asumsi ±1 pemeriksaan/detik
+        else:
+            n = 20
+        self._step_spin.setValue(max(1, min(self._step_spin.maximum(), int(n))))
+
+    def _eta_text(self, checked: int) -> str:
+        """Perkiraan sisa waktu dari kecepatan TERUKUR. Tanpa ini, lambat
+        tidak bisa dibedakan dari hang — dan itu yang bikin panik."""
+        if self._proc_fps <= 0:
+            return " Estimasi durasi: menghitung…"
+        # Laju pemeriksaan (kali/detik) praktis tetap; laju maju video =
+        # laju_pemeriksaan × N. Jadi saat N diubah, proyeksikan ulang dari
+        # pengukuran terakhir — kalau tidak, ETA menampilkan angka basi
+        # (mis. tetap "48 menit" padahal baru dipindah ke mode pratinjau).
+        checks_per_sec = self._proc_fps / max(1, self._proc_step)
+        advance_fps = checks_per_sec * max(1, self._step_spin.value())
+        if advance_fps <= 0:
+            return " Estimasi durasi: menghitung…"
+        remaining = max(0, self._total - self._last_idx)
+        secs = remaining / advance_fps
+        if secs >= 3600:
+            dur = f"{secs/3600:.1f} jam"
+        elif secs >= 60:
+            dur = f"{secs/60:.0f} menit"
+        else:
+            dur = f"{secs:.0f} detik"
+        return f" Sisa waktu ≈ {dur}."
+
     def _update_step_note(self):
         """Terjemahkan N ke bahasa yang bisa dinilai operator: berapa frame
-        yang benar-benar diperiksa, dan celah waktu yang tidak terlihat."""
+        yang benar-benar diperiksa, celah waktu yang tidak terlihat, dan
+        berapa lama lagi selesai."""
         n = self._step_spin.value()
         checked = self._total // n if self._total else 0
+        eta = self._eta_text(checked)
         if n == 1:
             self._lbl_step_note.setText(
-                f"Cakupan penuh — semua {self._total} frame diperiksa.")
+                f"Cakupan penuh — semua {self._total} frame diperiksa.{eta}")
             return
         pct = (checked / self._total * 100.0) if self._total else 0.0
         gap = (n / self._video_fps * 1000.0) if self._video_fps > 0 else 0.0
@@ -300,7 +361,7 @@ class VideoReplayDialog(QDialog):
                    f"lebih pendek dari itu bisa terlewat." if gap else "")
         self._lbl_step_note.setText(
             f"⚠ {checked} dari {self._total} frame diperiksa ({pct:.0f}%)."
-            f"{gap_txt}")
+            f"{gap_txt}{eta}")
 
     def _open_export_dir(self):
         try:

@@ -15,6 +15,7 @@ import numpy as np
 from lightning.pytorch.callbacks import EarlyStopping
 
 from visioninspect.utils.logging_setup import get_logger
+from visioninspect.utils.config import DEFAULT_DATA_DIR
 from visioninspect.core.resource_detector import detect_resource, check_training_safety
 
 logger = get_logger("training")
@@ -22,6 +23,50 @@ logger = get_logger("training")
 
 class TrainingError(Exception):
     pass
+
+
+# Tag release GitHub ultralytics/assets — dicoba berurutan sampai sukses.
+_ASSET_TAGS = ("v8.3.0", "v0.0.0")
+
+
+def _download_yolo_asset(name: str, dest: Path, timeout: float = 180.0) -> None:
+    """Unduh weight pretrained ultralytics dari GitHub releases ke ``dest``.
+
+    - Mencoba beberapa tag release (HTTP 404 → coba tag berikutnya).
+    - File ditulis ke ``<dest>.part`` dulu lalu di-rename (anti file rusak
+      saat proses terputus).
+    - Gagal semua → TrainingError dengan instruksi taruh file manual.
+    """
+    import urllib.error
+    import urllib.request
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    errors: list[str] = []
+    for tag in _ASSET_TAGS:
+        url = ("https://github.com/ultralytics/assets/releases/download/"
+               f"{tag}/{name}")
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "VisionInspect-Trainer/1.0 (ultralytics asset)"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp, \
+                    open(tmp, "wb") as fh:
+                shutil.copyfileobj(resp, fh, length=256 * 1024)
+            if tmp.stat().st_size > 0:
+                tmp.replace(dest)
+                return
+            tmp.unlink(missing_ok=True)
+            errors.append(f"{url} → file kosong")
+        except urllib.error.HTTPError as e:
+            errors.append(f"{url} → HTTP {e.code}")
+            tmp.unlink(missing_ok=True)
+        except Exception as e:  # network / timeout / dll
+            errors.append(f"{url} → {e}")
+            tmp.unlink(missing_ok=True)
+    raise TrainingError(
+        "Gagal mengunduh pretrained YOLO otomatis:\n  " + "\n  ".join(errors)
+        + f"\nPeriksa koneksi internet, atau taruh file '{name}' secara "
+          f"manual di:\n  {dest}")
 
 
 class TrainingConfig:
@@ -504,6 +549,46 @@ class TrainingPipeline:
 
     # ---- YOLO Training (ultralytics, classification OK/NG) ----
 
+    def _resolve_yolo_pretrained(self, pretrained: str) -> Path:
+        """Lokasikan pretrained YOLO; kalau tidak ada → unduh otomatis.
+
+        Aturan:
+        1. ``pretrained`` berisi path (memiliki direktori / absolut) →
+           hanya cek lokasi itu; kalau tidak ada, unduh ke lokasi itu.
+        2. ``pretrained`` berupa nama file saja (mis. ``yolov11l-cls.pt``) →
+           cek (a) working directory, (b) ``<DATA>/pretrained/``. Kalau
+           tidak ada di mana pun → unduh ke ``<DATA>/pretrained/`` (folder
+           dibuat otomatis, dipakai ulang untuk training berikutnya).
+        3. Unduhan gagal → TrainingError berisi instruksi taruh manual.
+        """
+        name = Path(pretrained).name
+        p = Path(pretrained)
+        explicit = p.parent != Path(".") or p.is_absolute()
+        if explicit:
+            candidates = [p]
+            target = p
+        else:
+            pretrained_dir = Path(DEFAULT_DATA_DIR) / "pretrained"
+            candidates = [Path.cwd() / name, pretrained_dir / name]
+            target = pretrained_dir / name
+
+        for c in candidates:
+            try:
+                if c.is_file() and c.stat().st_size > 0:
+                    logger.info("Pretrained YOLO ditemukan: %s", c)
+                    return c
+            except OSError:
+                continue
+
+        logger.info("Pretrained YOLO '%s' tidak ditemukan di %s → "
+                    "mengunduh otomatis ke %s",
+                    name, ", ".join(str(c) for c in candidates), target)
+        self._report(25, f"Pretrained {name} tidak ada → mengunduh...")
+        _download_yolo_asset(name, target)
+        logger.info("Pretrained YOLO siap: %s (%.1f MB)",
+                    target, target.stat().st_size / 1e6)
+        return target
+
     def _train_yolo(self, ok_images: list, ng_images: list,
                     ok_dir: Path, ng_dir: Optional[Path],
                     output_dir: Path) -> dict:
@@ -591,13 +676,16 @@ class TrainingPipeline:
                     self._config.yolo_pretrained, imgsz, epochs,
                     batch, device, patience, ds_root)
 
-        self._report(25, f"Memuat pretrained {self._config.yolo_pretrained}...")
+        # Cek & unduh pretrained (ada → pakai; tidak ada → auto-download)
+        pretrained_path = self._resolve_yolo_pretrained(
+            self._config.yolo_pretrained)
+        self._report(25, f"Memuat pretrained {pretrained_path.name}...")
         try:
-            model = YOLO(self._config.yolo_pretrained)
+            model = YOLO(str(pretrained_path))
         except Exception as e:
             raise TrainingError(
                 f"Gagal memuat pretrained YOLO "
-                f"'{self._config.yolo_pretrained}': {e}") from e
+                f"'{pretrained_path}': {e}") from e
 
         # ── Training ──
         run_dir = output_dir / "runs_yolo"

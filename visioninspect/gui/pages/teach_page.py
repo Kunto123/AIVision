@@ -147,6 +147,14 @@ class TeachPage(QWidget):
             "Uji model terhadap batch foto statis dari disk — sanity check "
             "tanpa kamera live, hasil tidak disimpan ke riwayat inspeksi.")
         capture_row.addWidget(self._test_model_btn)
+
+        self._test_video_btn = QPushButton("Uji Video")
+        self._test_video_btn.setMinimumHeight(38)
+        self._test_video_btn.setToolTip(
+            "Uji model via file video — replay lewat jalur live (part-check, "
+            "ROI, debounce persis seperti kamera). Mode uji: PLC/counter/"
+            "history nonaktif; frame OK/NG diexport untuk koreksi dataset.")
+        capture_row.addWidget(self._test_video_btn)
         left_layout.addLayout(capture_row)
 
         # Import status — baris dengan progress + cancel
@@ -338,6 +346,7 @@ class TeachPage(QWidget):
         self._algo_combo = QComboBox()
         self._algo_combo.addItem("PatchCore", "patchcore")
         self._algo_combo.addItem("EfficientAd", "efficientad")
+        self._algo_combo.addItem("YOLO (Klasifikasi)", "yolo")
         self._algo_combo.currentIndexChanged.connect(self._on_advanced_field_changed)
         self._algo_combo.currentIndexChanged.connect(self._update_algorithm_field_visibility)
         self._adv_form.addRow("Algorithm:", self._algo_combo)
@@ -385,11 +394,22 @@ class TeachPage(QWidget):
         self._patience_spin.setValue(0)
         self._patience_spin.setToolTip(
             "Early Stopping: stop training lebih awal jika tidak ada "
-            "perbaikan selama N epoch. 0 = nonaktif. "
-            "Hanya berlaku untuk EfficientAd."
+            "perbaikan selama N epoch. 0 = otomatis (EfficientAd nonaktif; "
+            "YOLO memakai ±20% epochs). Berlaku untuk EfficientAd & YOLO."
         )
         self._patience_spin.valueChanged.connect(self._on_advanced_field_changed)
         self._adv_form.addRow("Patience:", self._patience_spin)
+
+        # Pretrained YOLO — cuma untuk algorithm="yolo". Classification model
+        # (bukan detection) karena YOLO di sini menilai tiap crop OK/NG,
+        # persis peran Folder anomalib (normal/abnormal). v11 large/x-large
+        # cocok di-train di PC kuat; v8n opsi ringan untuk uji cepat.
+        self._yolo_pretrained_combo = QComboBox()
+        self._yolo_pretrained_combo.addItem("YOLOv11 Large (cls)", "yolov11l-cls.pt")
+        self._yolo_pretrained_combo.addItem("YOLOv11 X-Large (cls)", "yolov11x-cls.pt")
+        self._yolo_pretrained_combo.addItem("YOLOv8 Nano (cls) — uji cepat", "yolov8n-cls.pt")
+        self._yolo_pretrained_combo.currentIndexChanged.connect(self._on_advanced_field_changed)
+        self._adv_form.addRow("YOLO Model:", self._yolo_pretrained_combo)
 
         self._advanced_widget.setVisible(False)
         profile_outer.addWidget(self._advanced_widget)
@@ -846,6 +866,11 @@ class TeachPage(QWidget):
         # kebetulan tersisa di spinbox yang sedang disembunyikan.
         if self._algo_combo.currentData() == "efficientad":
             cfg["max_epochs"] = self._epochs_spin.value()
+        # YOLO juga memakai epochs (ultralytics train) — simpan eksplisit
+        # ke yolo_epochs (bukan max_epochs; itu milik EfficientAd).
+        if self._algo_combo.currentData() == "yolo":
+            cfg["yolo_epochs"] = self._epochs_spin.value()
+            cfg["yolo_pretrained"] = self._yolo_pretrained_combo.currentData()
         # Patience juga cuma untuk EfficientAd
         cfg["patience"] = self._patience_spin.value()
         return cfg
@@ -856,7 +881,7 @@ class TeachPage(QWidget):
         # sebelum semua field selesai di-load).
         _widgets = [self._profile_combo, self._algo_combo,
                     self._backbone_combo, self._coreset_spin, self._epochs_spin,
-                    self._patience_spin]
+                    self._patience_spin, self._yolo_pretrained_combo]
         for w in _widgets:
             w.blockSignals(True)
         try:
@@ -869,8 +894,12 @@ class TeachPage(QWidget):
             idx = self._backbone_combo.findText(backbone)
             self._backbone_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self._coreset_spin.setValue(coreset)
-            self._epochs_spin.setValue(cfg.get("max_epochs", 100))
+            self._epochs_spin.setValue(cfg.get("yolo_epochs",
+                                               cfg.get("max_epochs", 100)))
             self._patience_spin.setValue(cfg.get("patience", 0))
+            idx = self._yolo_pretrained_combo.findData(
+                cfg.get("yolo_pretrained", "yolov11l-cls.pt"))
+            self._yolo_pretrained_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
             profile = cfg.get("training_profile") or self._infer_profile(
                 algorithm, backbone, coreset)
@@ -927,12 +956,16 @@ class TeachPage(QWidget):
 
     def _update_algorithm_field_visibility(self, *_):
         """Tampilkan cuma field yang benar-benar dipakai algorithm terpilih:
-        Backbone & Coreset Ratio khusus PatchCore, Epochs & Patience khusus EfficientAd."""
-        is_efficientad = self._algo_combo.currentData() == "efficientad"
-        self._adv_form.setRowVisible(self._epochs_spin, is_efficientad)
+        Backbone & Coreset Ratio khusus PatchCore; Epochs khusus EfficientAd
+        & YOLO; YOLO Model khusus YOLO; Patience khusus EfficientAd."""
+        algo = self._algo_combo.currentData()
+        is_efficientad = algo == "efficientad"
+        is_yolo = algo == "yolo"
+        self._adv_form.setRowVisible(self._epochs_spin, is_efficientad or is_yolo)
         self._adv_form.setRowVisible(self._patience_spin, is_efficientad)
-        self._adv_form.setRowVisible(self._backbone_combo, not is_efficientad)
-        self._adv_form.setRowVisible(self._coreset_spin, not is_efficientad)
+        self._adv_form.setRowVisible(self._backbone_combo, not (is_efficientad or is_yolo))
+        self._adv_form.setRowVisible(self._coreset_spin, not (is_efficientad or is_yolo))
+        self._adv_form.setRowVisible(self._yolo_pretrained_combo, is_yolo)
 
     # ---- Augmentasi Data ----
 
@@ -1014,6 +1047,7 @@ class TeachPage(QWidget):
     def get_capture_ng_button(self): return self._capture_ng_btn
     def get_import_button(self): return self._import_btn
     def get_test_model_button(self): return self._test_model_btn
+    def get_test_video_button(self): return self._test_video_btn
     def get_train_button(self): return self._train_btn
     def get_threshold_slider(self): return self._threshold_slider
 

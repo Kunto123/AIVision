@@ -324,6 +324,64 @@ class PostgresDB:
 
     # ── Authentication ──────────────────────────────────────────────
 
+    def sync_users_from_sqlite(self, sqlite_db) -> int:
+        """[DEPRECATED — 2026-08-07] Sinkronkan user SQLite → PG (upsert one-way).
+
+        TIDAK DIPANGGIL LAGI sejak PG dijadikan satu-satunya sumber akun
+        (main_window.py). Method ini menimpa role/password qc_user_accounts
+        dengan isi SQLite tiap startup, sehingga akun yang dibuat/diedit di
+        pgAdmin4 selalu dikembalikan ke state SQLite. Dipertahankan hanya
+        sebagai utilitas migrasi manual bila suatu saat diperlukan.
+
+        C2: SQLite & PG adalah dua auth source terpisah. User (dengan
+        password custom) hidup di SQLite; PG hanya punya seed admin/admin.
+        Begitu PG "hidup" (lihat fix is_alive 2026-08-07), login beralih ke
+        PG dan user SQLite tak ada di sana → login gagal. Pepper hash sama
+        (``visioninspect_2024_``) sehingga password_hash bisa disalin
+        langsung. Dipanggil sekali saat startup setelah ``ensure_ready``.
+
+        Returns jumlah user yang di-upsert (0 bila disabled/gagal).
+        """
+        if not self._enabled:
+            return 0
+        try:
+            users = sqlite_db.list_users_full()
+            if not users:
+                return 0
+            now = _now()
+            n = 0
+            for u in users:
+                # ON CONFLICT (username) butuh UNIQUE constraint — tabel lama
+                # hasil CREATE IF NOT EXISTS bisa tidak punya → pakai
+                # SELECT→INSERT/UPDATE manual (robust terhadap skema apa pun).
+                exists = self._execute(
+                    "SELECT id FROM qc_user_accounts WHERE username = %s",
+                    (u["username"],), fetch_one=True)
+                if exists:
+                    self._execute(
+                        """UPDATE qc_user_accounts
+                           SET password_hash = %s, role = %s,
+                               must_change_password = %s, updated_at = %s
+                           WHERE username = %s""",
+                        (u["password_hash"], u["role"],
+                         bool(u.get("must_change_password", False)),
+                         now, u["username"]))
+                else:
+                    self._execute(
+                        """INSERT INTO qc_user_accounts
+                           (username, password_hash, role, is_active,
+                            must_change_password, created_at, updated_at)
+                           VALUES (%s, %s, %s, TRUE, %s, %s, %s)""",
+                        (u["username"], u["password_hash"], u["role"],
+                         bool(u.get("must_change_password", False)),
+                         now, now))
+                n += 1
+            logger.info("Sinkronisasi user SQLite → PG: %d user", n)
+            return n
+        except Exception as e:
+            logger.warning("Sinkronisasi user ke PG gagal: %s", e)
+            return 0
+
     def authenticate(self, username: str, password: str) -> Optional[dict]:
         """
         Authenticate user against qc_user_accounts.
@@ -692,12 +750,19 @@ class PostgresDB:
 
     # ── Liveness (C2) ──────────────────────────────────────────────
 
-    def is_alive(self, timeout: float = 2.0) -> bool:
+    def is_alive(self, timeout: Optional[float] = None) -> bool:
         """Cek apakah PostgreSQL benar-benar terjangkau (C2).
 
         ``is_enabled`` hanya membaca flag config — server bisa saja mati.
         Query ringan SELECT 1 dengan connect_timeout singkat; dipakai untuk
         login fallback ke SQLite lokal dan indikator sink di DIAGNOSTICS.
+
+        Catatan (fix 2026-08-07): JANGAN panggil dengan timeout kecil
+        (mis. 2.0) di host ``localhost``/Windows — resolve IPv6 ``::1``
+        dulu bisa makan budget, lalu libpq fallback ke 127.0.0.1; kalau
+        timeout habis, is_alive false-negative padahal PG hidup (inisialisasi
+        yang pakai connect_timeout config = 10s tetap sukses). None = pakai
+        config ``connect_timeout`` supaya konsisten dengan jalur init.
         """
         if not self._enabled:
             return False

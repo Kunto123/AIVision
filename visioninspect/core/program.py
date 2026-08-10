@@ -547,7 +547,7 @@ class ProgramManager:
             if model_dir.exists():
                 for fpath in model_dir.rglob("*"):
                     if fpath.is_file():
-                        arcname = f"model/{fpath.relative_to(model_dir)}"
+                        arcname = f"model/{fpath.relative_to(model_dir).as_posix()}"
                         zf.write(str(fpath), arcname)
 
             # Template config (tanpa gambar)
@@ -592,21 +592,28 @@ class ProgramManager:
 
             tmpl_dir = self._get_template_dir(program) / template_id
             model_dir = tmpl_dir / "model"
+            # Pastikan folder template ada sebelum temp dir dibuat di dalamnya
+            tmpl_dir.mkdir(parents=True, exist_ok=True)
 
             import_meta = {}
             restored_config = {}
 
             with zipfile.ZipFile(str(zip_path), "r") as zf:
+                # Normalisasi nama entry zip: export di Windows menyimpan arcname
+                # dengan backslash (model\\openvino\\model.bin), di WSL dengan slash.
+                # Map nama-asli -> nama-ternormalisasi biar zip lintas-OS terbaca.
+                norm_map = {n.replace("\\", "/"): n for n in zf.namelist()}
+
                 # Baca metadata
-                if "export_metadata.json" in zf.namelist():
-                    import_meta = json.loads(zf.read("export_metadata.json"))
+                if "export_metadata.json" in norm_map:
+                    import_meta = json.loads(zf.read(norm_map["export_metadata.json"]))
 
                 # Baca template config
-                if "template_config.json" in zf.namelist():
-                    restored_config = json.loads(zf.read("template_config.json"))
+                if "template_config.json" in norm_map:
+                    restored_config = json.loads(zf.read(norm_map["template_config.json"]))
 
-                # Extract model files
-                model_files = [n for n in zf.namelist() if n.startswith("model/")]
+                # Extract model files (filter pakai nama ternormalisasi)
+                model_files = [n for n in norm_map if n.startswith("model/")]
                 if not model_files:
                     raise ProgramError(
                         "File .zip tidak berisi model (folder 'model/' tidak ditemukan).")
@@ -626,8 +633,11 @@ class ProgramManager:
                             gc.collect()
                             time.sleep(0.5)
 
-                # Extract to temp dir first, then move atomically — avoids partial writes / locking
-                with tempfile.TemporaryDirectory(prefix="vi_import_") as tmpdir:
+                # Extract to temp dir first, then move — avoids partial writes / locking.
+                # Temp dibuat DI DRIVE YANG SAMA dengan target (tmpl_dir): os.rename
+                # tidak bisa lintas drive (WinError 17: C: temp → D: data).
+                with tempfile.TemporaryDirectory(
+                        prefix="vi_import_", dir=str(tmpl_dir)) as tmpdir:
                     tmp_model_dir = Path(tmpdir) / "model"
                     tmp_model_dir.mkdir(parents=True)
 
@@ -638,7 +648,7 @@ class ProgramManager:
                         rel_path = name[len("model/"):]
                         dest = tmp_model_dir / rel_path
                         dest.parent.mkdir(parents=True, exist_ok=True)
-                        with zf.open(name) as src, open(str(dest), "wb") as dst:
+                        with zf.open(norm_map[name]) as src, open(str(dest), "wb") as dst:
                             dst.write(src.read())
 
                     # Ensure target model dir exists
@@ -658,8 +668,10 @@ class ProgramManager:
                                 # Remove existing first (if any)
                                 if dest.exists():
                                     dest.unlink()
-                                # Atomic replace on same volume
-                                src.replace(dest)
+                                # Atomic replace kalau satu volume; shutil.move otomatis
+                                # fallback ke copy+unlink kalau beda volume/fs (EXDEV,
+                                # WinError 17) — mis. WSL /tmp (ext4) → /mnt/d (drvfs).
+                                shutil.move(str(src), str(dest))
                                 break
                             except (PermissionError, OSError) as e:
                                 winerr = getattr(e, "winerror", None)

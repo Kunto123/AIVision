@@ -72,6 +72,12 @@ class InferenceEngine:
         # (multi-ROI: tiap ROI punya skala skor berbeda, perlu ref sendiri).
         self._score_ref: Optional[float] = None
         self._score_ref_per_roi: dict = {}
+        # Mode model: "anomaly" (PatchCore/EfficientAd — skor anomali → similarity)
+        # atau "yolo" (klasifikasi OK/NG per crop — probabilitas kelas).
+        # Terdeteksi otomatis dari yolo_meta.json di samping model.xml.
+        self._algorithm: str = "anomaly"
+        self._yolo_names: list = ["OK", "NG"]   # urutan kelas output model YOLO
+        self._yolo_task: str = "classify"        # classify | detect
         self._use_ov = HAS_OPENVINO
         self._core: Optional[_OV_CORE] = None
 
@@ -171,6 +177,9 @@ class InferenceEngine:
             self._model = None  # clear any OpenVINO model
             self._score_ref = None  # simple model pakai z-score, bukan pred_score
             self._score_ref_per_roi = {}
+            self._algorithm = "anomaly"
+            self._yolo_names = ["OK", "NG"]
+            self._yolo_task = "classify"
 
         logger.info("Simple model loaded: %s (threshold=%.3f, size=%d)",
                      model_dir, threshold, self._input_size)
@@ -207,6 +216,11 @@ class InferenceEngine:
         # samping model.xml. Skor PatchCore mentah tak di [0,1]; score_ref → 0.5.
         score_ref, score_ref_per_roi = self._read_norm(xml_path)
 
+        # Mode YOLO: kalau ada yolo_meta.json di samping model.xml (ditulis
+        # saat training/export YOLO), engine memakai jalur klasifikasi OK/NG
+        # (probabilitas kelas) — bukan skor anomali PatchCore/EfficientAd.
+        algorithm, yolo_names, yolo_task = self._read_yolo_meta(xml_path)
+
         try:
             # Retry compile_model — .bin bisa di-lock OpenVINO/Defender (WinError 32 / Errno 13)
             compiled = None
@@ -235,14 +249,18 @@ class InferenceEngine:
                 self._model_path = model_path
                 self._score_ref = score_ref
                 self._score_ref_per_roi = score_ref_per_roi
+                self._algorithm = algorithm
+                self._yolo_names = yolo_names
+                self._yolo_task = yolo_task
                 if threshold is not None:
                     self._threshold = threshold
                 # Clean old model
                 del old_model
 
-            logger.info("Model loaded successfully: %s (input size: %d, score_ref: %s)",
+            logger.info("Model loaded successfully: %s (input size: %d, score_ref: %s, mode: %s)",
                         xml_path, self._input_size,
-                        f"{score_ref:.4f}" if score_ref else "none")
+                        f"{score_ref:.4f}" if score_ref else "none",
+                        algorithm)
         except Exception as e:
             raise InferenceEngineError(f"Model load failed: {e}") from e
 
@@ -277,6 +295,34 @@ class InferenceEngine:
                     logger.warning("Gagal baca norm.json (%s): %s", norm_path, e)
         return None, {}
 
+    @staticmethod
+    def _read_yolo_meta(xml_path: Path):
+        """Baca yolo_meta.json di samping model.xml → mode inferensi YOLO.
+
+        Returns (algorithm, yolo_names, yolo_task). Tanpa meta file → mode
+        anomaly biasa (PatchCore/EfficientAd). yolo_meta.json ditulis saat
+        training/export YOLO: {"names": ["OK","NG"], "task": "classify"}.
+        """
+        import json
+        candidates = [xml_path.parent / "yolo_meta.json"]
+        if xml_path.parent.name == "openvino_int8":
+            candidates.append(xml_path.parent.parent / "openvino" / "yolo_meta.json")
+        for meta_path in candidates:
+            if meta_path.exists():
+                try:
+                    with open(meta_path) as f:
+                        data = json.load(f)
+                    names = list(data.get("names") or ["OK", "NG"])
+                    task = str(data.get("task", "classify")).lower()
+                    if task not in ("classify", "detect"):
+                        task = "classify"
+                    logger.info("YOLO meta ditemukan: %s (task=%s, classes=%s)",
+                                meta_path, task, names)
+                    return "yolo", names, task
+                except Exception as e:
+                    logger.warning("Gagal baca yolo_meta.json (%s): %s", meta_path, e)
+        return "anomaly", ["OK", "NG"], "classify"
+
     def unload_model(self) -> None:
         """Unload current model (both OpenVINO and simple)."""
         with self._lock:
@@ -287,6 +333,9 @@ class InferenceEngine:
             self._simple_mean = None
             self._simple_std = None
             self._simple_loaded = False
+            self._algorithm = "anomaly"
+            self._yolo_names = ["OK", "NG"]
+            self._yolo_task = "classify"
         logger.info("Model unloaded")
 
     # ---- Inference ----
@@ -332,6 +381,9 @@ class InferenceEngine:
             simple_mean = self._simple_mean
             simple_std = self._simple_std
             simple_loaded = self._simple_loaded
+            algorithm = self._algorithm
+            yolo_names = self._yolo_names
+            yolo_task = self._yolo_task
 
         # Multi-ROI: tiap ROI punya skala skor berbeda → pakai ref khusus ROI
         # ini (by uid) bila ada, jika tidak fallback ke ref global.
@@ -382,6 +434,80 @@ class InferenceEngine:
             except Exception as e:
                 elapsed = (time.perf_counter() - start) * 1000
                 logger.error("Simple inference error: %s", e)
+                # Fail-safe: error → 0% similarity → NG
+                return InferenceResult(
+                    score=0.0, judgement="NG", latency_ms=elapsed,
+                    threshold=threshold, roi_cropped=resized,
+                )
+
+        # ── YOLO mode: klasifikasi OK/NG per crop (probabilitas kelas) ──────
+        # Model YOLO (hasil training/export ultralytics → OpenVINO) output
+        # probabilitas per kelas, bukan anomaly score. Judgement = prob kelas
+        # "OK" (atau 1 - prob "NG") >= threshold → OK.
+        if algorithm == "yolo":
+            try:
+                # Preprocess sama dengan jalur anomaly: BGR→RGB, HWC→NCHW, /255.
+                rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                input_tensor = rgb.astype(np.float32) / 255.0
+                input_tensor = np.transpose(input_tensor, (2, 0, 1))  # HWC → CHW
+                input_tensor = np.expand_dims(input_tensor, axis=0)    # CHW → NCHW
+
+                infer_request = model.create_infer_request()
+                infer_request.set_input_tensor(ov.Tensor(input_tensor))
+                infer_request.start_async()
+                infer_request.wait()
+
+                # Output classification: [1, C] logits/probs.
+                # Output detect: [1, 4+C, N] anchors → fallback ambil prob kelas.
+                probs = None
+                for i in range(len(model.outputs)):
+                    data = np.asarray(infer_request.get_output_tensor(i).data)
+                    if data.ndim == 2 and data.shape[0] == 1:
+                        probs = data[0]
+                        break
+                if probs is None:
+                    data = np.asarray(infer_request.get_output_tensor(0).data)
+                    if data.ndim == 3 and data.shape[1] > 4:
+                        cls_rows = data[0, 4:, :]
+                        probs = cls_rows.max(axis=1)
+                    else:
+                        probs = data.reshape(-1)
+
+                # Softmax kalau masih logits (bisa negatif / sum != 1)
+                if probs.shape[0] < 2:
+                    score = float(probs.reshape(-1)[0])
+                else:
+                    if float(probs.min()) < 0 or not np.isclose(
+                            float(probs.sum()), 1.0, atol=1e-2):
+                        e = np.exp(probs - probs.max())
+                        probs = e / e.sum()
+                    names = [str(n).strip() for n in yolo_names]
+                    ok_idx = names.index("OK") if "OK" in names else 0
+                    ng_idx = names.index("NG") if "NG" in names else None
+                    if ok_idx < probs.shape[0]:
+                        score = float(probs[ok_idx])
+                    elif ng_idx is not None and ng_idx < probs.shape[0]:
+                        score = 1.0 - float(probs[ng_idx])
+                    else:
+                        score = float(probs[0])
+                    score = max(0.0, min(1.0, score))
+
+                judgement = "OK" if score >= threshold else "NG"
+                elapsed = (time.perf_counter() - start) * 1000
+
+                if track_latency:
+                    with self._lock:
+                        self._latencies.append(elapsed)
+                        if len(self._latencies) > self._max_latency_samples:
+                            self._latencies.pop(0)
+
+                return InferenceResult(
+                    score=score, judgement=judgement, heatmap=None,
+                    latency_ms=elapsed, threshold=threshold, roi_cropped=resized,
+                )
+            except Exception as e:
+                elapsed = (time.perf_counter() - start) * 1000
+                logger.error("YOLO inference error: %s", e)
                 # Fail-safe: error → 0% similarity → NG
                 return InferenceResult(
                     score=0.0, judgement="NG", latency_ms=elapsed,

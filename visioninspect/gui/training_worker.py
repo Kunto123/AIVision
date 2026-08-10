@@ -253,7 +253,7 @@ class TrainingWorker(QObject):
             torch_ok = False
             logger.warning("Torch tidak tersedia, gunakan SimpleThresholdTrainer")
 
-        if torch_ok:
+        if torch_ok or tmpl_cfg.get("algorithm") == "yolo":
             self._do_anomalib_training(program, template_id, tmpl_cfg, ok_dir, ng_path)
         else:
             self._do_simple_training(program, template_id, tmpl_cfg, ok_dir, ng_path)
@@ -319,6 +319,10 @@ class TrainingWorker(QObject):
             precision=tmpl_cfg.get("precision", "32"),
             enable_mixed_precision=tmpl_cfg.get("enable_mixed_precision", False),
             patience=tmpl_cfg.get("patience", 0),
+            # === YOLO (hanya dipakai kalau algorithm="yolo") ===
+            yolo_pretrained=tmpl_cfg.get("yolo_pretrained", "yolov11l-cls.pt"),
+            yolo_epochs=tmpl_cfg.get("yolo_epochs", 100),
+            yolo_imgsz=tmpl_cfg.get("yolo_imgsz", 0),
         )
 
         # Create pipeline

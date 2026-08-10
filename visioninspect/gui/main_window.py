@@ -17,7 +17,7 @@ from typing import Optional
 import cv2
 import psutil
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QMetaObject, QThread
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QImage, QPixmap, QPainter, QPen, QColor, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -42,6 +42,7 @@ from visioninspect.core.inference import InferenceEngine, overlay_heatmap
 from visioninspect.core.yolo_filter import YOLODetector, class_filter_matches
 from visioninspect.core import part_check as pc_module
 from visioninspect.gui.camera_worker import CameraThread, CameraWorker
+from visioninspect.gui.video_replay_worker import VideoReplayWorker
 from visioninspect.gui.training_worker import TrainingThread, TrainingWorker
 from visioninspect.gui.widgets.roi_editor import ROIData
 from visioninspect.gui.pages.run_page import RunPage
@@ -113,6 +114,13 @@ class MainWindow(QMainWindow):
         if self._pg.is_enabled:
             # Pastikan DB siap pakai (tabel ada, admin ter-seed) begitu terhubung
             self._pg.ensure_ready()
+            # C2a (2026-08-07): PostgreSQL = SATU-SATUNYA sumber akun.
+            # Sebelumnya ada sinkronisasi one-way SQLite → PG yang menimpa
+            # role/password di qc_user_accounts dengan isi database.db tiap
+            # startup — akibatnya akun yang dibuat/diedit via pgAdmin4 selalu
+            # kembali ke state SQLite. Sync itu DIBUANG: akun hanya dibuat/
+            # diedit via PG (pgAdmin4 atau halaman Account). SQLite tetap
+            # dipakai hanya sebagai fallback autentikasi saat PG mati.
 
         # C4: migrasi kredensial — password PG plaintext lama dienkripsi sekali
         pg_cfg = self._config.get("postgresql", {})
@@ -206,6 +214,23 @@ class MainWindow(QMainWindow):
         self._roi_col_duration: float = 3.0        # detik sebelum balik orange
         # Part name untuk push ke PG (di-set saat ganti template)
         self._active_partname = ""
+
+        # ── Replay video (uji model via file video — "kamera virtual") ──
+        # test_mode=True → PLC publish, counter produksi, history SQLite/PG,
+        # dan save inspection frame SEMUA di-bypass (data uji jangan pernah
+        # mencemari produksi; actuator PLC jangan pernah nyala karena video).
+        self._replay_test_mode = False
+        self._replay_skip_part_check = False   # bypass part-check khusus uji
+        self._replay_export_enabled = True     # simpan frame OK/NG ke folder export
+        self._replay_export_dir: Optional[Path] = None
+        self._replay_worker = None
+        self._replay_thread: Optional[QThread] = None
+        self._replay_dialog = None
+        self._last_replay_result = None        # frame/judgement/score terakhir
+        self._replay_stats = {
+            "total": 0, "ok": 0, "ng": 0,
+            "ng_frames": [],                   # [(frame_idx, score), ...]
+        }
 
         # ── PLC (Modbus master) ──
         self._plc_modbus: Optional[ModbusRTUManager] = None
@@ -372,7 +397,10 @@ class MainWindow(QMainWindow):
         # C2: is_enabled hanya flag config — server bisa mati. Cek koneksi
         # hidup; kalau PG tidak terjangkau, fallback ke autentikasi SQLite
         # lokal supaya lini tidak berhenti (server DB mati ≠ nobody can login).
-        if self._pg.is_enabled and self._pg.is_alive(timeout=2.0):
+        # timeout=None → pakai connect_timeout config (10s) supaya konsisten
+        # dengan inisialisasi; timeout 2s pernah false-negative di host
+        # localhost/Windows (resolve IPv6 ::1 dulu makan budget).
+        if self._pg.is_enabled and self._pg.is_alive():
             auth_db = self._pg
         else:
             if self._pg.is_enabled:
@@ -486,6 +514,7 @@ class MainWindow(QMainWindow):
         self._teach_page.get_import_button().clicked.connect(self._on_import_images)
         self._teach_page.import_cancelled.connect(self._on_cancel_import)
         self._teach_page.get_test_model_button().clicked.connect(self._on_test_model)
+        self._teach_page.get_test_video_button().clicked.connect(self._start_replay)
 
         # TEACH: Train button
         self._teach_page.get_train_button().clicked.connect(self._on_train)
@@ -628,6 +657,15 @@ class MainWindow(QMainWindow):
 
     # ---- Camera Slots ----
 
+    @staticmethod
+    def _color_alpha(name: str, alpha: int) -> QColor:
+        """QColor dengan alpha transparan — QColor(str, int) TIDAK ADA di Qt6
+        (TypeError 'Supported signatures' setiap frame = log membengkak + ROI
+        gagal tergambar). Cara benar: setAlpha() setelah konstruksi."""
+        c = QColor(name)
+        c.setAlpha(alpha)
+        return c
+
     def _on_frame_received(self, pixmap):
         """Frame baru dari kamera — update display."""
         if self._heatmap_enabled and self._last_heatmap is not None and self._last_frame is not None:
@@ -659,23 +697,31 @@ class MainWindow(QMainWindow):
 
                     if fresh and i in self._roi_col_judgement:
                         jdg = self._roi_col_judgement[i]
-                        color = "#22C55E" if jdg == "OK" else "#EF4444"
+                        color = "#4ADE80" if jdg == "OK" else "#F87171"
                     else:
-                        color = "#F59E0B"  # orange — default / timeout
+                        color = "#FBBF24"  # amber cerah — default / timeout
 
-                    pen = QPen(QColor(color), 2)
+                    # Fill transparan — area ROI langsung terlihat di video
+                    qp.setBrush(self._color_alpha(color, 36))
+                    pen = QPen(QColor(color), 4)
                     qp.setPen(pen)
-                    qp.setBrush(Qt.NoBrush)
                     qp.drawRect(x, y, w, h)
-                    # Label text
+                    qp.setBrush(Qt.NoBrush)
+                    # Label text — badge gelap semi-transparan biar terbaca
                     label_x = x + 3
                     label_y = y - 4 if y >= 16 else y + 13
-                    qp.setPen(QColor(color))
                     if i < len(self._current_all_roi_labels):
                         label = self._current_all_roi_labels[i]
                     else:
                         label = f"ROI{i+1}"  # fallback template lama tanpa label custom
-                    qp.drawText(label_x, label_y, label)
+                    fm = qp.fontMetrics()
+                    lw = fm.horizontalAdvance(label) + 10
+                    lh = fm.height() + 4
+                    qp.setPen(Qt.NoPen)
+                    qp.setBrush(QColor(0, 0, 0, 150))
+                    qp.drawRoundedRect(label_x - 3, label_y - lh + 3, lw, lh, 3, 3)
+                    qp.setPen(QColor(color))
+                    qp.drawText(label_x + 2, label_y, label)
                 qp.end()
             except Exception as e:
                 logger.warning("ROI overlay draw error: %s", e)
@@ -692,9 +738,10 @@ class MainWindow(QMainWindow):
                 gw = int(self._last_gate_roi.get("width", 64))
                 gh = int(self._last_gate_roi.get("height", 64))
                 # Dynamic color: blue when waiting, green when ready
-                gate_color = "#22C55E" if self._last_part_ready else "#3B82F6"
-                pen = QPen(QColor(gate_color), 2, Qt.DashLine)
+                gate_color = "#4ADE80" if self._last_part_ready else "#60A5FA"
+                pen = QPen(QColor(gate_color), 3, Qt.DashLine)
                 qp_gate.setPen(pen)
+                qp_gate.setBrush(self._color_alpha(gate_color, 30))
                 qp_gate.drawRect(gx, gy, gw, gh)
                 # Label badge
                 qp_gate.setPen(Qt.NoPen)
@@ -707,6 +754,24 @@ class MainWindow(QMainWindow):
                 qp_gate.end()
             except Exception as e:
                 logger.warning("Gate ROI overlay draw error: %s", e)
+
+        # Badge REPLAY — penanda jelas mode uji video (bukan kamera live).
+        # Operator wajib bisa membedakan replay dari produksi nyata.
+        if self._replay_test_mode:
+            try:
+                qp_b = QPainter(pixmap)
+                qp_b.setRenderHint(QPainter.Antialiasing)
+                qp_b.setPen(Qt.NoPen)
+                qp_b.setBrush(self._color_alpha("#DC2626", 210))
+                badge = "● REPLAY — MODE UJI (PLC/counter/history nonaktif)"
+                fm = qp_b.fontMetrics()
+                bw = fm.horizontalAdvance(badge) + 18
+                qp_b.drawRoundedRect(10, 10, bw, 28, 6, 6)
+                qp_b.setPen(QColor("#FFFFFF"))
+                qp_b.drawText(19, 29, badge)
+                qp_b.end()
+            except Exception as e:
+                logger.warning("Replay badge draw error: %s", e)
 
         self._run_page.set_frame(pixmap)
         # During import review mode, camera frames must NOT overwrite the ROI editor
@@ -785,8 +850,10 @@ class MainWindow(QMainWindow):
             return
         # Mode plc_trigger/manual: inspeksi hanya saat ada trigger
         # (coil trigger PLC ON, tombol Trigger Now, atau POST /trigger).
+        # Replay video (mode uji): trigger PLC tidak relevan — jalankan
+        # seperti continuous supaya uji tidak terkunci menunggu trigger.
         infer_mode = self._config.get("inference.mode", "continuous")
-        if infer_mode in ("plc_trigger", "manual"):
+        if infer_mode in ("plc_trigger", "manual") and not self._replay_test_mode:
             if not self._plc_trigger_pending:
                 return
             self._plc_trigger_pending = False
@@ -838,18 +905,26 @@ class MainWindow(QMainWindow):
             else:
                 self._last_part_check_score = 0.0
         elif pc_state == "incomplete":
-            # Fail-safe: part check enabled but not fully configured
-            # Block QC to prevent false NG 1.000 on empty scene
-            self._pc_active_for_overlay = False
-            self._last_gate_roi = None
-            self._last_part_ready = False
-            if self._ng_interval_timer.isActive():
-                self._ng_interval_timer.stop()
-                self._ng_interval_active = False
-            self._run_page.set_part_check_incomplete(
-                "Part-check aktif tapi belum lengkap: "
-                "foto master / gate ROI belum diset")
-            return
+            if self._replay_test_mode and self._replay_skip_part_check:
+                # Replay uji: operator memilih bypass part-check — perlakukan
+                # sebagai disabled (fall through ke QC). Hanya untuk sesi uji;
+                # flag di-reset di _stop_replay().
+                self._pc_active_for_overlay = False
+                self._last_gate_roi = None
+                self._last_part_ready = False
+            else:
+                # Fail-safe: part check enabled but not fully configured
+                # Block QC to prevent false NG 1.000 on empty scene
+                self._pc_active_for_overlay = False
+                self._last_gate_roi = None
+                self._last_part_ready = False
+                if self._ng_interval_timer.isActive():
+                    self._ng_interval_timer.stop()
+                    self._ng_interval_active = False
+                self._run_page.set_part_check_incomplete(
+                    "Part-check aktif tapi belum lengkap: "
+                    "foto master / gate ROI belum diset")
+                return
         else:  # "disabled"
             self._pc_active_for_overlay = False
             self._last_gate_roi = None
@@ -927,18 +1002,39 @@ class MainWindow(QMainWindow):
             # ---- NG Interval Timer ----
             self._last_judgement = raw_judgement
             self._last_worst_score = worst_score
+
+            # Replay video (mode uji): catat hasil frame untuk stats/export —
+            # TANPA menyentuh counter produksi / history / PLC.
+            if self._replay_test_mode:
+                self._last_replay_result = {
+                    "frame": frame,
+                    "judgement": raw_judgement,
+                    "score": worst_score,
+                    "rois": roi_results,
+                    "latency_ms": avg_latency,
+                    "threshold": self._inference_engine.threshold,
+                }
+                self._replay_stats["total"] += 1
+                if raw_judgement == "OK":
+                    self._replay_stats["ok"] += 1
+                else:
+                    self._replay_stats["ng"] += 1
+                    idx = self._replay_stats["total"] - 1
+                    self._replay_stats["ng_frames"].append((idx, worst_score))
+
             if raw_judgement == "OK":
                 # Stop interval timer — anomaly cleared
                 if self._ng_interval_timer.isActive():
                     self._ng_interval_timer.stop()
                     self._ng_interval_active = False
-                # Show OK immediately, increment OK counter
+                # Show OK immediately, increment OK counter (produksi)
                 self._run_page.update_judgement("OK", worst_score)
-                self._inspection_ok += 1
-                self._run_page.update_counters(
-                    self._inspection_ok, self._inspection_ng)
-                # Feedback ke PLC: publikasi hasil OK (latching/one-shot sesuai io_mode)
-                self._publish_result("OK")
+                if not self._replay_test_mode:
+                    self._inspection_ok += 1
+                    self._run_page.update_counters(
+                        self._inspection_ok, self._inspection_ng)
+                    # Feedback ke PLC: publikasi hasil OK
+                    self._publish_result("OK")
 
             else:  # raw_judgement == "NG"
                 if not self._ng_interval_timer.isActive():
@@ -949,36 +1045,42 @@ class MainWindow(QMainWindow):
                     self._ng_interval_active = True
                     # Show NG immediately on display (counter hanya bertambah via timer tick)
                     self._run_page.update_judgement("NG", worst_score)
-                    # Feedback ke PLC: publikasi hasil NG (latching/one-shot sesuai io_mode)
+                    # Feedback ke PLC: publikasi hasil NG — di-bypass otomatis
+                    # oleh guard _replay_test_mode di _publish_result (safety).
                     self._publish_result("NG")
-                    # Save frame untuk tuning
-                    img_path = self._save_inspection_frame(
-                        frame, "NG", worst_score, roi_results, avg_latency)
-                    # Simpan ke SQLite agar entry bisa di-tuning
-                    roi_region = json.dumps([{
-                        "x": r["roi"][0], "y": r["roi"][1],
-                        "width": r["roi"][2], "height": r["roi"][3],
-                        "label": r.get("label", f"ROI{i + 1}"),
-                        "score": r["score"], "judgement": r["judgement"],
-                    } for i, r in enumerate(roi_results)])
-                    ng_entry_id = self._db.add_inspection({
-                        "program": self._active_program,
-                        "score": worst_score,
-                        "judgement": "NG",
-                        "threshold": self._inference_engine.threshold,
-                        "latency_ms": avg_latency,
-                        "image_path": img_path or "",
-                        "roi_region": roi_region,
-                        "metadata": {
-                            "num_rois": len(roi_results),
-                            "template": self._active_template,
-                            "template_name": self._active_partname,
-                        },
-                    })
-                    # Sink ke PostgreSQL via outbox (C1/C3) — local_id = id SQLite
-                    # agar koreksi operator bisa di-propagasi (C0).
-                    self._push_inspection_async(self._build_push_entry(
-                        "NG", worst_score, img_path, avg_latency, ng_entry_id))
+                    # Save frame + history HANYA untuk inspeksi produksi nyata —
+                    # replay video (mode uji) memakai jalur export sendiri.
+                    if not self._replay_test_mode:
+                        # Save frame untuk tuning
+                        img_path = self._save_inspection_frame(
+                            frame, "NG", worst_score, roi_results, avg_latency)
+                        # Simpan ke SQLite agar entry bisa di-tuning
+                        roi_region = json.dumps([{
+                            "x": r["roi"][0], "y": r["roi"][1],
+                            "width": r["roi"][2], "height": r["roi"][3],
+                            "label": r.get("label", f"ROI{i + 1}"),
+                            "score": r["score"], "judgement": r["judgement"],
+                        } for i, r in enumerate(roi_results)])
+                        ng_entry_id = self._db.add_inspection({
+                            "program": self._active_program,
+                            "score": worst_score,
+                            "judgement": "NG",
+                            "threshold": self._inference_engine.threshold,
+                            "latency_ms": avg_latency,
+                            "image_path": img_path or "",
+                            "roi_region": roi_region,
+                            "metadata": {
+                                "num_rois": len(roi_results),
+                                "template": self._active_template,
+                                "template_name": self._active_partname,
+                            },
+                        })
+                        # Sink ke PostgreSQL via outbox (C1/C3) — local_id = id SQLite
+                        # agar koreksi operator bisa di-propagasi (C0).
+                        self._push_inspection_async(self._build_push_entry(
+                            "NG", worst_score, img_path, avg_latency, ng_entry_id))
+                    else:
+                        img_path = ""
                 else:
                     # Timer already running — update display (worse score)
                     self._run_page.update_judgement("NG", worst_score)
@@ -1012,7 +1114,8 @@ class MainWindow(QMainWindow):
             )
 
             # Simpan gambar + riwayat SQLite di-throttle (mahal) tiap 30 frame OK
-            if raw_judgement == "OK":
+            # — hanya untuk produksi nyata; replay video memakai jalur export sendiri.
+            if raw_judgement == "OK" and not self._replay_test_mode:
                 self._inference_save_counter += 1
                 if self._inference_save_counter % 30 == 0:
                     img_path = self._save_inspection_frame(
@@ -1167,6 +1270,8 @@ class MainWindow(QMainWindow):
 
     def _on_ng_interval_tick(self):
         """Interval timer tick — NG still ongoing, count another NG."""
+        if self._replay_test_mode:
+            return  # replay video: jangan menambah counter produksi
         self._inspection_ng += 1
         self._run_page.update_counters(self._inspection_ok, self._inspection_ng)
         # Catatan: push ke PostgreSQL sekarang dilakukan per inferensi di
@@ -1616,6 +1721,10 @@ class MainWindow(QMainWindow):
           `one_shot_on_time_ms` (mirip "One-Shot" IV3).
         PLC yang memegang timing antar part; aplikasi hanya memublikasikan hasil.
         """
+        # SAFETY: saat replay video (mode uji), TIDAK PERNAH menulis ke PLC —
+        # video uji jangan sampai menyalakan actuator reject/accept di lini nyata.
+        if self._replay_test_mode:
+            return
         if not self._plc_modbus or not self._plc_modbus.is_connected:
             return
         # Rollout shadow mode: NG hanya ditampilkan & dicatat, coil result_ng
@@ -1645,6 +1754,8 @@ class MainWindow(QMainWindow):
         delay = max(0, int(io.get("one_shot_delay_ms", 0)))
 
         def _fire():
+            if self._replay_test_mode:
+                return  # safety: jangan tulis PLC kalau replay video aktif
             if self._plc_modbus and self._plc_modbus.set_output(name, True):
                 if duration > 0:
                     QTimer.singleShot(duration,
@@ -1657,6 +1768,8 @@ class MainWindow(QMainWindow):
 
     def _plc_pulse(self, name: str):
         """Pulse coil output tanpa memblokir UI: ON → QTimer singleShot → OFF."""
+        if self._replay_test_mode:
+            return  # safety: replay video — jangan sentuh PLC
         if not self._plc_modbus or not self._plc_modbus.is_connected:
             return
         ms = max(0, int(self._config.get("plc.pulse_ms", 300)))
@@ -2312,6 +2425,293 @@ class MainWindow(QMainWindow):
             aggregate=aggregate, threshold=self._inference_engine.threshold,
             parent=self)
         dialog.exec()
+
+    # ---- Test Model via Video Replay (jalur live — Opsi B) ----
+
+    def _start_replay(self):
+        """Uji model via file video — replay lewat jalur live ("kamera virtual").
+        Semua logika live (part-check, loop ROI, debounce, overlay, YOLO)
+        berjalan persis seperti kamera asli, TAPI dengan _replay_test_mode=True:
+        PLC publish, counter produksi, dan history SQLite/PG di-bypass total.
+        Frame OK/NG diexport ke data/video_test_exports/<sesi>/ok|ng/ untuk
+        koreksi dataset (jawaban user #3)."""
+        if self._replay_test_mode:
+            self.set_status("Replay sedang berjalan. Stop dulu.", 3000)
+            return
+        if not self._inference_engine.is_loaded:
+            self.set_status("Model belum dimuat. Latih atau load model dulu.", 3000)
+            return
+        if not self._current_all_rois:
+            self.set_status("Tidak ada ROI aktif pada template ini.", 3000)
+            return
+
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Pilih video untuk uji model", "",
+            "Video (*.mp4 *.avi *.mov *.mkv *.wmv)")
+        if not path:
+            return
+
+        # Buka video untuk cek (bisa dibaca? resolusi?) — worker sementara,
+        # dibuka di GUI thread sebelum moveToThread (aman).
+        probe = VideoReplayWorker()
+        try:
+            total, w, h, fps = probe.open(path)
+        except Exception as e:
+            QMessageBox.warning(self, "Uji Video", str(e))
+            probe.deleteLater()
+            return
+
+        # Resolusi: ROI digambar di koordinat asli frame → harus match referensi
+        ref_dims = self._get_reference_resolution()
+        if ref_dims and (w, h) != ref_dims:
+            ret = QMessageBox.warning(
+                self, "Resolusi Tidak Cocok",
+                f"Video: {w}x{h} — Referensi template: {ref_dims[0]}x{ref_dims[1]}.\n\n"
+                "ROI digambar di koordinat asli frame, jadi posisi ROI bisa "
+                "meleset kalau resolusi beda.\nGunakan video dari kamera yang "
+                "sama dengan pengambilan dataset.\n\nTetap lanjut?",
+                QMessageBox.Yes | QMessageBox.No)
+            if ret != QMessageBox.Yes:
+                probe.deleteLater()
+                return
+
+        # Part-check belum lengkap → semua frame akan di-skip. Tawarkan bypass
+        # khusus sesi uji ini (flag di-reset di _stop_replay).
+        skip_pc = False
+        pc_state = pc_module.part_check_state(self._current_part_check_cfg)
+        if pc_state == "incomplete":
+            ret = QMessageBox.question(
+                self, "Part Check Belum Lengkap",
+                "Part-check aktif tapi belum lengkap (foto master / gate ROI "
+                "belum diset). Tanpa bypass, semua frame akan di-skip dan "
+                "replay tidak menghasilkan apa-apa.\n\n"
+                "Lewati part-check untuk sesi uji ini saja?",
+                QMessageBox.Yes | QMessageBox.No)
+            skip_pc = (ret == QMessageBox.Yes)
+        probe.deleteLater()
+
+        # Stop kamera asli — jangan ada dua sumber frame sekaligus
+        if self._camera_worker and self._camera_worker.is_running:
+            self._camera_worker.stop_camera()
+            self._on_camera_stopped()  # sync UI status (signal async)
+
+        # ── Init state sesi replay ──
+        self._replay_test_mode = True
+        self._replay_skip_part_check = skip_pc
+        self._replay_export_enabled = True
+        self._replay_stats = {"total": 0, "ok": 0, "ng": 0, "ng_frames": []}
+        self._last_replay_result = None
+
+        # Folder export frame OK/NG untuk koreksi dataset
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        base = Path(self._config.get("data_dir", "data")) / "video_test_exports" / ts
+        ok_dir = base / "ok"
+        ng_dir = base / "ng"
+        try:
+            ok_dir.mkdir(parents=True, exist_ok=True)
+            ng_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            QMessageBox.warning(self, "Uji Video",
+                                f"Gagal buat folder export: {e}")
+            self._replay_test_mode = False
+            return
+        self._replay_export_dir = base
+        self._replay_ok_dir = ok_dir
+        self._replay_ng_dir = ng_dir
+        self._replay_export_counter = 0
+        self._replay_export_sample = 0
+        self._last_replay_judgement = None
+
+        # ── Thread + worker replay (pola CameraThread; open() di GUI thread
+        # sebelum moveToThread agar VideoCapture dibuat di thread yang sama
+        # dengan pembaca) ──
+        self._replay_thread = QThread(self)
+        self._replay_worker = VideoReplayWorker()
+        try:
+            self._replay_worker.open(path)
+        except Exception as e:
+            QMessageBox.warning(self, "Uji Video", str(e))
+            self._replay_test_mode = False
+            self._replay_thread.deleteLater()
+            self._replay_thread = None
+            self._replay_worker = None
+            return
+        self._replay_worker.moveToThread(self._replay_thread)
+        self._replay_worker.frame_raw.connect(self._on_replay_frame_raw)
+        self._replay_worker.frame_ready.connect(self._on_frame_received)
+        self._replay_worker.progress.connect(self._on_replay_progress)
+        self._replay_worker.finished.connect(self._on_replay_finished)
+        self._replay_worker.stopped.connect(self._on_replay_stopped)
+        self._replay_worker.error.connect(self._on_replay_error)
+        self._replay_thread.start()
+
+        # ── Dialog kontrol (non-modal — Run page tetap terlihat) ──
+        from visioninspect.gui.dialogs.video_replay_dialog import VideoReplayDialog
+        self._replay_dialog = VideoReplayDialog(
+            video_path=path, total_frames=total, video_fps=fps,
+            video_size=(w, h), ref_dims=ref_dims,
+            export_dir=str(base), parent=self)
+        self._replay_dialog.play_requested.connect(self._on_replay_play)
+        self._replay_dialog.pause_requested.connect(self._on_replay_pause)
+        self._replay_dialog.seek_requested.connect(self._on_replay_seek)
+        self._replay_dialog.stop_requested.connect(self._stop_replay)
+        self._replay_dialog.closed.connect(self._on_replay_dialog_closed)
+        self._replay_dialog.show()
+
+        self._run_page.set_status_message(
+            f"REPLAY: {Path(path).name} — mode uji "
+            "(PLC/counter/history nonaktif)")
+        self.set_status(f"Replay dimulai: {Path(path).name}", 3000)
+        # Infer hanya berjalan di tab RUN — pindah dulu supaya frame replay
+        # benar-benar diproses (tombol Uji Video ada di tab TEACH).
+        self._tabs.setCurrentIndex(0)
+        self._replay_worker.start()
+
+    def _on_replay_frame_raw(self, frame):
+        """Slot frame replay → jalankan jalur infer live yang sama persis,
+        lalu export frame OK/NG + ack worker untuk frame berikutnya.
+        Ack SELALU dikirim (token), apa pun hasil infernya — kalau ada
+        early-return di jalur live (mis. part-check), replay tetap maju."""
+        self._on_frame_for_inference(frame)
+        if not self._replay_test_mode:
+            return  # sudah di-stop di tengah — jangan lanjutkan
+        # Export frame OK/NG (fitur koreksi dataset — jawaban user #3).
+        # TIDAK tiap frame (cv2.imwrite di GUI thread = berat): simpan saat
+        # judgement BERUBAH (transisi OK→NG / NG→OK = momen penting) +
+        # sampling tiap 10 frame untuk variasi OK/NG berkelanjutan.
+        if self._replay_export_enabled and self._last_replay_result is not None:
+            res = self._last_replay_result
+            jdg = res["judgement"]
+            self._replay_export_sample += 1
+            if (jdg != self._last_replay_judgement
+                    or self._replay_export_sample % 10 == 0):
+                self._export_replay_frame(res)
+            self._last_replay_judgement = jdg
+        # Live stats ke dialog (ringkas — int + list kecil)
+        if self._replay_dialog is not None:
+            self._replay_dialog.update_stats(self._replay_stats)
+        # Token: minta frame berikutnya dari worker thread
+        QMetaObject.invokeMethod(self._replay_worker, "_next_frame",
+                                 Qt.QueuedConnection)
+
+    def _export_replay_frame(self, res: dict):
+        """Simpan frame hasil uji ke folder export OK/NG (sesi berjalan)."""
+        try:
+            self._replay_export_counter += 1
+            n = self._replay_export_counter
+            fname = f"frame_{n:06d}.jpg"
+            dst = (self._replay_ok_dir if res["judgement"] == "OK"
+                   else self._replay_ng_dir) / fname
+            cv2.imwrite(str(dst), res["frame"])
+        except Exception as e:
+            logger.warning("Replay export frame error: %s", e)
+
+    def _on_replay_progress(self, idx: int, total: int, video_fps: float):
+        if self._replay_dialog is not None:
+            self._replay_dialog.update_progress(idx, total, video_fps)
+
+    def _on_replay_play(self):
+        if self._replay_worker is not None:
+            self._replay_worker.resume()
+
+    def _on_replay_pause(self):
+        if self._replay_worker is not None:
+            self._replay_worker.pause()
+
+    def _on_replay_seek(self, frame_idx: int):
+        if self._replay_worker is not None:
+            self._replay_worker.seek_to(frame_idx)
+
+    def _on_replay_finished(self):
+        """Video habis diputar — tampilkan ringkasan akhir + cleanup."""
+        if self._replay_dialog is not None:
+            self._replay_dialog.update_stats(self._replay_stats)
+            self._replay_dialog.set_finished()
+        s = self._replay_stats
+        self.set_status(
+            f"Replay selesai — {s['total']} frame | OK {s['ok']} | "
+            f"NG {s['ng']}", 6000)
+        self._stop_replay()
+
+    def _on_replay_stopped(self):
+        """Worker berhenti (stop manual) — finalisasi seperti selesai."""
+        if self._replay_dialog is not None:
+            self._replay_dialog.update_stats(self._replay_stats)
+            self._replay_dialog.set_finished()
+        self.set_status("Replay dihentikan.", 3000)
+        self._stop_replay()
+
+    def _on_replay_error(self, msg: str):
+        QMessageBox.warning(self, "Uji Video", msg)
+        self._stop_replay()
+
+    def _on_replay_dialog_closed(self):
+        """Dialog kontrol ditutup user — bersihkan referensi (worker sudah
+        berhenti via stop_requested; kalau belum, hentikan juga)."""
+        self._replay_dialog = None
+        if self._replay_test_mode:
+            self._stop_replay()
+
+    def _stop_replay(self):
+        """Cleanup menyeluruh sesi replay — dipanggil dari MANA PUN jalur
+        keluarnya (video selesai, stop manual, dialog ditutup, error).
+        WAJIB reset flag test-mode di sini: kalau lupa, PLC/counter/history
+        tetap mati setelah replay — itu sama berbahayanya dengan terpicu
+        palsu. Idempoten (aman dipanggil ganda)."""
+        if self._replay_worker is None and not self._replay_test_mode:
+            return  # sudah bersih
+        was_active = self._replay_test_mode
+        self._replay_test_mode = False
+        self._replay_skip_part_check = False
+        self._replay_export_enabled = True
+        self._replay_export_dir = None
+        self._replay_ok_dir = None
+        self._replay_ng_dir = None
+        self._replay_export_counter = 0
+        self._replay_export_sample = 0
+        self._last_replay_judgement = None
+        self._last_replay_result = None
+
+        # Hentikan timer NG/cycle-delay yang mungkin aktif dari frame replay
+        if self._ng_interval_timer.isActive():
+            self._ng_interval_timer.stop()
+            self._ng_interval_active = False
+        if self._cycle_delay_timer.isActive():
+            self._cycle_delay_timer.stop()
+        self._cycle_delay_active = False
+        # Trigger PLC yang tertunda tidak boleh "bocor" ke frame kamera
+        # berikutnya setelah replay selesai.
+        self._plc_trigger_pending = False
+
+        # Worker: disconnect dulu, lalu stop (release capture) + teardown thread
+        worker, thread = self._replay_worker, self._replay_thread
+        self._replay_worker = None
+        self._replay_thread = None
+        if worker is not None:
+            for sig in ("frame_raw", "frame_ready", "progress",
+                        "finished", "stopped", "error"):
+                try:
+                    getattr(worker, sig).disconnect()
+                except Exception:
+                    pass
+            worker.stop()  # self-dispatch; aman dari thread mana pun
+            worker.deleteLater()
+        if thread is not None:
+            thread.quit()
+            thread.wait(3000)
+
+        # Dialog: jangan di-close paksa — user boleh melihat ringkasan akhir.
+        # Tombol kontrol sudah di-disable via set_finished(); referensi
+        # dibersihkan saat dialog ditutup (closed signal).
+        if self._replay_dialog is not None:
+            self._replay_dialog.set_finished()
+
+        if was_active:
+            self._run_page.set_status_message(
+                "Replay berhenti. Kamera siap dijalankan lagi.")
+            self.set_status("Replay dihentikan. Kamera siap dijalankan lagi.",
+                            3000)
 
     def _on_add_template(self):
         """Create a new template with default ROI."""

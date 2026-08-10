@@ -382,6 +382,18 @@ class Database:
             "created_at, updated_at FROM users ORDER BY id")
         return [dict(row) for row in cursor.fetchall()]
 
+    def list_users_full(self) -> List[Dict[str, Any]]:
+        """List all users INCL. password_hash & must_change_password.
+
+        Dipakai khusus migrasi/sinkronisasi (mis. PostgresDB.sync_users_from
+        _sqlite) — jangan dipakai untuk tampilan UI.
+        """
+        cursor = self.conn.execute(
+            "SELECT id, username, password_hash, display_name, role, "
+            "COALESCE(must_change_password, 0) AS must_change_password "
+            "FROM users ORDER BY id")
+        return [dict(row) for row in cursor.fetchall()]
+
     def add_user(self, username: str, password: str, display_name: str = "",
                  role: str = "operator") -> int:
         """Add a new user. Returns user ID."""

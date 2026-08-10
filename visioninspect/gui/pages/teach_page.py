@@ -957,12 +957,13 @@ class TeachPage(QWidget):
     def _update_algorithm_field_visibility(self, *_):
         """Tampilkan cuma field yang benar-benar dipakai algorithm terpilih:
         Backbone & Coreset Ratio khusus PatchCore; Epochs khusus EfficientAd
-        & YOLO; YOLO Model khusus YOLO; Patience khusus EfficientAd."""
+        & YOLO; YOLO Model khusus YOLO; Patience khusus EfficientAd & YOLO
+        (YOLO memakai patience untuk early stopping di model.train())."""
         algo = self._algo_combo.currentData()
         is_efficientad = algo == "efficientad"
         is_yolo = algo == "yolo"
         self._adv_form.setRowVisible(self._epochs_spin, is_efficientad or is_yolo)
-        self._adv_form.setRowVisible(self._patience_spin, is_efficientad)
+        self._adv_form.setRowVisible(self._patience_spin, is_efficientad or is_yolo)
         self._adv_form.setRowVisible(self._backbone_combo, not (is_efficientad or is_yolo))
         self._adv_form.setRowVisible(self._coreset_spin, not (is_efficientad or is_yolo))
         self._adv_form.setRowVisible(self._yolo_pretrained_combo, is_yolo)

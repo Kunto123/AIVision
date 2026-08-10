@@ -300,10 +300,12 @@ class RunPage(QWidget):
     @Slot()
     def set_frame(self, pixmap: QPixmap):
         """Set live view pixmap (dari kamera)."""
+        # Tugas 2: FastTransformation (≈2,9 ms) vs Smooth (≈5,9 ms) — live
+        # view tidak perlu interpolasi halus; ROI overlay tetap jelas.
         self._live_view.setPixmap(pixmap.scaled(
             self._live_view.size(),
             Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
+            Qt.FastTransformation,
         ))
 
     @Slot()

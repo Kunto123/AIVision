@@ -41,11 +41,11 @@ class TeachPage(QWidget):
     # Mode Lanjutan.
     TRAINING_PROFILES = {
         "fast": {"label": "Cepat", "backbone": "resnet18",
-                 "coreset_sampling_ratio": 0.1},
+                 "coreset_sampling_ratio": 0.1, "input_size": 128},
         "balanced": {"label": "Seimbang", "backbone": "resnet18",
-                     "coreset_sampling_ratio": 0.25},
+                     "coreset_sampling_ratio": 0.25, "input_size": 192},
         "accurate": {"label": "Detail Tinggi", "backbone": "wide_resnet50_2",
-                     "coreset_sampling_ratio": 0.25},
+                     "coreset_sampling_ratio": 0.25, "input_size": 256},
     }
 
     image_deleted = Signal(str)
@@ -358,6 +358,23 @@ class TeachPage(QWidget):
         # training). Disembunyikan untuk EfficientAd lewat setRowVisible,
         # sama seperti Epochs disembunyikan untuk PatchCore, biar tidak
         # menyesatkan seolah-olah field itu berlaku untuk kedua algorithm.
+        # Ukuran input model — dipakai PatchCore, EfficientAd, dan YOLO
+        # (yolo_imgsz default 0 = ikut input_size, lihat core/training.py:115).
+        # Semua ROI di-resize ke ukuran ini sebelum masuk model.
+        self._input_size_combo = QComboBox()
+        self._input_size_combo.addItems(["256", "192", "128"])
+        self._input_size_combo.setCurrentIndex(0)
+        self._input_size_combo.setToolTip(
+            "Ukuran gambar yang masuk ke model. Semua ROI di-resize ke ukuran ini.\n"
+            "256 = paling teliti, paling lambat (7 ROI ≈ 960 ms di CPU 2-core)\n"
+            "192 = jalan tengah (≈ 430 ms)\n"
+            "128 = paling ringan (≈ 165 ms), deteksi 2x lebih kasar\n"
+            "ROI terbesar template ini menentukan batas aman. Ganti nilai ini\n"
+            "WAJIB training ulang — model lama tidak cocok."
+        )
+        self._input_size_combo.currentIndexChanged.connect(self._on_advanced_field_changed)
+        self._adv_form.addRow("Input Size:", self._input_size_combo)
+
         self._backbone_combo = QComboBox()
         self._backbone_combo.addItems(["resnet18", "wide_resnet50_2"])
         self._backbone_combo.currentIndexChanged.connect(self._on_advanced_field_changed)
@@ -859,6 +876,7 @@ class TeachPage(QWidget):
             "algorithm": self._algo_combo.currentData(),
             "backbone": self._backbone_combo.currentText(),
             "coreset_sampling_ratio": round(self._coreset_spin.value(), 2),
+            "input_size": int(self._input_size_combo.currentText()),
             "training_profile": self._profile_combo.currentData(),
         }
         # Cuma simpan override eksplisit untuk EfficientAd — PatchCore biar
@@ -881,19 +899,23 @@ class TeachPage(QWidget):
         # sebelum semua field selesai di-load).
         _widgets = [self._profile_combo, self._algo_combo,
                     self._backbone_combo, self._coreset_spin, self._epochs_spin,
-                    self._patience_spin, self._yolo_pretrained_combo]
+                    self._patience_spin, self._yolo_pretrained_combo,
+                    self._input_size_combo]
         for w in _widgets:
             w.blockSignals(True)
         try:
             algorithm = cfg.get("algorithm", "patchcore")
             backbone = cfg.get("backbone", "resnet18")
             coreset = cfg.get("coreset_sampling_ratio", 0.1)
+            input_size = int(cfg.get("input_size", 256))
 
             idx = self._algo_combo.findData(algorithm)
             self._algo_combo.setCurrentIndex(idx if idx >= 0 else 0)
             idx = self._backbone_combo.findText(backbone)
             self._backbone_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self._coreset_spin.setValue(coreset)
+            idx = self._input_size_combo.findText(str(input_size))
+            self._input_size_combo.setCurrentIndex(idx if idx >= 0 else 0)  # fallback 256
             self._epochs_spin.setValue(cfg.get("yolo_epochs",
                                                cfg.get("max_epochs", 100)))
             self._patience_spin.setValue(cfg.get("patience", 0))
@@ -902,7 +924,7 @@ class TeachPage(QWidget):
             self._yolo_pretrained_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
             profile = cfg.get("training_profile") or self._infer_profile(
-                algorithm, backbone, coreset)
+                algorithm, backbone, coreset, input_size)
             idx = self._profile_combo.findData(profile)
             self._profile_combo.setCurrentIndex(
                 idx if idx >= 0 else self._profile_combo.findData("custom"))
@@ -911,13 +933,15 @@ class TeachPage(QWidget):
                 w.blockSignals(False)
         self._update_algorithm_field_visibility()
 
-    def _infer_profile(self, algorithm: str, backbone: str, coreset_ratio: float) -> str:
+    def _infer_profile(self, algorithm: str, backbone: str,
+                       coreset_ratio: float, input_size: int) -> str:
         """Guess which preset (if any) matches values loaded from an older
         template config that predates the training_profile field."""
         if algorithm == "patchcore":
             for key, prof in self.TRAINING_PROFILES.items():
                 if (prof["backbone"] == backbone
-                        and abs(prof["coreset_sampling_ratio"] - coreset_ratio) < 1e-6):
+                        and abs(prof["coreset_sampling_ratio"] - coreset_ratio) < 1e-6
+                        and prof["input_size"] == input_size):
                     return key
         return "custom"
 
@@ -926,7 +950,8 @@ class TeachPage(QWidget):
         prof = self.TRAINING_PROFILES.get(key)
         if not prof:
             return  # "custom" selected — leave advanced fields as-is
-        _widgets = [self._algo_combo, self._backbone_combo, self._coreset_spin]
+        _widgets = [self._algo_combo, self._backbone_combo, self._coreset_spin,
+                    self._input_size_combo]
         for w in _widgets:
             w.blockSignals(True)
         try:
@@ -935,6 +960,9 @@ class TeachPage(QWidget):
             if idx >= 0:
                 self._backbone_combo.setCurrentIndex(idx)
             self._coreset_spin.setValue(prof["coreset_sampling_ratio"])
+            idx = self._input_size_combo.findText(str(prof["input_size"]))
+            if idx >= 0:
+                self._input_size_combo.setCurrentIndex(idx)
         finally:
             for w in _widgets:
                 w.blockSignals(False)

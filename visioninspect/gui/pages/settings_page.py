@@ -417,6 +417,44 @@ class SettingsPage(QWidget):
 
         main_layout.addWidget(ng_group)
 
+        # === Inference Engine (Tugas 5) ===
+        dev_group = QGroupBox("Inference Engine")
+        dev_form = QVBoxLayout(dev_group)
+
+        dev_row = QHBoxLayout()
+        dev_row.addWidget(QLabel("Device:"))
+        self._ov_device = QComboBox()
+        self._ov_device.addItems(["CPU", "GPU", "AUTO"])
+        self._ov_device.setFixedWidth(130)
+        dev_row.addWidget(self._ov_device)
+        dev_row.addStretch()
+        dev_form.addLayout(dev_row)
+
+        self._cpu_pcore_only = QCheckBox(
+            "Batasi inference ke P-core (CPU hybrid)")
+        self._cpu_pcore_only.setToolTip(
+            "Untuk CPU dengan P-core + E-core (mis. Intel 12th gen ke atas).\n"
+            "OpenVINO membagi satu inference ke semua thread lalu menunggu\n"
+            "yang paling lambat — thread di E-core menahan seluruh inference.\n"
+            "Aktif = latency lebih stabil, dan E-core bebas untuk GUI/video.\n"
+            "Tidak berpengaruh di CPU non-hybrid. Diabaikan bila device GPU.")
+        dev_form.addWidget(self._cpu_pcore_only)
+
+        dev_help = QLabel(
+            "GPU (iGPU Intel) biasanya jauh lebih cepat DAN membebaskan CPU "
+            "untuk tampilan.\n"
+            "PERINGATAN: GPU menghitung dengan presisi berbeda (FP16) "
+            "sementara kalibrasi skor (norm.json) dibuat di CPU FP32 — skor "
+            "bisa bergeser. Bandingkan hasil OK/NG CPU vs GPU pada gambar "
+            "yang sama sebelum dipakai produksi.\n"
+            "Compile pertama di GPU lambat (±18 dtk); berikutnya cepat "
+            "karena memakai cache.")
+        dev_help.setObjectName("secondaryText")
+        dev_help.setWordWrap(True)
+        dev_form.addWidget(dev_help)
+
+        main_layout.addWidget(dev_group)
+
         # === Cycle Delay ===
         cycle_group = QGroupBox("Cycle Delay")
         cycle_form = QVBoxLayout(cycle_group)
@@ -525,6 +563,8 @@ class SettingsPage(QWidget):
             "inference": {
                 "mode": ["continuous", "plc_trigger", "manual"][self._inference_mode.currentIndex()],
                 "cycle_delay_ms": self._cycle_delay_spin.value(),
+                "openvino_device": self._ov_device.currentText(),
+                "cpu_pcore_only": self._cpu_pcore_only.isChecked(),
             },
             "yolo": {
                 "enabled": self._yolo_enabled.isChecked(),
@@ -791,6 +831,13 @@ class SettingsPage(QWidget):
 
         # Cycle Delay
         self._cycle_delay_spin.setValue(self._config.get("inference.cycle_delay_ms", 1000))
+
+        # Inference Engine (Tugas 5)
+        dev = str(self._config.get("inference.openvino_device", "CPU")).upper()
+        idx_dev = self._ov_device.findText(dev)
+        self._ov_device.setCurrentIndex(idx_dev if idx_dev >= 0 else 0)
+        self._cpu_pcore_only.setChecked(
+            self._config.get("inference.cpu_pcore_only", False))
 
         # YOLO class filter
         self._yolo_enabled.setChecked(self._config.get("yolo.enabled", False))

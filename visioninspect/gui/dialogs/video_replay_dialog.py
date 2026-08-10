@@ -17,7 +17,7 @@ from PySide6.QtCore import QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout,
-    QFrame, QGroupBox, QGridLayout, QProgressBar,
+    QFrame, QGroupBox, QGridLayout, QProgressBar, QSpinBox,
 )
 
 
@@ -26,6 +26,7 @@ class VideoReplayDialog(QDialog):
     pause_requested = Signal()
     seek_requested = Signal(int)
     stop_requested = Signal()
+    frame_step_changed = Signal(int)   # Tugas 6a: "Periksa tiap N frame"
     closed = Signal()
 
     def __init__(self, video_path: str, total_frames: int, video_fps: float,
@@ -94,6 +95,36 @@ class VideoReplayDialog(QDialog):
         btns.addWidget(self._open_btn)
         root.addLayout(btns)
 
+        # Cakupan uji (Tugas 6a). Di replay, cycle_delay produksi TIDAK
+        # berlaku — kalau berlaku, video 30 dtk hanya terperiksa ±30 frame
+        # dari 900 (3%) dan kejadian NG < 1 dtk bisa terlewat total. Uji
+        # offline tidak butuh real-time; yang dibutuhkan cakupan.
+        step_box = QGroupBox("Cakupan uji")
+        step_layout = QVBoxLayout(step_box)
+        step_row = QHBoxLayout()
+        step_row.addWidget(QLabel("Periksa tiap"))
+        self._step_spin = QSpinBox()
+        self._step_spin.setRange(1, 100)
+        self._step_spin.setValue(1)
+        self._step_spin.setSuffix(" frame")
+        self._step_spin.setFixedWidth(120)
+        self._step_spin.setToolTip(
+            "1 = semua frame diperiksa (cakupan penuh, paling lambat).\n"
+            "N > 1 = periksa 1 dari tiap N frame; frame yang dilewati tidak\n"
+            "di-decode penuh sehingga jauh lebih ringan.\n\n"
+            "Naikkan hanya kalau cacat yang dicari bertahan beberapa frame.\n"
+            "Kejadian NG yang lebih pendek dari N frame bisa TERLEWAT.")
+        self._step_spin.valueChanged.connect(self._on_step_changed)
+        step_row.addWidget(self._step_spin)
+        step_row.addStretch()
+        step_layout.addLayout(step_row)
+        self._lbl_step_note = QLabel()
+        self._lbl_step_note.setWordWrap(True)
+        self._lbl_step_note.setStyleSheet("color: #6B7280; font-size: 11px;")
+        step_layout.addWidget(self._lbl_step_note)
+        root.addWidget(step_box)
+        self._update_step_note()
+
         # Ringkasan live
         stats_box = QGroupBox("Ringkasan (live)")
         stats_grid = QGridLayout(stats_box)
@@ -161,6 +192,7 @@ class VideoReplayDialog(QDialog):
         self._lbl_progress.setText(f"Frame {idx + 1} / {self._total}")
         if self._slider.maximum() != max(1, self._total - 1):
             self._slider.setRange(0, max(1, self._total - 1))
+            self._update_step_note()   # total berubah → hitung ulang cakupan
         self._slider.blockSignals(True)
         self._slider.setValue(idx)
         self._slider.blockSignals(False)
@@ -217,6 +249,7 @@ class VideoReplayDialog(QDialog):
         self._playing = False
         self._play_btn.setEnabled(False)
         self._slider.setEnabled(False)
+        self._step_spin.setEnabled(False)
         self._stop_btn.setText("Tutup")
 
     # ---- Handlers ----
@@ -245,6 +278,29 @@ class VideoReplayDialog(QDialog):
         if self._finished:
             return
         self.seek_requested.emit(value)
+
+    def _on_step_changed(self, value: int):
+        """Tugas 6a: ubah cakupan uji saat replay berjalan (boleh live)."""
+        self._update_step_note()
+        if not self._finished:
+            self.frame_step_changed.emit(int(value))
+
+    def _update_step_note(self):
+        """Terjemahkan N ke bahasa yang bisa dinilai operator: berapa frame
+        yang benar-benar diperiksa, dan celah waktu yang tidak terlihat."""
+        n = self._step_spin.value()
+        checked = self._total // n if self._total else 0
+        if n == 1:
+            self._lbl_step_note.setText(
+                f"Cakupan penuh — semua {self._total} frame diperiksa.")
+            return
+        pct = (checked / self._total * 100.0) if self._total else 0.0
+        gap = (n / self._video_fps * 1000.0) if self._video_fps > 0 else 0.0
+        gap_txt = (f" Celah antar pemeriksaan ≈ {gap:.0f} ms — kejadian NG "
+                   f"lebih pendek dari itu bisa terlewat." if gap else "")
+        self._lbl_step_note.setText(
+            f"⚠ {checked} dari {self._total} frame diperiksa ({pct:.0f}%)."
+            f"{gap_txt}")
 
     def _open_export_dir(self):
         try:

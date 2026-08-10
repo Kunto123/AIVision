@@ -1,7 +1,12 @@
 """
 VisionInspect - Camera Worker (QThread)
 Menjembatani CameraDevice ke GUI via Qt signals menggunakan QTimer polling.
-QTimer dibuat LAZY di _do_start() agar thread affinity-nya benar (CameraThread).
+
+QTimer dibuat di __init__ sebagai CHILD worker, SEBELUM moveToThread — jadi
+affinity-nya ikut pindah ke CameraThread. Konsekuensinya: start/stop timer
+WAJIB terjadi di CameraThread. Semua jalur yang menyentuh timer
+(_ensure_timer_running / _ensure_timer_stopped / stop_camera / set_polling)
+melakukan self-dispatch, jangan dilewati.
 """
 
 from typing import Optional
@@ -11,7 +16,7 @@ import numpy as np
 import numpy.typing as npt
 
 from PySide6.QtCore import QMetaObject, QObject, QThread, QTimer, Qt, Signal, Slot, Q_ARG
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage
 
 from visioninspect.core.camera import CameraDevice, CameraConfig, CameraError, CameraState
 from visioninspect.utils.logging_setup import get_logger
@@ -26,7 +31,7 @@ class CameraWorker(QObject):
     """
 
     # Signals
-    frame_ready = Signal(object)   # QPixmap untuk display
+    frame_ready = Signal(object)   # QImage untuk display (konversi di GUI)
     frame_raw = Signal(object)     # np.ndarray untuk inference
     camera_started = Signal()
     camera_stopped = Signal()
@@ -73,12 +78,34 @@ class CameraWorker(QObject):
 
     # ---- Private: start/stop timer (timer sudah dibuat di __init__) ----
 
+    @Slot()
     def _ensure_timer_running(self):
-        """Start timer at target interval. Aman dipanggil dari thread mana pun
-        karena QTimer sudah dibuat bersama parent di __init__ (sebelum moveToThread)."""
+        """Start timer at target interval.
+
+        KOREKSI: komentar lama ("aman dipanggil dari thread mana pun karena
+        QTimer dibuat bersama parent di __init__") SALAH. Yang ikut pindah
+        lewat moveToThread adalah kepemilikan/affinity-nya; start/stop QTimer
+        tetap WAJIB terjadi di thread pemilik timer. Memanggilnya dari GUI
+        thread menghasilkan "QObject::killTimer: Timers cannot be stopped
+        from another thread" dan timer bisa gagal berhenti (polling terus
+        jalan walau kamera sudah stop). Karena itu di-dispatch sendiri."""
+        if self.thread() is not QThread.currentThread():
+            QMetaObject.invokeMethod(
+                self, "_ensure_timer_running", Qt.QueuedConnection)
+            return
         if not self._timer.isActive():
             interval = max(16, int(1000 / self._target_fps))
             self._timer.start(interval)
+
+    @Slot()
+    def _ensure_timer_stopped(self):
+        """Stop timer — sama seperti start, WAJIB di thread pemilik timer."""
+        if self.thread() is not QThread.currentThread():
+            QMetaObject.invokeMethod(
+                self, "_ensure_timer_stopped", Qt.QueuedConnection)
+            return
+        if self._timer is not None and self._timer.isActive():
+            self._timer.stop()
 
     # ---- Public API ----
 
@@ -140,8 +167,7 @@ class CameraWorker(QObject):
         if self.thread() is not QThread.currentThread():
             QMetaObject.invokeMethod(self, "stop_camera", Qt.BlockingQueuedConnection)
             return
-        if self._timer:
-            self._timer.stop()
+        self._ensure_timer_stopped()
         self._running = False
         if self._camera:
             self._camera.close()
@@ -178,6 +204,23 @@ class CameraWorker(QObject):
         else:
             self.start_camera(self._device_index)
 
+    @Slot(bool)
+    def set_polling(self, enabled: bool):
+        """Jeda/lanjut polling frame TANPA menutup kamera (Tugas 2 — hemat
+        CPU saat tidak ada konsumen frame: tab non-RUN/TEACH & bukan replay).
+        Kamera tetap terbuka, jadi kembali ke RUN langsung jalan tanpa
+        restart. Aman dipanggil dari thread mana pun (self-dispatch)."""
+        if self.thread() is not QThread.currentThread():
+            QMetaObject.invokeMethod(
+                self, "set_polling", Qt.QueuedConnection,
+                Q_ARG(bool, enabled))
+            return
+        if enabled:
+            self._ensure_timer_running()
+        else:
+            self._ensure_timer_stopped()
+        logger.info("Camera polling %s", "ON" if enabled else "OFF")
+
     def get_frame(self) -> Optional[npt.NDArray]:
         if self._camera:
             return self._camera.get_frame()
@@ -208,17 +251,18 @@ class CameraWorker(QObject):
         # Emit raw frame untuk inference
         self.frame_raw.emit(frame)
 
-        # Convert numpy array (BGR) ke QPixmap (RGB) untuk display
+        # Tugas 7: worker emit QImage (aman lintas thread) — konversi ke
+        # QPixmap dilakukan di GUI thread (_on_frame_received).
         try:
-            # .copy() → contiguous + thread-safe
+            # .copy() → contiguous + thread-safe (QImage tidak punya referensi
+            # ke buffer worker; buffer QImage dipakai GUI thread nanti)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).copy()
             h, w, ch = rgb.shape
             qimg = QImage(rgb.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
             if qimg.isNull():
                 return
 
-            pixmap = QPixmap.fromImage(qimg)
-            self.frame_ready.emit(pixmap)
+            self.frame_ready.emit(qimg)
 
             fps = self._camera.fps
             if fps > 0:

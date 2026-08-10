@@ -88,7 +88,11 @@ class Config:
         # Inference
         "inference": {
             "mode": "continuous",  # continuous | plc_trigger | manual
-            "openvino_device": "CPU",
+            "openvino_device": "CPU",   # CPU | GPU | AUTO (Tugas 5)
+            # CPU hybrid (P-core + E-core, mis. i3-1315U): batasi inference ke
+            # P-core → latency lebih stabil + E-core bebas untuk GUI/decode.
+            # Tidak berpengaruh di CPU non-hybrid. Diabaikan bila device=GPU.
+            "cpu_pcore_only": False,
             "enable_int8": True,
             "cycle_delay_ms": 1000,  # jeda antar siklus inspeksi (ms), 0=langsung
         },

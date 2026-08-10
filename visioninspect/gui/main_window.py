@@ -158,11 +158,30 @@ class MainWindow(QMainWindow):
         self._training_thread.start()
         self._training_worker = self._training_thread.worker
 
-        # Inference engine
-        self._inference_engine = InferenceEngine(input_size=256)
+        # Inference engine (Tugas 5: device + model cache dari config).
+        # CACHE_DIR wajib kalau device GPU dipakai — tanpa cache, compile
+        # GPU ±18 dtk tiap load model; dengan cache ±0,4 dtk.
+        self._inference_engine = InferenceEngine(
+            input_size=self._config.get("model.input_size", 256),
+            device=self._config.get("inference.openvino_device", "CPU"),
+            cache_dir=Path(self._config.get("data_dir", "data")) / "ov_cache",
+            cpu_pcore_only=self._config.get("inference.cpu_pcore_only", False),
+        )
         # Detektor YOLO (filter kelas) — lazy load, None bila nonaktif/gagal
         self._yolo_det = None
         self._last_class_filter_ng = False
+
+        # Tugas 3: inference dijalankan di thread terpisah — loop infer
+        # per-ROI (0,65–1 dtk) tidak lagi membekukan UI. Worker menerima
+        # frame + snapshot config, mengembalikan hasil via signal; semua
+        # efek samping (UI/PLC/history) tetap di thread GUI.
+        from visioninspect.gui.inference_worker import InferenceWorker
+        self._infer_thread = QThread(self)
+        self._infer_thread.setObjectName("InferenceWorkerThread")
+        self._inference_worker = InferenceWorker(self._inference_engine)
+        self._inference_worker.moveToThread(self._infer_thread)
+        self._inference_worker.result_ready.connect(self._on_inference_result)
+        self._infer_thread.start()
         self._current_roi: Optional[tuple] = None
         self._current_all_rois: list = []
         self._current_all_roi_uids: list = []
@@ -170,6 +189,7 @@ class MainWindow(QMainWindow):
         self._heatmap_enabled = False
         self._last_frame: Optional[object] = None
         self._last_heatmap: Optional[object] = None
+        self._last_display_ts = 0.0  # throttle display live ~15 fps (Tugas 2)
 
         # Import review mode
         self._import_files: list = []
@@ -222,6 +242,8 @@ class MainWindow(QMainWindow):
         self._replay_test_mode = False
         self._replay_skip_part_check = False   # bypass part-check khusus uji
         self._replay_export_enabled = True     # simpan frame OK/NG ke folder export
+        self._replay_awaiting_result = False   # Tugas 3: infer async — ack replay
+                                               # dikirim setelah hasil diproses
         self._replay_export_dir: Optional[Path] = None
         self._replay_worker = None
         self._replay_thread: Optional[QThread] = None
@@ -239,6 +261,18 @@ class MainWindow(QMainWindow):
 
         # ── Flask API (opsional, bind 127.0.0.1) ──
         self._flask_api: Optional[FlaskAPI] = None
+
+        # ── Export frame replay (Tugas 6b) ──
+        # cv2.imwrite 1080p = ±41 ms — jangan di GUI thread. Queue kecil &
+        # bounded: kalau penuh, frame tertua dibuang (frame terbaru lebih
+        # penting untuk koreksi dataset).
+        import queue as _queue
+        self._export_queue: _queue.Queue = _queue.Queue(maxsize=16)
+        self._export_stop = False
+        self._export_thread = threading.Thread(
+            target=self._export_worker_loop, name="replay-export",
+            daemon=True)
+        self._export_thread.start()
 
         # Judgement terakhir untuk endpoint /last_result
         self._last_judgement = "—"
@@ -666,8 +700,31 @@ class MainWindow(QMainWindow):
         c.setAlpha(alpha)
         return c
 
-    def _on_frame_received(self, pixmap):
-        """Frame baru dari kamera — update display."""
+    def _on_frame_received(self, img):
+        """Frame baru dari kamera/replay — update display.
+
+        Tugas 7: worker mengirim QImage (aman lintas thread); konversi ke
+        QPixmap dilakukan DI SINI (GUI thread). QPainter/overlay ROI juga
+        hanya boleh di GUI thread.
+        """
+        # Tugas 2: display hanya untuk tab yang benar-benar melihat video
+        # (RUN/TEACH). Inference TIDAK lewat sini (frame_raw terpisah →
+        # _on_frame_for_inference), jadi frame untuk inspeksi tidak pernah
+        # hilang — yang dihemat cuma kerja QPainter/display.
+        if self._tabs.currentIndex() not in (0, 1):
+            return
+        # Throttle display live ke ~15 fps (mata operator tidak butuh 30).
+        # Inference tidak terpengaruh (jalur terpisah). Replay dikecualikan.
+        now = time.monotonic()
+        if (not self._replay_test_mode and self._last_display_ts
+                and now - self._last_display_ts < 1 / 15):
+            return
+        self._last_display_ts = now
+        # Tugas 7: konversi QImage → QPixmap hanya di GUI thread
+        if isinstance(img, QImage):
+            pixmap = QPixmap.fromImage(img)
+        else:
+            pixmap = img  # compat — kalau dipanggil manual dengan QPixmap
         if self._heatmap_enabled and self._last_heatmap is not None and self._last_frame is not None:
             # Overlay heatmap on frame
             try:
@@ -836,18 +893,25 @@ class MainWindow(QMainWindow):
             f"Trigger dikirim ({mode})", 3000)
 
     def _on_frame_for_inference(self, frame):
-        """Run inference on frame from camera — per-ROI + aggregate.
-        Only runs when on RUN tab. Respects cycle delay between inspections."""
+        """Frame dari kamera → submit ke worker inference (Tugas 3).
+
+        Fungsi ini murni meng-queue kerja ke InferenceWorkerThread lalu
+        langsung kembali — UI tidak beku. Guard live (tab RUN, cycle delay,
+        trigger manual) tetap dievaluasi di sini. Semua efek samping hasil
+        infer diproses di _on_inference_result (thread GUI).
+        Return True kalau frame di-submit ke worker, False kalau di-skip
+        (dipakai jalur replay untuk ack manual supaya token tidak hilang).
+        """
         if not self._inference_engine.is_loaded:
-            return
+            return False
         if not self._current_all_rois:
-            return
+            return False
         # Only infer on RUN tab — other tabs don't show inference results
         if self._tabs.currentIndex() != 0:
-            return
+            return False
         # Skip frame if in cycle delay (jeda antar siklus)
         if self._cycle_delay_active:
-            return
+            return False
         # Mode plc_trigger/manual: inspeksi hanya saat ada trigger
         # (coil trigger PLC ON, tombol Trigger Now, atau POST /trigger).
         # Replay video (mode uji): trigger PLC tidak relevan — jalankan
@@ -855,55 +919,16 @@ class MainWindow(QMainWindow):
         infer_mode = self._config.get("inference.mode", "continuous")
         if infer_mode in ("plc_trigger", "manual") and not self._replay_test_mode:
             if not self._plc_trigger_pending:
-                return
+                return False
             self._plc_trigger_pending = False
 
-        # ── Step 1: Part Presence Check (fail-safe gating) ──
+        # ── Step 1: Part Presence Check — state dihitung di sini (murah),
+        # evaluasi (mahal) dijalankan di worker thread ──
         pc_cfg = self._current_part_check_cfg
         pc_state = pc_module.part_check_state(pc_cfg)
         if pc_state == "active":
             self._pc_active_for_overlay = True
             self._last_gate_roi = pc_cfg.get("gate_roi")
-            try:
-                pc_result = pc_module.evaluate_part_presence(
-                    frame, pc_cfg["gate_roi"], pc_cfg)
-            except Exception as e:
-                logger.warning("Part check error: %s", e)
-                pc_result = None
-            if pc_result is None:
-                # Exception during evaluation — fail-safe: block QC
-                self._last_part_ready = False
-                if self._ng_interval_timer.isActive():
-                    self._ng_interval_timer.stop()
-                    self._ng_interval_active = False
-                self._run_page.set_waiting_for_part()
-                return
-            if not pc_result.ready:
-                self._last_part_ready = False
-                # Stop NG interval timer so phantom NG doesn't count
-                if self._ng_interval_timer.isActive():
-                    self._ng_interval_timer.stop()
-                    self._ng_interval_active = False
-                self._run_page.set_waiting_for_part()
-                return
-            _prev_ready = self._last_part_ready
-            self._last_part_ready = True
-            if not _prev_ready and self._get_io_mode()["part_ready_output"]:
-                # Transisi part belum-ready → ready: pulse coil part_ready ke PLC
-                # (opsional — default hanya OK/NG, sesuai konfigurasi io_mode)
-                self._plc_pulse("part_ready")
-            # Capture part check score untuk PG push
-            m = pc_result.method
-            if m == 'color' and pc_result.color_score is not None:
-                self._last_part_check_score = pc_result.color_score
-            elif m == 'edge' and pc_result.edge_score is not None:
-                self._last_part_check_score = pc_result.edge_score
-            elif m == 'both':
-                cs = pc_result.color_score if pc_result.color_score is not None else 1.0
-                es = pc_result.edge_score if pc_result.edge_score is not None else 1.0
-                self._last_part_check_score = max(cs, es)
-            else:
-                self._last_part_check_score = 0.0
         elif pc_state == "incomplete":
             if self._replay_test_mode and self._replay_skip_part_check:
                 # Replay uji: operator memilih bypass part-check — perlakukan
@@ -912,6 +937,7 @@ class MainWindow(QMainWindow):
                 self._pc_active_for_overlay = False
                 self._last_gate_roi = None
                 self._last_part_ready = False
+                pc_state = "disabled"
             else:
                 # Fail-safe: part check enabled but not fully configured
                 # Block QC to prevent false NG 1.000 on empty scene
@@ -924,62 +950,69 @@ class MainWindow(QMainWindow):
                 self._run_page.set_part_check_incomplete(
                     "Part-check aktif tapi belum lengkap: "
                     "foto master / gate ROI belum diset")
-                return
+                return False
         else:  # "disabled"
             self._pc_active_for_overlay = False
             self._last_gate_roi = None
             self._last_part_ready = False
-            # Fall through to QC (backward compat)
-        # ── Step 2: QC Inference ──
 
+        # Snapshot config & ROI — dibaca di GUI thread, dipakai worker
+        rois = list(self._current_all_rois)
+        rois_uid = list(self._current_all_roi_uids)
+        rois_label = list(self._current_all_roi_labels)
+        yc = self._yolo_cfg()
+
+        # Queue ke worker thread (submit → infer di-connect QueuedConnection
+        # di dalam InferenceWorker) → GUI thread langsung bebas.
+        self._inference_worker.submit.emit(
+            frame, pc_cfg, pc_state, rois, rois_uid, rois_label, yc)
+        return True
+    def _on_inference_result(self, result: dict):
+        """Hasil infer dari worker thread — SEMUA efek samping di GUI thread.
+
+        Dipanggil via signal (auto queued) → selalu thread GUI. Bagian yang
+        komputasi berat (part-check evaluate, YOLO pre-filter, loop infer
+        per-ROI) sudah dikerjakan InferenceWorker; body asli Step 2 dst.
+        dari _on_frame_for_inference pindah ke sini apa adanya.
+        """
         try:
-            overall_ng = False
-            worst_score = 1.0  # similarity: 1.0=terbaik, dicari terendah (paling anomali)
-            total_latency = 0.0
-            roi_results = []
+            if result.get("error"):
+                logger.warning("Inference worker error: %s", result["error"])
+                return
 
-            # ── Step 1.5: YOLO class pre-filter (opsional) ──
-            # Kalau aktif: cek dulu part kelas yang diharapkan terdeteksi.
-            # Kelas tidak cocok → NG langsung (tanpa scoring anomali).
-            class_ng = False
-            yc = self._yolo_cfg()
-            if yc.get("enabled"):
-                det = self._ensure_yolo_detector()
-                if det is not None:
-                    dets = det.detect(frame)
-                    if dets is not None and not class_filter_matches(
-                            dets, yc.get("expected_classes", []),
-                            min_conf=float(yc.get("min_conf", 0.25))):
-                        class_ng = True
+            frame = result.get("frame")
 
-            # ROI hanya dicek bila lolos filter kelas
-            rois_to_check = [] if class_ng else self._current_all_rois
-            for idx, roi_rect in enumerate(rois_to_check):
-                roi_dict = {
-                    "x": roi_rect[0], "y": roi_rect[1],
-                    "width": roi_rect[2], "height": roi_rect[3],
-                    "uid": (self._current_all_roi_uids[idx]
-                            if idx < len(self._current_all_roi_uids) else None),
-                }
-                result = self._inference_engine.infer(frame, roi=roi_dict)
-                roi_results.append({
-                    "roi": roi_rect,
-                    "label": (self._current_all_roi_labels[idx]
-                              if idx < len(self._current_all_roi_labels)
-                              else f"ROI{idx + 1}"),
-                    "score": result.score,
-                    "judgement": result.judgement,
-                    "latency": result.latency_ms,
-                })
-                total_latency += result.latency_ms
-                if result.score < worst_score:
-                    worst_score = result.score
-                    self._last_heatmap = result.heatmap
-                    self._last_frame = frame
-                if result.judgement == "NG":
-                    overall_ng = True
+            # ── Step 1b: Part check — block path (fail-safe) ──
+            # Worker tidak bisa set_waiting_for_part (objek Qt) → di sini.
+            if result.get("pc_blocked"):
+                self._last_part_ready = False
+                if self._ng_interval_timer.isActive():
+                    self._ng_interval_timer.stop()
+                    self._ng_interval_active = False
+                self._run_page.set_waiting_for_part()
+                return
+            if (result.get("pc_state") == "active"
+                    and result.get("pc_result") is not None):
+                _prev_ready = self._last_part_ready
+                self._last_part_ready = True
+                if not _prev_ready and self._get_io_mode()["part_ready_output"]:
+                    # Transisi part belum-ready → ready: pulse coil part_ready
+                    # ke PLC (opsional — default hanya OK/NG, io_mode)
+                    self._plc_pulse("part_ready")
+                # Capture part check score untuk PG push
+                if result.get("part_check_score") is not None:
+                    self._last_part_check_score = result["part_check_score"]
 
-            raw_judgement = "NG" if (overall_ng or class_ng) else "OK"
+            # ── Step 2: hasil QC dari worker ──
+            roi_results = result.get("roi_results") or []
+            worst_score = result.get("worst_score", 1.0)
+            avg_latency = result.get("avg_latency", 0.0)
+            raw_judgement = result.get("raw_judgement", "OK")
+            class_ng = result.get("class_ng", False)
+
+            if result.get("heatmap") is not None:
+                self._last_heatmap = result["heatmap"]
+                self._last_frame = frame
             self._last_worst_score = worst_score
             # Catat alasan NG karena filter kelas (untuk tampilan/status)
             self._last_class_filter_ng = bool(class_ng)
@@ -994,8 +1027,7 @@ class MainWindow(QMainWindow):
             # backpressure, lihat PRD R4). Push dilakukan per verdict-event
             # di blok add_inspection (NG pertama / OK throttled) via outbox.
 
-
-            avg_latency = total_latency / len(roi_results) if roi_results else 0.0
+            avg_latency = float(avg_latency) if avg_latency is not None else 0.0
             self._run_page.update_latency(avg_latency)
             self._run_page.update_roi_results(roi_results)
 
@@ -1020,7 +1052,10 @@ class MainWindow(QMainWindow):
                 else:
                     self._replay_stats["ng"] += 1
                     idx = self._replay_stats["total"] - 1
-                    self._replay_stats["ng_frames"].append((idx, worst_score))
+                    # Tugas 6b: jangan tumbuh tanpa batas — dialog hanya
+                    # menampilkan 8 baris; cap 64 cukup untuk daftar lokasi NG.
+                    if len(self._replay_stats["ng_frames"]) < 64:
+                        self._replay_stats["ng_frames"].append((idx, worst_score))
 
             if raw_judgement == "OK":
                 # Stop interval timer — anomaly cleared
@@ -1079,17 +1114,17 @@ class MainWindow(QMainWindow):
                         # agar koreksi operator bisa di-propagasi (C0).
                         self._push_inspection_async(self._build_push_entry(
                             "NG", worst_score, img_path, avg_latency, ng_entry_id))
-                    else:
-                        img_path = ""
                 else:
                     # Timer already running — update display (worse score)
                     self._run_page.update_judgement("NG", worst_score)
 
             # ── Cycle delay: jeda antar siklus inspeksi ──
-            # Hanya berlaku di mode continuous (auto sequence). Di mode
-            # plc_trigger/manual, timing antar part dipegang ladder PLC —
-            # aplikasi tidak boleh menahan siklus (filosofi Keyence IV3).
-            if self._config.get("inference.mode", "continuous") == "continuous":
+            # Hanya berlaku di mode continuous (auto sequence) DAN untuk
+            # produksi nyata. Replay video (Tugas 6a): cycle_delay TIDAK
+            # berlaku — diganti kontrol "Periksa tiap N frame" di dialog
+            # supaya cakupan uji penuh (sebelumnya cuma ±3% frame dicek).
+            if (self._config.get("inference.mode", "continuous") == "continuous"
+                    and not self._replay_test_mode):
                 cycle_delay = self._settings_page.get_cycle_delay_ms()
                 if cycle_delay > 0:
                     # Stop NG interval timer so it doesn't phantom-count during delay
@@ -1142,7 +1177,10 @@ class MainWindow(QMainWindow):
                         "OK", worst_score, img_path, avg_latency, ok_entry_id))
 
         except Exception as e:
-            logger.warning("Inference error: %s", e)
+            logger.warning("Inference result error: %s", e)
+        finally:
+            # Token replay: ack SETELAH hasil diproses — jangan sampai hilang
+            self._replay_finish_if_pending()
 
     def _build_push_entry(self, judgement: str, score: float,
                           img_path: str, latency: float, local_id: int) -> dict:
@@ -1320,16 +1358,44 @@ class MainWindow(QMainWindow):
         try:
             old_cfg = self._pm.get_template_config(
                 self._active_program, self._active_template)
+
+            # Pengaman input_size: mengubah ukuran input pada template yang
+            # sudah punya model membuat model itu TIDAK valid (skala skor
+            # PatchCore beda tiap ukuran, norm.json tidak cocok). Minta
+            # konfirmasi SEBELUM menyimpan. Config lama tanpa field
+            # input_size (=256, nilai bawaan) tidak dianggap berubah.
+            old_input = int(old_cfg.get("input_size", 256) or 256)
+            new_input = int(updates.get("input_size", 256) or 256)
+            input_changed = old_cfg.get("trained") and old_input != new_input
+            if input_changed:
+                reply = QMessageBox.question(
+                    self, "Input Size Diubah",
+                    "Mengubah ukuran input membuat model lama tidak valid. "
+                    "Wajib training ulang sebelum dipakai produksi.\n\n"
+                    "Lanjutkan?",
+                    QMessageBox.Yes | QMessageBox.No)
+                if reply != QMessageBox.Yes:
+                    # Batalkan: kembalikan UI ke nilai config lama
+                    self._teach_page.set_training_config(old_cfg)
+                    return
+
             changed_deploy_relevant = (
                 old_cfg.get("trained")
                 and (old_cfg.get("backbone") != updates.get("backbone")
-                     or old_cfg.get("algorithm") != updates.get("algorithm")))
+                     or old_cfg.get("algorithm") != updates.get("algorithm")
+                     or old_input != new_input))
             self._pm.update_template_config(
                 self._active_program, self._active_template, updates)
             if changed_deploy_relevant:
+                # Parameter penentu model berubah → model di disk sudah tidak
+                # valid, tandai perlu training ulang (label ✓ di combo hilang).
+                self._pm.update_template_config(
+                    self._active_program, self._active_template,
+                    {"trained": False})
+                self._refresh_template_ui()
                 self.set_status(
-                    "Algorithm/Backbone diubah — klik TRAIN untuk "
-                    "menerapkan ke model (model saat ini masih pakai setting lama).",
+                    "Pengaturan model diubah — template ditandai belum "
+                    "dilatih. Klik TRAIN untuk menerapkan ke model.",
                     5000)
         except Exception as e:
             logger.warning("Training config save error: %s", e)
@@ -1608,6 +1674,10 @@ class MainWindow(QMainWindow):
 
     def _on_plc_poll_tick(self):
         """Poll input PLC tiap 200ms — deteksi trigger/reset/switch program."""
+        # Tugas 2: PLC hanya relevan saat mode RUN — tab lain tidak perlu
+        # memakan bus Modbus (5 Hz).
+        if self._tabs.currentIndex() != 0:
+            return
         if not self._plc_modbus or not self._plc_modbus.is_connected:
             return
         # Sync coil busy dengan state kamera (level, bukan pulse) — hanya
@@ -2555,6 +2625,8 @@ class MainWindow(QMainWindow):
         self._replay_dialog.play_requested.connect(self._on_replay_play)
         self._replay_dialog.pause_requested.connect(self._on_replay_pause)
         self._replay_dialog.seek_requested.connect(self._on_replay_seek)
+        self._replay_dialog.frame_step_changed.connect(
+            self._on_replay_frame_step)
         self._replay_dialog.stop_requested.connect(self._stop_replay)
         self._replay_dialog.closed.connect(self._on_replay_dialog_closed)
         self._replay_dialog.show()
@@ -2569,11 +2641,32 @@ class MainWindow(QMainWindow):
         self._replay_worker.start()
 
     def _on_replay_frame_raw(self, frame):
-        """Slot frame replay → jalankan jalur infer live yang sama persis,
-        lalu export frame OK/NG + ack worker untuk frame berikutnya.
-        Ack SELALU dikirim (token), apa pun hasil infernya — kalau ada
-        early-return di jalur live (mis. part-check), replay tetap maju."""
-        self._on_frame_for_inference(frame)
+        """Slot frame replay → jalur infer live yang sama persis (Tugas 3:
+        submit ke worker async), lalu export + ack SETELAH hasil diproses.
+        Token replay TIDAK pernah hilang: kalau infer di-skip oleh guard
+        live (mis. cycle delay), ack dikirim manual di sini."""
+        self._replay_awaiting_result = True
+        submitted = self._on_frame_for_inference(frame)
+        if not submitted:
+            # Infer di-skip (guard live) atau replay sudah di-stop di tengah —
+            # ack manual supaya token tetap maju / tidak macet.
+            self._replay_finish_if_pending()
+
+    def _replay_finish_if_pending(self):
+        """Ack token replay bila ada infer yang masih menunggu hasil.
+
+        Dipanggil di SEMUA jalur keluar _on_inference_result (termasuk
+        early-return part-check/error) — dijamin token tidak pernah hilang.
+        """
+        if not self._replay_awaiting_result:
+            return
+        self._replay_awaiting_result = False
+        if self._replay_test_mode:
+            self._finish_replay_frame()
+
+    def _finish_replay_frame(self):
+        """Export frame OK/NG + update stats + ack token — dipanggil SETELAH
+        hasil infer diproses di _on_inference_result (thread GUI)."""
         if not self._replay_test_mode:
             return  # sudah di-stop di tengah — jangan lanjutkan
         # Export frame OK/NG (fitur koreksi dataset — jawaban user #3).
@@ -2596,16 +2689,38 @@ class MainWindow(QMainWindow):
                                  Qt.QueuedConnection)
 
     def _export_replay_frame(self, res: dict):
-        """Simpan frame hasil uji ke folder export OK/NG (sesi berjalan)."""
+        """Simpan frame hasil uji ke folder export OK/NG (sesi berjalan).
+
+        Tugas 6b: cv2.imwrite dipindah ke thread background — queue bounded;
+        kalau penuh, frame tertua dibuang (frame terbaru lebih penting)."""
         try:
             self._replay_export_counter += 1
             n = self._replay_export_counter
             fname = f"frame_{n:06d}.jpg"
             dst = (self._replay_ok_dir if res["judgement"] == "OK"
                    else self._replay_ng_dir) / fname
-            cv2.imwrite(str(dst), res["frame"])
+            if self._export_queue.full():
+                try:
+                    self._export_queue.get_nowait()  # buang tertua
+                except Exception:
+                    pass
+            self._export_queue.put((str(dst), res["frame"]))
         except Exception as e:
             logger.warning("Replay export frame error: %s", e)
+
+    def _export_worker_loop(self):
+        """Thread daemon export — tulis frame ke disk tanpa memblokir GUI."""
+        while not self._export_stop:
+            item = self._export_queue.get()
+            if item is None:
+                break
+            try:
+                dst, frame = item
+                cv2.imwrite(dst, frame)
+            except Exception as e:
+                logger.warning("Replay export write error: %s", e)
+            finally:
+                self._export_queue.task_done()
 
     def _on_replay_progress(self, idx: int, total: int, video_fps: float):
         if self._replay_dialog is not None:
@@ -2622,6 +2737,15 @@ class MainWindow(QMainWindow):
     def _on_replay_seek(self, frame_idx: int):
         if self._replay_worker is not None:
             self._replay_worker.seek_to(frame_idx)
+
+    def _on_replay_frame_step(self, n: int):
+        """Tugas 6a: cakupan uji — periksa 1 dari tiap N frame.
+
+        Boleh diubah saat replay berjalan; worker menerapkannya pada
+        pembacaan frame berikutnya (frame yang dilewati hanya di-grab,
+        tanpa decode penuh)."""
+        if self._replay_worker is not None:
+            self._replay_worker.set_frame_step(int(n))
 
     def _on_replay_finished(self):
         """Video habis diputar — tampilkan ringkasan akhir + cleanup."""
@@ -3088,6 +3212,17 @@ class MainWindow(QMainWindow):
         """
         if not self._active_template:
             self.set_status("Pilih template dulu!", 3000)
+            return
+
+        # Tugas 4: PC edge (edge_mode=true) adalah mesin inference-only —
+        # torch sengaja TIDAK pernah dimuat di sana. Training dilakukan di
+        # PC dev, lalu model diimport. Pesan jelas, bukan error samar.
+        if self._config.get("edge_mode", False):
+            QMessageBox.information(
+                self, "Training",
+                "PC edge: training tidak tersedia di mesin ini.\n\n"
+                "Lakukan training di PC dev, lalu export/import model "
+                "ke sini.")
             return
 
         ok_count = self._count_all_images("ok")
@@ -3666,6 +3801,10 @@ class MainWindow(QMainWindow):
         self._perf_timer.start(2000)
 
     def _update_performance(self):
+        # Tugas 2: hanya berarti saat tab Diagnostics terlihat — tab lain
+        # tidak menampilkan angka ini, jadi jangan buang CPU tiap 2 dtk.
+        if self._tabs.currentIndex() != 4:
+            return
         try:
             ram_mb = self._process.memory_info().rss / 1024 / 1024
             cpu_percent = self._process.cpu_percent()
@@ -3708,6 +3847,24 @@ class MainWindow(QMainWindow):
                     400, lambda: self._camera_worker.restart_camera(dev))
                 self.set_status("Kamera di-restart (setting exposure/gain/WB)",
                                 4000)
+        # Tugas 5: device inferensi berubah → compile ulang model aktif tanpa
+        # restart aplikasi. Fallback ke CPU ditangani InferenceEngine.
+        infer_settings = settings.get("inference") or {}
+        if "openvino_device" in infer_settings or "cpu_pcore_only" in infer_settings:
+            try:
+                self._inference_engine.set_device(
+                    infer_settings.get("openvino_device", "CPU"),
+                    cpu_pcore_only=infer_settings.get("cpu_pcore_only", False))
+                dev_now = self._inference_engine.active_device
+                want = str(infer_settings.get("openvino_device", "CPU")).upper()
+                if dev_now not in ("-", want) and want != "AUTO":
+                    self.set_status(
+                        f"Device '{want}' tidak bisa dipakai — inference "
+                        f"berjalan di {dev_now}.", 6000)
+            except Exception as e:
+                logger.warning("Gagal mengganti device inferensi: %s", e)
+                self.set_status(f"Gagal mengganti device inferensi: {e}", 6000)
+
         # YOLO config bisa berubah di Settings → muat ulang detektor (lazy)
         # pada frame berikutnya, tanpa perlu restart aplikasi
         self._yolo_det = None
@@ -3794,6 +3951,13 @@ class MainWindow(QMainWindow):
         # Refresh I/O Monitor saat beralih ke tab I/O Settings
         elif index == 6:
             self._io_page.refresh_monitor_connection()
+
+        # Tugas 2: polling kamera hanya saat ada konsumen frame (RUN/TEACH
+        # atau replay). Tab lain → kamera tetap terbuka tapi tidak membaca
+        # frame — kembali ke RUN langsung jalan tanpa restart.
+        if self._camera_worker:
+            self._camera_worker.set_polling(
+                index in (0, 1) or self._replay_test_mode)
 
     def _show_about(self):
         QMessageBox.about(
@@ -3922,22 +4086,20 @@ class MainWindow(QMainWindow):
     def _update_runtime_status(self):
         """Update inference runtime indicator in Settings page."""
         has_ov = self._inference_engine._use_ov if hasattr(self._inference_engine, '_use_ov') else False
-        has_torch = False
-        try:
-            import torch  # noqa: F401
-            has_torch = True
-        except Exception:
-            pass
+        # Tugas 4: jangan `import torch` hanya untuk label — cek apakah sudah
+        # termuat (nol biaya, dan justru lebih benar: yang relevan adalah
+        # apakah torch TERMUAT, bukan apakah terinstall).
+        has_torch = "torch" in sys.modules
 
-        # Deteksi GPU/CUDA
+        # Deteksi GPU/CUDA (tanpa import tambahan)
         gpu_info = ""
         gpu_available = False
         if has_torch:
             try:
-                import torch
-                if torch.cuda.is_available():
+                _torch = sys.modules["torch"]
+                if _torch.cuda.is_available():
                     gpu_available = True
-                    gpu_info = torch.cuda.get_device_name(0)
+                    gpu_info = _torch.cuda.get_device_name(0)
             except Exception:
                 pass
 
@@ -4018,13 +4180,21 @@ class MainWindow(QMainWindow):
         if self._camera_worker:
             self._camera_worker.stop_camera()
         self._perf_timer.stop()
+        # Hentikan thread export frame replay (daemon) — item tersisa tetap
+        # ditulis (get() → put(None) = sentinel bersih).
+        self._export_stop = True
+        try:
+            self._export_queue.put(None)
+        except Exception:
+            pass
         # Tutup port PLC + matikan coil output (biar PLC tidak menerima
         # sinyal OK/NG dari sistem yang sudah mati)
         self._shutdown_plc()
         # Matikan Flask API (thread daemon + server shutdown)
         self._shutdown_flask()
         for t, name in [(self._camera_thread, "camera"),
-                        (self._training_thread, "training")]:
+                        (self._training_thread, "training"),
+                        (getattr(self, "_infer_thread", None), "inference")]:
             if t and t.isRunning():
                 t.quit()
                 if not t.wait(2000):

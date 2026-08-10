@@ -60,8 +60,21 @@ class InferenceEngine:
     Thread-safe untuk concurrent access.
     """
 
-    def __init__(self, input_size: int = 256):
+    def __init__(self, input_size: int = 256, device: str = "CPU",
+                 cache_dir: Optional[Path] = None,
+                 cpu_pcore_only: bool = False):
         self._input_size = input_size
+        # Tugas 5: device inferensi bisa dipilih (CPU / GPU / AUTO). iGPU jauh
+        # lebih cepat untuk model besar DAN membebaskan CPU untuk GUI —
+        # terukur di PC dev (i5-7200U + HD 620): PatchCore 964→542 ms,
+        # YOLO11l-cls 1058→160 ms. Default tetap CPU (paling aman/portabel).
+        self._device = (device or "CPU").upper()
+        self._active_device: Optional[str] = None   # device yg BENAR dipakai
+        # CPU hybrid (P-core + E-core, mis. i3-1315U): OpenVINO membagi satu
+        # inference ke semua thread lalu menunggu yang paling lambat — thread
+        # di E-core menahan seluruh inference. PCORE_ONLY membuat latency
+        # lebih stabil sekaligus menyisakan E-core untuk GUI + decode video.
+        self._cpu_pcore_only = bool(cpu_pcore_only)
         self._lock = threading.Lock()
         self._model: Optional[ov.CompiledModel] = None
         self._model_path: Optional[Path] = None
@@ -95,6 +108,17 @@ class InferenceEngine:
                 self._core = _OV_CORE()
                 logger.info("OpenVINO core initialized. Available devices: %s",
                             self._core.available_devices)
+                # Tugas 5: model cache — WAJIB kalau device GPU dipakai.
+                # Compile GPU tanpa cache ±18 detik tiap load (hot-swap jadi
+                # tidak terpakai); dengan cache ±0,4 detik (terukur).
+                if cache_dir:
+                    try:
+                        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+                        self._core.set_property({"CACHE_DIR": str(cache_dir)})
+                        logger.info("OpenVINO CACHE_DIR: %s", cache_dir)
+                    except Exception as e:
+                        logger.warning("CACHE_DIR gagal diset (%s): %s",
+                                       cache_dir, e)
                 # Coba deteksi GPU device via OpenVINO
                 try:
                     if self._core is not None:
@@ -108,18 +132,6 @@ class InferenceEngine:
                                         self._core.available_devices)
                 except Exception:
                     pass
-                # Cek CUDA via PyTorch
-                try:
-                    import torch
-                    if torch.cuda.is_available():
-                        logger.info("CUDA GPU terdeteksi via PyTorch: %s",
-                                    torch.cuda.get_device_name(0))
-                    else:
-                        logger.info("CUDA tidak tersedia (PyTorch ada tapi GPU tidak terdeteksi)")
-                except ImportError:
-                    logger.info("CUDA tidak tersedia (PyTorch tidak terinstall)")
-                except Exception as e:
-                    logger.debug("CUDA check error: %s", e)
             except Exception as e:
                 logger.warning("OpenVINO core init failed: %s", e)
                 self._use_ov = False
@@ -227,7 +239,7 @@ class InferenceEngine:
             for attempt in range(5):
                 try:
                     model = self._core.read_model(str(xml_path))
-                    compiled = self._core.compile_model(model, "CPU")
+                    compiled = self._compile_on_device(model)
                     break
                 except (PermissionError, OSError) as e:
                     if attempt == 4:
@@ -241,6 +253,10 @@ class InferenceEngine:
             pshape = input_key.get_partial_shape()
             last_dim = pshape[-1]
             self._input_size = last_dim.get_length() if last_dim.is_static else self._input_size
+
+            # Pengaman: input_size IR vs config template (kalau ada) — skala
+            # skor PatchCore beda tiap ukuran; mismatch = model tidak cocok.
+            self._warn_input_size_mismatch(xml_path)
 
             # Atomic swap
             with self._lock:
@@ -257,12 +273,148 @@ class InferenceEngine:
                 # Clean old model
                 del old_model
 
-            logger.info("Model loaded successfully: %s (input size: %d, score_ref: %s, mode: %s)",
+            logger.info("Model loaded successfully: %s (input size: %d, score_ref: %s, "
+                        "mode: %s, device: %s)",
                         xml_path, self._input_size,
                         f"{score_ref:.4f}" if score_ref else "none",
-                        algorithm)
+                        algorithm, self._active_device)
         except Exception as e:
             raise InferenceEngineError(f"Model load failed: {e}") from e
+
+    def _compile_on_device(self, model):
+        """Compile ke device pilihan; gagal → fallback CPU + WARNING.
+
+        Device tidak tersedia TIDAK boleh membuat aplikasi crash — lini
+        produksi harus tetap jalan meski iGPU/driver bermasalah.
+        """
+        want = self._device or "CPU"
+        avail = []
+        try:
+            avail = [d.upper() for d in self._core.available_devices]
+        except Exception:
+            pass
+        if want != "AUTO" and avail and want not in avail:
+            logger.warning(
+                "Device '%s' tidak tersedia (ada: %s) — fallback ke CPU",
+                want, avail)
+            want = "CPU"
+
+        cfg = {}
+        # Properti hybrid P/E-core hanya valid untuk plugin CPU — dikirim ke
+        # GPU akan melempar exception.
+        if want == "CPU" and self._cpu_pcore_only:
+            cfg = {"SCHEDULING_CORE_TYPE": "PCORE_ONLY",
+                   "ENABLE_HYPER_THREADING": "NO"}
+        try:
+            compiled = self._core.compile_model(model, want, cfg)
+            self._active_device = want
+            if cfg:
+                logger.info("Compile di %s dengan %s", want, cfg)
+            return compiled
+        except (PermissionError, OSError):
+            raise            # ditangani retry .bin-locked di load_model
+        except Exception as e:
+            if want == "CPU" and not cfg:
+                raise
+            logger.warning(
+                "Compile di '%s' gagal (%s) — fallback ke CPU polos", want, e)
+            compiled = self._core.compile_model(model, "CPU")
+            self._active_device = "CPU"
+            return compiled
+
+    @property
+    def active_device(self) -> str:
+        """Device yang BENAR-BENAR dipakai (bisa beda dari yang diminta
+        kalau terjadi fallback)."""
+        return self._active_device or "-"
+
+    def set_device(self, device: str, cpu_pcore_only: Optional[bool] = None
+                   ) -> None:
+        """Ganti device inferensi. Model yang sedang aktif di-compile ulang
+        (hot-swap) supaya perubahan langsung berlaku tanpa restart.
+
+        PERINGATAN: iGPU menghitung dengan presisi berbeda (FP16) sementara
+        `score_ref` di norm.json dikalibrasi pada CPU FP32 — skor bisa
+        bergeser. Validasi skor CPU vs GPU sebelum dipakai produksi.
+        """
+        new_dev = (device or "CPU").upper()
+        changed = (new_dev != self._device
+                   or (cpu_pcore_only is not None
+                       and bool(cpu_pcore_only) != self._cpu_pcore_only))
+        self._device = new_dev
+        if cpu_pcore_only is not None:
+            self._cpu_pcore_only = bool(cpu_pcore_only)
+        if not changed:
+            return
+        path = self._model_path
+        if path is not None:
+            logger.info("Device diubah ke %s — compile ulang model %s",
+                        new_dev, path)
+            self.load_model(path)
+
+    @staticmethod
+    def _read_model_meta(xml_path: Path) -> dict:
+        """Baca model_meta.json di samping model.xml (Tugas 8).
+
+        Fallback ke folder 'openvino' bila model dimuat dari 'openvino_int8'
+        (pola sama dengan _read_norm / _read_yolo_meta). Model lama tidak
+        punya file ini → kembalikan {} tanpa keluhan.
+        """
+        import json
+        candidates = [xml_path.parent / "model_meta.json"]
+        if xml_path.parent.name == "openvino_int8":
+            candidates.append(
+                xml_path.parent.parent / "openvino" / "model_meta.json")
+        for p in candidates:
+            if p.exists():
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        return json.load(f) or {}
+                except Exception as e:
+                    logger.warning("Gagal baca model_meta.json (%s): %s", p, e)
+        return {}
+
+    def _warn_input_size_mismatch(self, xml_path: Path):
+        """Bandingkan input_size IR (model terpasang) dengan config template.
+
+        Skala skor PatchCore mentah beda tiap input_size (norm.json di-
+        kalibrasi per ukuran). Kalau template config menyimpan input_size
+        yang berbeda dari IR → model lama tidak cocok, wajib retrain.
+        Hanya log WARNING — jangan mengubah perilaku inference.
+        """
+        import json
+        cfg_path = xml_path.parent.parent.parent / "config.json"
+        if not cfg_path.exists():
+            return
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            cfg_size = cfg.get("input_size")
+            if cfg_size and int(cfg_size) != int(self._input_size):
+                logger.warning(
+                    "INPUT SIZE MISMATCH: model IR ber-input %d tapi config "
+                    "template %s tertulis input_size=%s. Skor tidak cocok — "
+                    "wajib training ulang sebelum dipakai produksi.",
+                    self._input_size, cfg_path, cfg_size)
+
+            # Tugas 8: backbone/algorithm tidak terbaca dari IR, jadi
+            # dibandingkan dengan model_meta.json — catatan independen yang
+            # ditulis saat export. Model lama (sebelum Tugas 8) tidak punya
+            # file ini; itu bukan error, cukup dilewati.
+            meta = self._read_model_meta(xml_path)
+            if meta:
+                for key, label in (("backbone", "BACKBONE"),
+                                   ("algorithm", "ALGORITHM")):
+                    want, have = cfg.get(key), meta.get(key)
+                    if want and have and str(want) != str(have):
+                        logger.warning(
+                            "%s MISMATCH: model di disk dilatih dengan %s='%s' "
+                            "tapi config template tertulis '%s'. Label di UI "
+                            "TIDAK menggambarkan model yang sedang jalan — "
+                            "training ulang untuk menyamakan.",
+                            label, key, have, want)
+        except Exception as e:  # config tak terbaca → bukan urusan kita
+            logger.debug("Input size config check skipped: %s", e)
 
     @staticmethod
     def _read_norm(xml_path: Path):

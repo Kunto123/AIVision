@@ -12,7 +12,15 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from lightning.pytorch.callbacks import EarlyStopping
+# CATATAN: `lightning` (dan lewat itu, torch) SENGAJA TIDAK diimport di
+# level modul. Rantainya: main_window → training_worker → training →
+# lightning → torch. Import di sini membuat:
+#   1) edge_mode=true GAGAL TOTAL — torch jadi termuat SESUDAH PySide6/cv2,
+#      persis urutan yang memicu WinError 1114 (lihat main.py:44-56);
+#   2) PC edge tanpa `lightning` (tidak ada di requirements_edge.txt) tidak
+#      bisa start sama sekali — ModuleNotFoundError saat import MainWindow.
+# EarlyStopping hanya dipakai di jalur training Anomalib, jadi diimport
+# secara lazy di titik pemakaian.
 
 from visioninspect.utils.logging_setup import get_logger
 from visioninspect.utils.config import DEFAULT_DATA_DIR
@@ -366,6 +374,9 @@ class TrainingPipeline:
         # ======================================================
         engine_callbacks: list = []
         if self._config.patience > 0:
+            # Lazy import — lihat catatan di header modul (jangan dinaikkan
+            # ke level modul: merusak edge_mode & startup PC edge).
+            from lightning.pytorch.callbacks import EarlyStopping
             # image_AUROC dari validation metrics Anomalib
             monitor_metric = "image_AUROC"
             es = EarlyStopping(
@@ -428,6 +439,12 @@ class TrainingPipeline:
         self._report(70, "Export ke OpenVINO...")
         export_dir = output_dir / "openvino"
         export_dir.mkdir(parents=True, exist_ok=True)
+        # Tugas 8: model_meta.json = catatan INDEPENDEN tentang model yang
+        # benar-benar diexport. Sebelumnya satu-satunya sumber adalah
+        # config.json template — yang bisa diubah user SETELAH training,
+        # sehingga UI bisa menampilkan backbone/ukuran yang tidak sesuai
+        # dengan model yang sedang jalan (terbukti pada template_2:
+        # config tertulis wide_resnet50_2, IR terpasang resnet18).
 
         ov_export_ok = False
         try:
@@ -447,6 +464,7 @@ class TrainingPipeline:
             ov_xml = export_dir / "model.xml"
             ov.save_model(ov_model, str(ov_xml))
             logger.info("OpenVINO export selesai (direct): %s", ov_xml)
+            self._write_model_meta(export_dir)
             ov_export_ok = True
         except Exception as e:
             logger.warning("OpenVINO export gagal: %s", e)
@@ -546,6 +564,29 @@ class TrainingPipeline:
             "ng_scores": ng_scores,
             "metadata": metadata,
         }
+
+    def _write_model_meta(self, export_dir: Path, **extra) -> None:
+        """Tulis model_meta.json di samping model.xml (Tugas 8).
+
+        Ini catatan INDEPENDEN dari config.json template: apa pun yang
+        nanti diubah user di UI, file ini tetap menyatakan model yang
+        benar-benar ada di disk. Dipakai InferenceEngine saat load untuk
+        mendeteksi config yang sudah menyimpang (WARNING, bukan blokir).
+        """
+        payload = {
+            "algorithm": self._config.algorithm,
+            "backbone": self._config.backbone,
+            "input_size": self._config.input_size,
+            "coreset_sampling_ratio": self._config.coreset_sampling_ratio,
+            "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        payload.update(extra)
+        try:
+            with open(export_dir / "model_meta.json", "w",
+                      encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            logger.warning("Gagal menulis model_meta.json: %s", e)
 
     # ---- YOLO Training (ultralytics, classification OK/NG) ----
 
@@ -763,6 +804,12 @@ class TrainingPipeline:
                 "task": "classify",
                 "imgsz": imgsz,
             }, f, indent=2)
+
+        # Tugas 8: catatan independen — untuk YOLO, "backbone" = bobot
+        # pretrained yang dipakai dan input_size = imgsz efektif.
+        self._write_model_meta(
+            export_dir, backbone=str(self._config.yolo_pretrained),
+            input_size=int(imgsz), algorithm="yolo", classes=yolo_names)
 
         # ── Histogram: prob OK dari model OpenVINO hasil export ──
         self._report(90, "Mengumpulkan skor histogram...")

@@ -321,7 +321,9 @@ class RunPage(QWidget):
         colors = ["#FFFFFF", "#FFD700", "#00BFFF", "#FF69B4", "#7B68EE"]
         for i, r in enumerate(results):
             roi = r["roi"]
-            label = f"ROI{i+1}"
+            # Label custom dari config template (r["label"] dikirim
+            # main_window) — fallback ROI{i+1} hanya template lama.
+            label = r.get("label") or f"ROI{i+1}"
             judge = r["judgement"]
             icon = "OK" if judge == "OK" else "NG"
             color = colors[i % len(colors)]

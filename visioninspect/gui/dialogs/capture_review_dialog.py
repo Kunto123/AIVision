@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -29,10 +29,16 @@ from visioninspect.gui.widgets.roi_editor import ROIData
 
 GREEN = "#22C55E"
 RED = "#EF4444"
+GREY = "#64748B"
 
 
 class _ROICropToggle(QFrame):
-    """Satu crop ROI dengan border warna yang bisa di-toggle OK/NG dengan klik."""
+    """Satu crop ROI: klik badan = toggle OK/NG, tombol ✕ = buang crop ini.
+
+    "Buang" TIDAK menghapus file apa pun — pada tahap ini belum ada yang
+    tersimpan. Yang dibuang hanya dikeluarkan dari daftar yang akan ditulis
+    ke dataset, dan bisa dikembalikan lagi selama dialog masih terbuka.
+    """
 
     toggled_label = Signal()
 
@@ -40,7 +46,8 @@ class _ROICropToggle(QFrame):
         super().__init__(parent)
         self.roi = roi
         self.crop = crop_bgr
-        self.label = label  # "ok" | "ng" — state saat ini, bisa di-toggle
+        self.label = label      # "ok" | "ng" — state saat ini, bisa di-toggle
+        self.excluded = False   # True = tidak ikut disimpan ke dataset
 
         self.setFixedWidth(120)
         self.setCursor(Qt.PointingHandCursor)
@@ -48,21 +55,43 @@ class _ROICropToggle(QFrame):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
-        img_label = QLabel()
-        img_label.setFixedSize(100, 100)
-        img_label.setAlignment(Qt.AlignCenter)
+        # Baris atas: nama ROI + tombol buang
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(2)
+        name_label = QLabel(roi.label or "ROI")
+        name_label.setStyleSheet(
+            "color: #E2E8F0; font-size: 11px; background: transparent;")
+        head.addWidget(name_label, 1)
+        self._drop_btn = QPushButton("✕")
+        self._drop_btn.setFixedSize(20, 20)
+        self._drop_btn.setCursor(Qt.PointingHandCursor)
+        self._drop_btn.setToolTip(
+            "Buang crop ini — tidak ikut disimpan ke dataset.\n"
+            "Klik lagi untuk mengembalikan.")
+        self._drop_btn.clicked.connect(self._toggle_excluded)
+        head.addWidget(self._drop_btn, 0)
+        layout.addLayout(head)
+
+        self._img_label = QLabel()
+        self._img_label.setFixedSize(100, 100)
+        self._img_label.setAlignment(Qt.AlignCenter)
         rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         qimg = QImage(rgb.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimg).scaled(
+        self._pix_normal = QPixmap.fromImage(qimg).scaled(
             96, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        img_label.setPixmap(pixmap)
-        layout.addWidget(img_label, alignment=Qt.AlignCenter)
-
-        name_label = QLabel(roi.label or "ROI")
-        name_label.setAlignment(Qt.AlignCenter)
-        name_label.setStyleSheet("color: #E2E8F0; font-size: 11px; background: transparent;")
-        layout.addWidget(name_label)
+        # Versi redup untuk keadaan "dibuang" — supaya sekali lihat langsung
+        # ketahuan mana yang tidak ikut, tanpa harus membaca teks.
+        faded = QPixmap(self._pix_normal.size())
+        faded.fill(Qt.transparent)
+        _p = QPainter(faded)
+        _p.setOpacity(0.25)
+        _p.drawPixmap(0, 0, self._pix_normal)
+        _p.end()
+        self._pix_faded = faded
+        self._img_label.setPixmap(self._pix_normal)
+        layout.addWidget(self._img_label, alignment=Qt.AlignCenter)
 
         self._status_label = QLabel()
         self._status_label.setAlignment(Qt.AlignCenter)
@@ -70,20 +99,42 @@ class _ROICropToggle(QFrame):
 
         self._refresh_style()
 
-    def mousePressEvent(self, event):
-        self.label = "ng" if self.label == "ok" else "ok"
+    def _toggle_excluded(self):
+        self.excluded = not self.excluded
         self._refresh_style()
         self.toggled_label.emit()
+
+    def mousePressEvent(self, event):
+        # Crop yang sudah dibuang tidak ikut di-toggle OK/NG — labelnya tidak
+        # bermakna lagi. Klik badan mengembalikannya dulu.
+        if self.excluded:
+            self._toggle_excluded()
+        else:
+            self.label = "ng" if self.label == "ok" else "ok"
+            self._refresh_style()
+            self.toggled_label.emit()
         super().mousePressEvent(event)
 
     def _refresh_style(self):
-        color = GREEN if self.label == "ok" else RED
+        if self.excluded:
+            color, text, style = GREY, "DIBUANG", "dashed"
+        else:
+            color = GREEN if self.label == "ok" else RED
+            text, style = ("OK" if self.label == "ok" else "NG"), "solid"
         self.setStyleSheet(
-            f"QFrame {{ background: #111D30; border: 3px solid {color}; "
+            f"QFrame {{ background: #111D30; border: 3px {style} {color}; "
             f"border-radius: 6px; }}")
-        self._status_label.setText("OK" if self.label == "ok" else "NG")
+        self._img_label.setPixmap(
+            self._pix_faded if self.excluded else self._pix_normal)
+        self._drop_btn.setText("↺" if self.excluded else "✕")
+        self._drop_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: none; "
+            f"color: {color}; font-weight: bold; font-size: 13px; }}"
+            f"QPushButton:hover {{ color: #FFFFFF; }}")
+        self._status_label.setText(text)
         self._status_label.setStyleSheet(
-            f"font-weight: bold; font-size: 12px; color: {color}; background: transparent;")
+            f"font-weight: bold; font-size: 12px; color: {color}; "
+            f"background: transparent;")
 
 
 class CaptureReviewDialog(QDialog):
@@ -123,9 +174,10 @@ class CaptureReviewDialog(QDialog):
         layout.addWidget(title)
 
         hint = QLabel(
-            "Semua ROI dianggap sesuai tombol yang kamu klik. Klik ROI yang "
-            "kondisinya beda (mis. ada cacat cuma di satu ROI) untuk membalik "
-            "labelnya sebelum disimpan."
+            "Klik gambar untuk membalik label OK ⇄ NG. Klik tombol ✕ di pojok "
+            "untuk membuang crop itu — crop yang dibuang TIDAK masuk dataset "
+            "(klik ↺ untuk mengembalikan). Tidak ada file yang dihapus; belum "
+            "ada yang tersimpan sampai kamu menekan tombol di bawah."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #9FB3C8; font-size: 12px;")
@@ -143,6 +195,7 @@ class CaptureReviewDialog(QDialog):
                 continue
             crop = self._crop_roi(roi)
             toggle = _ROICropToggle(roi, crop, default_label, self)
+            toggle.toggled_label.connect(self._refresh_summary)
             self._toggles.append(toggle)
             strip_layout.addWidget(toggle)
         strip_layout.addStretch()
@@ -150,6 +203,9 @@ class CaptureReviewDialog(QDialog):
         layout.addWidget(scroll, 1)
 
         btn_row = QHBoxLayout()
+        self._summary = QLabel()
+        self._summary.setStyleSheet("color: #9FB3C8; font-size: 12px;")
+        btn_row.addWidget(self._summary)
         btn_row.addStretch()
         cancel_btn = QPushButton("✕ Batal")
         cancel_btn.setMinimumHeight(36)
@@ -157,14 +213,43 @@ class CaptureReviewDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
 
-        save_btn = QPushButton("Simpan Semua")
-        save_btn.setObjectName("primaryButton")
-        save_btn.setMinimumHeight(36)
-        save_btn.setMinimumWidth(140)
-        save_btn.clicked.connect(self.accept)
-        btn_row.addWidget(save_btn)
+        self._save_btn = QPushButton("Simpan Semua")
+        self._save_btn.setObjectName("primaryButton")
+        self._save_btn.setMinimumHeight(36)
+        self._save_btn.setMinimumWidth(150)
+        self._save_btn.clicked.connect(self.accept)
+        btn_row.addWidget(self._save_btn)
         layout.addLayout(btn_row)
+        self._refresh_summary()
+
+    def _refresh_summary(self):
+        """Tampilkan apa yang AKAN terjadi, bukan sekadar jumlah kotak."""
+        kept = [t for t in self._toggles if not t.excluded]
+        n_ok = sum(1 for t in kept if t.label == "ok")
+        n_ng = len(kept) - n_ok
+        n_drop = len(self._toggles) - len(kept)
+        parts = [f"Disimpan: {len(kept)} ({n_ok} OK, {n_ng} NG)"]
+        if n_drop:
+            parts.append(f"dibuang: {n_drop}")
+        self._summary.setText("  ·  ".join(parts))
+        # Kalau semua dibuang, tombolnya harus jujur: tidak ada yang disimpan,
+        # gambar ini dilewati.
+        if not kept:
+            self._save_btn.setText("Lewati gambar ini")
+            self._summary.setText(
+                "Semua crop dibuang — tidak ada yang masuk dataset")
+        else:
+            self._save_btn.setText(f"Simpan {len(kept)} crop")
 
     def get_labeled_crops(self) -> List[Tuple[ROIData, np.ndarray, str]]:
-        """Return list of (roi, crop_bgr, label) — label sudah final setelah toggle."""
-        return [(t.roi, t.crop, t.label) for t in self._toggles]
+        """(roi, crop_bgr, label) untuk crop yang AKAN disimpan.
+
+        Crop yang ditandai dibuang tidak ikut — inilah satu-satunya sumber
+        kebenaran yang dipakai pemanggil untuk menulis ke dataset.
+        """
+        return [(t.roi, t.crop, t.label)
+                for t in self._toggles if not t.excluded]
+
+    def get_dropped_count(self) -> int:
+        """Jumlah crop yang sengaja dibuang operator (untuk status/log)."""
+        return sum(1 for t in self._toggles if t.excluded)

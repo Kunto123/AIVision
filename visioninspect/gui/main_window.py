@@ -2359,6 +2359,8 @@ class MainWindow(QMainWindow):
             return True
 
         saved_ok = saved_ng = 0
+        # get_labeled_crops() SUDAH menyaring crop yang dibuang operator —
+        # yang dibuang tidak pernah menyentuh disk.
         for roi, crop, lbl in dialog.get_labeled_crops():
             self._pm.save_template_image(
                 self._active_program, self._active_template,
@@ -2367,10 +2369,17 @@ class MainWindow(QMainWindow):
                 saved_ok += 1
             else:
                 saved_ng += 1
-        logger.info("Capture per-ROI: %d OK, %d NG (template=%s)",
-                     saved_ok, saved_ng, self._active_template)
+        dropped = dialog.get_dropped_count()
+        logger.info("Capture per-ROI: %d OK, %d NG, %d dibuang (template=%s)",
+                    saved_ok, saved_ng, dropped, self._active_template)
         self._refresh_template_ui()
-        self.set_status(f"Tersimpan per-ROI: {saved_ok} OK, {saved_ng} NG", 3000)
+        if saved_ok or saved_ng:
+            msg = f"Tersimpan per-ROI: {saved_ok} OK, {saved_ng} NG"
+            if dropped:
+                msg += f" ({dropped} crop dibuang)"
+        else:
+            msg = "Semua crop dibuang — gambar ini dilewati"
+        self.set_status(msg, 3000)
         return True
 
     def _on_capture(self, label: str):

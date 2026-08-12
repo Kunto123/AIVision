@@ -29,7 +29,7 @@ OUTPUT_ROWS = [
 INPUT_ROWS = [
     ("trigger", "Trigger (minta 1x sensing)"),
     ("reset_result", "Reset hasil / counter"),
-    ("switch_program", "Switch program (baca register)"),
+    ("switch_template", "Ganti template (nomor dari register)"),
 ]
 MONITOR_ROWS = [
     ("result_ok", "OK", "output"),
@@ -38,7 +38,7 @@ MONITOR_ROWS = [
     ("busy", "BUSY", "output"),
     ("trigger", "Trigger", "input"),
     ("reset_result", "Reset", "input"),
-    ("switch_program", "Switch Program", "input"),
+    ("switch_template", "Ganti Template", "input"),
 ]
 
 _QSS = """

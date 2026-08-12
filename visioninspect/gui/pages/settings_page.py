@@ -209,8 +209,43 @@ class SettingsPage(QWidget):
         mode_row.addStretch()
         infer_layout.addLayout(mode_row)
 
+        # === Opsi khusus mode PLC Trigger ===
+        self._infer_when_idle = QCheckBox(
+            "Tetap infer di antara trigger (skor live terlihat)")
+        self._infer_when_idle.setToolTip(
+            "MATI (disarankan): tanpa trigger tidak ada inferensi sama sekali.\n"
+            "Paling ringan, dan hasil resmi paling cepat keluar.\n\n"
+            "NYALA: operator melihat skor live sepanjang waktu. Konsekuensi\n"
+            "terukur di CPU 2 core — saat trigger masuk hampir selalu ada\n"
+            "inferensi lain yang sedang jalan dan tidak bisa dibatalkan di\n"
+            "tengah jalan, sehingga hasil resmi bisa tertunda hingga ~1 detik.\n"
+            "Watchdog di ladder PLC harus dinaikkan (±2,5 → ±3,5 detik).\n\n"
+            "Hanya berlaku di mode PLC Trigger.")
+        infer_layout.addWidget(self._infer_when_idle)
+
+        trig_row = QHBoxLayout()
+        trig_row.addWidget(QLabel("Batas waktu siklus trigger:"))
+        self._trigger_timeout_spin = QSpinBox()
+        self._trigger_timeout_spin.setRange(200, 30000)
+        self._trigger_timeout_spin.setValue(2000)
+        self._trigger_timeout_spin.setSuffix(" ms")
+        self._trigger_timeout_spin.setSingleStep(100)
+        self._trigger_timeout_spin.setFixedWidth(130)
+        self._trigger_timeout_spin.setToolTip(
+            "Lewat batas ini, siklus trigger dianggap gagal: peringatan muncul\n"
+            "di layar, tampilan tidak lagi beku, dan TIDAK ada sinyal ke PLC.\n"
+            "Setel LEBIH PENDEK dari watchdog ladder supaya operator melihat\n"
+            "penyebabnya sebelum lini berhenti.")
+        trig_row.addWidget(self._trigger_timeout_spin)
+        trig_row.addStretch()
+        infer_layout.addLayout(trig_row)
+
         mode_help = QLabel(
-            "PLC Trigger membutuhkan PLC aktif (Settings → PLC → Enable PLC).")
+            "PLC Trigger membutuhkan PLC aktif (Settings → PLC → Enable PLC).\n"
+            "Kontrak sinyal: pulse OK/NG HANYA dikirim kalau model benar-benar "
+            "selesai menilai. Part-check menolak, error, atau timeout → tidak "
+            "ada sinyal sama sekali (diam = gagal), lini dihentikan oleh "
+            "watchdog ladder.")
         mode_help.setObjectName("secondaryText")
         mode_help.setWordWrap(True)
         infer_layout.addWidget(mode_help)
@@ -565,6 +600,8 @@ class SettingsPage(QWidget):
                 "cycle_delay_ms": self._cycle_delay_spin.value(),
                 "openvino_device": self._ov_device.currentText(),
                 "cpu_pcore_only": self._cpu_pcore_only.isChecked(),
+                "infer_when_idle": self._infer_when_idle.isChecked(),
+                "trigger_timeout_ms": self._trigger_timeout_spin.value(),
             },
             "yolo": {
                 "enabled": self._yolo_enabled.isChecked(),
@@ -795,6 +832,10 @@ class SettingsPage(QWidget):
         infer_mode = self._config.get("inference.mode", "continuous")
         self._inference_mode.setCurrentIndex(
             {"continuous": 0, "plc_trigger": 1, "manual": 2}.get(infer_mode, 0))
+        self._infer_when_idle.setChecked(
+            self._config.get("inference.infer_when_idle", False))
+        self._trigger_timeout_spin.setValue(
+            self._config.get("inference.trigger_timeout_ms", 2000))
 
         # Model
         algo = self._config.get("model.algorithm", "patchcore")

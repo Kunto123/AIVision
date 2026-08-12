@@ -286,10 +286,31 @@ class ProgramManager:
         logger.info("Template '%s' deleted from program '%s'", template_id, program)
 
     def get_template_config(self, program: str, template_id: str) -> dict:
-        """Get template configuration."""
-        return self._load_json(
-            self._get_template_dir(program) / template_id / "config.json", {}
-        )
+        """Get template configuration.
+
+        Perbaikan-diri: `id` di config WAJIB sama dengan nama folder. Import
+        versi lama menimpa `id` dengan nilai dari template sumber (mis. folder
+        `t` berisi id `Yolov11L`), sehingga identitas template tidak bisa
+        dipercaya dan nama yang salah ikut terekam ke history. Di sini
+        diluruskan sekali, saat config pertama kali dibaca.
+        """
+        cfg_path = self._get_template_dir(program) / template_id / "config.json"
+        cfg = self._load_json(cfg_path, {})
+        if cfg and str(cfg.get("id", "")) != template_id:
+            stale = cfg.get("id", "")
+            cfg["id"] = template_id
+            if not str(cfg.get("name", "")).strip():
+                cfg["name"] = template_id
+            try:
+                self._atomic_write(cfg_path, cfg)
+                logger.warning(
+                    "Template '%s': config id salah ('%s') — diluruskan ke "
+                    "nama folder. Penyebab: import versi lama menimpa id.",
+                    template_id, stale)
+            except Exception as e:
+                logger.warning("Gagal meluruskan id template %s: %s",
+                               template_id, e)
+        return cfg
 
     def update_template_config(self, program: str, template_id: str,
                                 updates: dict) -> None:
@@ -573,13 +594,19 @@ class ProgramManager:
         return str(output_path)
 
     def import_model_from_zip(self, zip_path: Path, program: str,
-                                  template_id: str) -> dict:
-            """Import model dari file .zip ke template.
+                                  template_id: Optional[str] = None,
+                                  as_new_template: bool = True) -> dict:
+            """Import model dari file .zip.
 
             Args:
                 zip_path: Path file .zip hasil export.
                 program: Nama program tujuan.
-                template_id: ID template tujuan (bisa berbeda dari asalnya).
+                template_id: Template tujuan bila menimpa (as_new_template=False).
+                as_new_template: True (default) → BUAT TEMPLATE BARU, tidak
+                    menimpa apa pun. Karena tujuannya folder kosong, seluruh
+                    isi config dari PC training boleh dipulihkan apa adanya
+                    (ROI, part-check, threshold, dst) tanpa merusak template
+                    yang sudah dikalibrasi di mesin ini.
 
             Returns:
                 dict: Metadata hasil import.
@@ -589,6 +616,26 @@ class ProgramManager:
             zip_path = Path(zip_path)
             if not zip_path.exists():
                 raise ProgramError(f"File tidak ditemukan: {zip_path}")
+
+            if as_new_template:
+                # Nama dari zip (kalau ada), difallback ke nama file .zip.
+                # create_template() sendiri yang menjamin folder id unik.
+                src_name = ""
+                try:
+                    with zipfile.ZipFile(str(zip_path), "r") as _zf:
+                        _nm = {n.replace("\\", "/"): n for n in _zf.namelist()}
+                        if "template_config.json" in _nm:
+                            src_name = str(json.loads(
+                                _zf.read(_nm["template_config.json"])
+                            ).get("name", "") or "")
+                except Exception:
+                    src_name = ""
+                created = self.create_template(
+                    program, src_name or zip_path.stem)
+                template_id = created["id"]
+            elif not template_id:
+                raise ProgramError(
+                    "template_id wajib diisi bila as_new_template=False")
 
             tmpl_dir = self._get_template_dir(program) / template_id
             model_dir = tmpl_dir / "model"
@@ -690,6 +737,25 @@ class ProgramManager:
                     existing_cfg = self.get_template_config(program, template_id)
                     restored_config["images"] = existing_cfg.get("images", {})
                     restored_config["image_count"] = existing_cfg.get("image_count", 0)
+                    # `id` TIDAK BOLEH diambil dari zip. Sebelum ini, config
+                    # sumber menimpa id sehingga folder `t` berisi
+                    # id=`Yolov11L` — dan nama itu ikut terekam ke history,
+                    # membuat entry tidak bisa ditelusuri ke templatenya.
+                    # id SELALU = nama folder.
+                    restored_config["id"] = template_id
+                    # Nama tampilan boleh ikut dari sumber, TAPI jangan sampai
+                    # dua template punya nama sama (folder id yang membedakan,
+                    # dan itu tidak terlihat operator).
+                    src_display = str(restored_config.get("name", "") or "")
+                    if src_display:
+                        clash = any(
+                            t["id"] != template_id
+                            and str(t.get("name", "")) == src_display
+                            for t in self.list_templates(program))
+                        restored_config["name"] = (
+                            template_id if clash else src_display)
+                    else:
+                        restored_config["name"] = template_id
                     # Tandai sebagai trained
                     restored_config["trained"] = True
                     restored_config["model_version"] = (

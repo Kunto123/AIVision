@@ -86,6 +86,15 @@ class Database:
             ON inspection_history(judgement)
         """)
 
+        # ── Migrasi: kolom `template` ──────────────────────────────────────
+        # Sebelumnya identitas template hanya tersimpan di dalam blob JSON
+        # `metadata`, sehingga history TIDAK BISA disaring per template —
+        # semua template dalam satu program tercampur, dan rebuild menarik
+        # gambar koreksi milik template lain. Kolom ini memakai FOLDER ID
+        # (bukan nama tampilan), karena nama terbukti bisa tertukar akibat
+        # import yang menimpa config.
+        self._migrate_template_column(cursor)
+
         # Program counters (cached for fast access)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS program_counters (
@@ -164,13 +173,55 @@ class Database:
         except (TypeError, ValueError):
             return None
 
+    def _migrate_template_column(self, cursor) -> None:
+        """Tambah kolom `template` + index, lalu backfill dari metadata lama.
+
+        Idempotent: aman dipanggil tiap startup. Baris lama yang metadata-nya
+        tidak berisi template dibiarkan NULL — bukan ditebak.
+        """
+        cols = [r[1] for r in cursor.execute(
+            "PRAGMA table_info(inspection_history)").fetchall()]
+        if "template" not in cols:
+            cursor.execute(
+                "ALTER TABLE inspection_history ADD COLUMN template TEXT")
+            # Backfill: ambil folder id dari metadata JSON baris lama
+            rows = cursor.execute(
+                "SELECT id, metadata FROM inspection_history "
+                "WHERE metadata IS NOT NULL AND metadata != ''").fetchall()
+            filled = 0
+            for row in rows:
+                try:
+                    meta = json.loads(row[1])
+                    tid = str((meta or {}).get("template", "") or "")
+                except Exception:
+                    tid = ""
+                if tid:
+                    cursor.execute(
+                        "UPDATE inspection_history SET template = ? WHERE id = ?",
+                        (tid, row[0]))
+                    filled += 1
+            logger.info("Migrasi history: kolom `template` ditambahkan, "
+                        "%d/%d baris ter-backfill", filled, len(rows))
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_history_template
+            ON inspection_history(template)
+        """)
+
     def add_inspection(self, entry: dict) -> int:
         """Add an inspection result. Returns entry ID."""
+        # `template` = FOLDER ID template (bukan nama tampilan). Diambil dari
+        # entry, fallback ke metadata supaya pemanggil lama tetap benar.
+        template_id = str(entry.get("template", "") or "")
+        if not template_id:
+            meta = entry.get("metadata")
+            if isinstance(meta, dict):
+                template_id = str(meta.get("template", "") or "")
         self.conn.execute("""
             INSERT INTO inspection_history
                 (timestamp, program, score, judgement, threshold,
-                 latency_ms, image_path, thumbnail_path, roi_region, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 latency_ms, image_path, thumbnail_path, roi_region, metadata,
+                 template)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             entry.get("timestamp", time.strftime("%Y-%m-%d %H:%M:%S")),
             entry.get("program", ""),
@@ -182,6 +233,7 @@ class Database:
             entry.get("thumbnail_path"),
             self._json_or_str(entry.get("roi_region")),
             self._json_or_str(entry.get("metadata")),
+            template_id or None,
         ))
         self.conn.commit()
 
@@ -206,14 +258,28 @@ class Database:
         judgement: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        template: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Get inspection history with optional filters."""
+        """Get inspection history with optional filters.
+
+        `template` = FOLDER ID template. Tanpa filter ini, semua template
+        dalam satu program tercampur — dan rebuild akan menarik gambar
+        koreksi milik template lain.
+        """
         query = "SELECT * FROM inspection_history WHERE 1=1"
         params = []
 
         if program:
             query += " AND program = ?"
             params.append(program)
+        if template:
+            # Baris lama (sebelum migrasi) bisa punya template NULL sementara
+            # metadata-nya berisi id — cocokkan keduanya supaya history lama
+            # tidak hilang dari tampilan.
+            query += (" AND (template = ? OR (template IS NULL"
+                      " AND metadata LIKE ?))")
+            params.append(template)
+            params.append(f'%"template": "{template}"%')
         if judgement:
             # Filter mengikuti hasil TERKOREKSI (kolom tampilan)
             query += " AND COALESCE(correct_judgement, judgement) = ?"

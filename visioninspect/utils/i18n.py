@@ -97,7 +97,9 @@ class Translator:
         "history_correct": "Koreksi",
         "history_mark_ok": "Tandai OK",
         "history_mark_ng": "Tandai NG",
-        "history_rebuild": "Rebuild Model",
+        # "Rebuild" menyesatkan: ini melatih ulang model DARI NOL memakai
+        # seluruh gambar template + gambar koreksi, bukan penyesuaian ringan.
+        "history_rebuild": "Latih Ulang Model",
         "history_rollback": "Rollback ke v{version}",
         "history_no_data": "Belum ada riwayat",
 
@@ -218,7 +220,7 @@ class Translator:
         "history_correct": "Correction",
         "history_mark_ok": "Mark as OK",
         "history_mark_ng": "Mark as NG",
-        "history_rebuild": "Rebuild Model",
+        "history_rebuild": "Retrain Model",
         "history_rollback": "Rollback to v{version}",
         "history_no_data": "No history yet",
         "settings_title": "Settings",

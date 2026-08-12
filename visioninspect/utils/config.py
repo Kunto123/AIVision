@@ -94,6 +94,16 @@ class Config:
             # Tidak berpengaruh di CPU non-hybrid. Diabaikan bila device=GPU.
             "cpu_pcore_only": False,
             "enable_int8": True,
+            # Mode plc_trigger: batas waktu satu siklus trigger. Lewat ini →
+            # peringatan di layar, freeze dilepas, dan TIDAK ada pulse ke PLC
+            # (diam = gagal). Sengaja LEBIH PENDEK dari watchdog ladder supaya
+            # operator melihat sebabnya sebelum lini berhenti.
+            "trigger_timeout_ms": 2000,
+            # Mode plc_trigger: tetap infer di antara trigger (skor live
+            # terlihat) — hasil resmi tetap hanya dari frame trigger.
+            # Default MATI: di CPU 2 core ini menambah antrean dan
+            # memperlambat hasil resmi hampir 2x.
+            "infer_when_idle": False,
             "cycle_delay_ms": 1000,  # jeda antar siklus inspeksi (ms), 0=langsung
         },
 
@@ -129,7 +139,9 @@ class Config:
                 "inputs": {
                     "trigger": 0,
                     "reset_result": 5,
-                    "switch_program": 6,
+                    # Ganti TEMPLATE aktif (nomornya dari program_register).
+                    # Config lama dengan key "switch_program" tetap dikenali.
+                    "switch_template": 6,
                 },
                 "program_register": 10,
             },

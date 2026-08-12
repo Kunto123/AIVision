@@ -211,11 +211,26 @@ class MainWindow(QMainWindow):
         self._ng_interval_timer.timeout.connect(self._on_ng_interval_tick)
         self._ng_interval_active = False
 
-        # Cycle delay timer (jeda antar siklus inspeksi)
+        # Cycle delay timer (jeda antar siklus inspeksi).
+        # CATATAN: di mode plc_trigger cycle delay TIDAK berlaku — timing antar
+        # part dipegang ladder PLC sepenuhnya.
         self._cycle_delay_timer = QTimer(self)
         self._cycle_delay_timer.setSingleShot(True)
         self._cycle_delay_timer.timeout.connect(self._on_cycle_delay_tick)
         self._cycle_delay_active = False
+
+        # ── Siklus trigger PLC (mode plc_trigger) ──
+        # Kontrak dengan ladder: PULSE HANYA KELUAR KALAU MODEL BENAR-BENAR
+        # SELESAI MENILAI. Part-check menolak / error / timeout → TIDAK ada
+        # pulse sama sekali; watchdog ladder yang menghentikan lini, dan
+        # operator melihat sebabnya di layar.
+        self._trigger_cycle_active = False   # siklus ter-trigger sedang jalan
+        self._freeze_pending = False         # frame berikutnya = frame beku
+        self._display_frozen = False         # live view dibekukan
+        self._gate_rejected = False          # part-check menolak → gate merah
+        self._trigger_timeout_timer = QTimer(self)
+        self._trigger_timeout_timer.setSingleShot(True)
+        self._trigger_timeout_timer.timeout.connect(self._on_trigger_timeout)
 
         # Part Presence Check (cached config — read from disk only on template switch)
         self._current_part_check_cfg: dict = {}
@@ -713,10 +728,18 @@ class MainWindow(QMainWindow):
         # hilang — yang dihemat cuma kerja QPainter/display.
         if self._tabs.currentIndex() not in (0, 1):
             return
+        # Mode trigger: tampilan DIBEKUKAN di frame yang sedang dinilai sampai
+        # hasil keluar (atau siklus gagal). Operator melihat persis frame yang
+        # diputuskan sistem, bukan frame setelahnya.
+        if self._display_frozen:
+            return
         # Throttle display live ke ~15 fps (mata operator tidak butuh 30).
         # Inference tidak terpengaruh (jalur terpisah). Replay dikecualikan.
+        # Frame yang akan dibekukan TIDAK boleh kena throttle — ia harus
+        # benar-benar tergambar sebelum tampilan dikunci.
         now = time.monotonic()
-        if (not self._replay_test_mode and self._last_display_ts
+        if (not self._replay_test_mode and not self._freeze_pending
+                and self._last_display_ts
                 and now - self._last_display_ts < 1 / 15):
             return
         self._last_display_ts = now
@@ -794,20 +817,32 @@ class MainWindow(QMainWindow):
                 gy = int(self._last_gate_roi.get("y", 0))
                 gw = int(self._last_gate_roi.get("width", 64))
                 gh = int(self._last_gate_roi.get("height", 64))
-                # Dynamic color: blue when waiting, green when ready
-                gate_color = "#4ADE80" if self._last_part_ready else "#60A5FA"
-                pen = QPen(QColor(gate_color), 3, Qt.DashLine)
+                # Tiga keadaan — merah HARUS bisa dibedakan dari biru, karena
+                # biru = normal menunggu sedangkan merah = lini berhenti:
+                #   biru  menunggu (belum ada trigger)
+                #   hijau part terdeteksi, inspeksi berjalan
+                #   merah trigger datang tapi part-check MENOLAK → tidak ada
+                #         sinyal ke PLC, operator harus turun tangan
+                if self._gate_rejected:
+                    gate_color, gate_text = "#EF4444", "GATE NG"
+                elif self._last_part_ready:
+                    gate_color, gate_text = "#4ADE80", "GATE"
+                else:
+                    gate_color, gate_text = "#60A5FA", "GATE"
+                pen = QPen(QColor(gate_color),
+                           4 if self._gate_rejected else 3, Qt.DashLine)
                 qp_gate.setPen(pen)
-                qp_gate.setBrush(self._color_alpha(gate_color, 30))
+                qp_gate.setBrush(self._color_alpha(
+                    gate_color, 70 if self._gate_rejected else 30))
                 qp_gate.drawRect(gx, gy, gw, gh)
                 # Label badge
                 qp_gate.setPen(Qt.NoPen)
                 qp_gate.setBrush(QColor(gate_color))
-                label_w = 44
+                label_w = 62 if self._gate_rejected else 44
                 label_y = gy - 16 if gy >= 16 else gy
                 qp_gate.drawRect(gx, label_y, label_w, 16)
                 qp_gate.setPen(QColor("#FFFFFF"))
-                qp_gate.drawText(gx + 3, label_y + 12, "GATE")
+                qp_gate.drawText(gx + 3, label_y + 12, gate_text)
                 qp_gate.end()
             except Exception as e:
                 logger.warning("Gate ROI overlay draw error: %s", e)
@@ -892,6 +927,63 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Trigger dikirim ({mode})", 3000)
 
+    # ---- Siklus trigger PLC ------------------------------------------------
+
+    def _is_trigger_mode(self) -> bool:
+        """True bila inspeksi dikendalikan trigger PLC (bukan replay uji)."""
+        return (self._config.get("inference.mode", "continuous") == "plc_trigger"
+                and not self._replay_test_mode)
+
+    def _begin_trigger_cycle(self):
+        """Trigger diterima: bekukan tampilan + pasang batas waktu.
+
+        Freeze memakai frame yang SAMA dengan yang dinilai — operator melihat
+        persis apa yang diputuskan sistem, bukan frame setelahnya.
+        """
+        self._trigger_cycle_active = True
+        self._freeze_pending = True
+        self._gate_rejected = False
+        self._run_page.set_status_message("Trigger — memeriksa…")
+        ms = max(200, int(self._config.get("inference.trigger_timeout_ms", 2000)))
+        self._trigger_timeout_timer.start(ms)
+
+    def _finish_trigger_cycle(self, fault: str = "", detail: str = ""):
+        """Tutup siklus trigger: lepas freeze, matikan timer batas waktu.
+
+        `fault` kosong = model selesai menilai (pulse OK/NG sudah dikirim di
+        jalur normal). `fault` terisi = TIDAK ADA pulse yang dikirim — sesuai
+        kontrak "diam berarti gagal"; ladder yang menghentikan lini lewat
+        watchdog, layar yang menjelaskan sebabnya ke operator.
+        """
+        if self._trigger_timeout_timer.isActive():
+            self._trigger_timeout_timer.stop()
+        was_active = self._trigger_cycle_active
+        self._trigger_cycle_active = False
+        self._freeze_pending = False
+        self._display_frozen = False
+        if not fault:
+            return
+        msg = {
+            "part_check": "PART TIDAK TERDETEKSI — siklus dihentikan, "
+                          "tidak ada sinyal ke PLC",
+            "error": f"ERROR INFERENSI — tidak ada sinyal ke PLC. {detail}",
+            "timeout": "TIMEOUT — model tidak selesai tepat waktu, "
+                       "tidak ada sinyal ke PLC",
+        }.get(fault, f"GAGAL ({fault}) — tidak ada sinyal ke PLC")
+        if was_active:
+            logger.error("Siklus trigger gagal (%s): %s", fault, detail or "-")
+        self._run_page.set_status_message(msg)
+        try:
+            self._run_page.set_part_check_incomplete(msg)
+        except Exception:
+            pass
+
+    def _on_trigger_timeout(self):
+        """Batas waktu siklus trigger habis — model tidak menjawab."""
+        if not self._trigger_cycle_active:
+            return
+        self._finish_trigger_cycle("timeout")
+
     def _on_frame_for_inference(self, frame):
         """Frame dari kamera → submit ke worker inference (Tugas 3).
 
@@ -909,18 +1001,35 @@ class MainWindow(QMainWindow):
         # Only infer on RUN tab — other tabs don't show inference results
         if self._tabs.currentIndex() != 0:
             return False
-        # Skip frame if in cycle delay (jeda antar siklus)
-        if self._cycle_delay_active:
+        # Skip frame if in cycle delay (jeda antar siklus) — TIDAK berlaku di
+        # mode plc_trigger: timing antar part milik ladder, aplikasi tidak
+        # boleh menahan siklus.
+        if self._cycle_delay_active and not self._is_trigger_mode():
             return False
         # Mode plc_trigger/manual: inspeksi hanya saat ada trigger
         # (coil trigger PLC ON, tombol Trigger Now, atau POST /trigger).
         # Replay video (mode uji): trigger PLC tidak relevan — jalankan
         # seperti continuous supaya uji tidak terkunci menunggu trigger.
         infer_mode = self._config.get("inference.mode", "continuous")
+        triggered = False
         if infer_mode in ("plc_trigger", "manual") and not self._replay_test_mode:
-            if not self._plc_trigger_pending:
+            if self._plc_trigger_pending:
+                self._plc_trigger_pending = False
+                triggered = True
+            elif not self._config.get("inference.infer_when_idle", False):
+                # Mode default: tanpa trigger tidak ada inferensi sama sekali
+                # (paling ringan, hasil resmi paling cepat keluar).
                 return False
-            self._plc_trigger_pending = False
+            elif self._trigger_cycle_active:
+                # "Infer saat idle" aktif, tapi siklus resmi sedang berjalan —
+                # jangan menambah antrean di belakangnya.
+                return False
+
+        if triggered:
+            # Frame INILAH yang dinilai. Bekukan tampilan tepat di frame ini
+            # (frame_raw di-emit sebelum frame_ready, jadi _on_frame_received
+            # untuk frame yang sama akan menyusul dan menjadi frame beku).
+            self._begin_trigger_cycle()
 
         # ── Step 1: Part Presence Check — state dihitung di sini (murah),
         # evaluasi (mahal) dijalankan di worker thread ──
@@ -978,6 +1087,10 @@ class MainWindow(QMainWindow):
         try:
             if result.get("error"):
                 logger.warning("Inference worker error: %s", result["error"])
+                # Mode trigger: JANGAN diam tanpa jejak — freeze harus dilepas
+                # dan operator harus tahu. Tidak ada pulse (kontrak: pulse
+                # hanya kalau model benar-benar selesai menilai).
+                self._finish_trigger_cycle("error", str(result["error"]))
                 return
 
             frame = result.get("frame")
@@ -989,7 +1102,16 @@ class MainWindow(QMainWindow):
                 if self._ng_interval_timer.isActive():
                     self._ng_interval_timer.stop()
                     self._ng_interval_active = False
-                self._run_page.set_waiting_for_part()
+                if self._trigger_cycle_active:
+                    # Trigger datang tapi part tidak terdeteksi → BERHENTI di
+                    # sini: model tidak dijalankan (hemat ~1 dtk) dan tidak
+                    # ada pulse ke PLC. Gate ROI jadi merah sampai trigger
+                    # berikutnya supaya operator tahu ini fault mesin,
+                    # bukan part cacat.
+                    self._gate_rejected = True
+                    self._finish_trigger_cycle("part_check")
+                else:
+                    self._run_page.set_waiting_for_part()
                 return
             if (result.get("pc_state") == "active"
                     and result.get("pc_result") is not None):
@@ -1072,12 +1194,29 @@ class MainWindow(QMainWindow):
                     self._publish_result("OK")
 
             else:  # raw_judgement == "NG"
-                if not self._ng_interval_timer.isActive():
-                    # First NG frame — start interval timer
-                    delay = self._settings_page.get_ng_debounce_ms()
-                    effective_delay = max(delay, 50)  # minimum 50ms agar timer tetap jalan
-                    self._ng_interval_timer.start(effective_delay)
-                    self._ng_interval_active = True
+                # Mode trigger: 1 trigger = 1 part = 1 vonis. Debounce interval
+                # TIDAK boleh dipakai — timer itu dirancang untuk mode
+                # continuous (menghitung NG berulang selama anomali bertahan).
+                # Di mode trigger ia akan (a) menahan publish NG part
+                # berikutnya bila masih aktif → vonis hilang, ladder menunggu
+                # sia-sia, dan (b) menambah counter NG tiap 500 ms padahal
+                # cuma satu part yang diperiksa.
+                _trig = self._is_trigger_mode()
+                if _trig or not self._ng_interval_timer.isActive():
+                    if _trig:
+                        if self._ng_interval_timer.isActive():
+                            self._ng_interval_timer.stop()
+                            self._ng_interval_active = False
+                        if not self._replay_test_mode:
+                            self._inspection_ng += 1
+                            self._run_page.update_counters(
+                                self._inspection_ok, self._inspection_ng)
+                    else:
+                        # First NG frame — start interval timer
+                        delay = self._settings_page.get_ng_debounce_ms()
+                        effective_delay = max(delay, 50)  # minimum 50ms agar timer tetap jalan
+                        self._ng_interval_timer.start(effective_delay)
+                        self._ng_interval_active = True
                     # Show NG immediately on display (counter hanya bertambah via timer tick)
                     self._run_page.update_judgement("NG", worst_score)
                     # Feedback ke PLC: publikasi hasil NG — di-bypass otomatis
@@ -1098,6 +1237,7 @@ class MainWindow(QMainWindow):
                         } for i, r in enumerate(roi_results)])
                         ng_entry_id = self._db.add_inspection({
                             "program": self._active_program,
+                            "template": self._active_template,
                             "score": worst_score,
                             "judgement": "NG",
                             "threshold": self._inference_engine.threshold,
@@ -1117,6 +1257,11 @@ class MainWindow(QMainWindow):
                 else:
                     # Timer already running — update display (worse score)
                     self._run_page.update_judgement("NG", worst_score)
+
+            # ── Siklus trigger selesai: model BENAR-BENAR menilai, pulse
+            # OK/NG sudah dikirim di atas → lepas freeze tanpa fault. ──
+            if self._trigger_cycle_active:
+                self._finish_trigger_cycle()
 
             # ── Cycle delay: jeda antar siklus inspeksi ──
             # Hanya berlaku di mode continuous (auto sequence) DAN untuk
@@ -1163,6 +1308,7 @@ class MainWindow(QMainWindow):
                     } for i, r in enumerate(roi_results)])
                     ok_entry_id = self._db.add_inspection({
                         "program": self._active_program,
+                        "template": self._active_template,
                         "score": worst_score,
                         "judgement": "OK",
                         "threshold": self._inference_engine.threshold,
@@ -1642,6 +1788,14 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         if connected:
+            # Bersihkan coil hasil saat koneksi terbentuk. Kalau aplikasi mati
+            # setelah menulis hasil, coil itu tetap ON di PLC — tanpa reset,
+            # part pertama setelah restart akan dibaca memakai vonis lama.
+            try:
+                if self._plc_modbus:
+                    self._plc_modbus.reset_outputs()
+            except Exception as e:
+                logger.warning("Reset coil hasil saat connect gagal: %s", e)
             self._start_plc_polling()
         else:
             self._stop_plc_polling()
@@ -1694,15 +1848,32 @@ class MainWindow(QMainWindow):
             self._on_plc_trigger()
         if events.get("reset_result"):
             self._on_plc_reset()
-        if events.get("switch_program"):
-            prog = self._plc_modbus.read_program_register()
-            if prog is not None:
-                self._on_plc_switch_program(prog)
+        # Ganti TEMPLATE aktif. Satu cabang saja walau config lama memakai
+        # nama "switch_program" pada alamat yang sama — kalau dua-duanya ada
+        # di io_map, coil yang sama terbaca dua kali dan tanpa penggabungan
+        # ini handler akan terpanggil dobel.
+        if events.get("switch_template") or events.get("switch_program"):
+            num = self._plc_modbus.read_program_register()
+            if num is not None:
+                self._on_plc_switch_template(num)
 
     def _on_plc_trigger(self):
         """PLC minta 1 siklus inspeksi (coil trigger ON)."""
         mode = self._config.get("inference.mode", "continuous")
         if mode == "plc_trigger":
+            if self._trigger_cycle_active:
+                # Trigger baru saat siklus lama belum selesai. Ladder tidak
+                # seharusnya melakukan ini (ia menunggu pulse), jadi ini
+                # penanda timing lini terlalu rapat vs waktu inferensi —
+                # dicatat, bukan didiamkan.
+                logger.warning(
+                    "PLC trigger diterima saat siklus sebelumnya masih "
+                    "berjalan — diabaikan. Cycle time lini kemungkinan lebih "
+                    "pendek dari waktu inferensi.")
+                self.set_status(
+                    "PLC: trigger diabaikan — siklus sebelumnya belum selesai",
+                    3000)
+                return
             self._plc_trigger_pending = True
             self.set_status("PLC: trigger inspeksi", 2000)
         # Mode continuous: trigger hanya melewati cycle delay
@@ -1720,35 +1891,47 @@ class MainWindow(QMainWindow):
             pass
         self.set_status("PLC: reset OK", 3000)
 
-    def _on_plc_switch_program(self, program_number: int):
-        """IN switch program: ganti template aktif dari nomor register PLC."""
+    def _on_plc_switch_template(self, template_number: int):
+        """IN switch template: ganti TEMPLATE aktif dari nomor register PLC.
+
+        Nomor 1 = template pertama pada program yang sedang aktif (urutan
+        sama dengan daftar di halaman TEACH). Ganti template = ganti model,
+        jadi ditolak saat siklus trigger sedang berjalan — kalau tidak,
+        vonis bisa keluar dari model yang berbeda dengan frame yang dinilai.
+        """
         try:
-            programs = self._pm.list_programs()
-            if not programs:
+            if self._trigger_cycle_active:
+                logger.warning(
+                    "PLC minta ganti template saat siklus trigger berjalan — "
+                    "ditolak (vonis bisa memakai model yang salah).")
+                self.set_status(
+                    "PLC: ganti template ditolak — siklus belum selesai", 3000)
                 return
-            idx = program_number - 1  # PLC: 1 = program pertama
-            if not (0 <= idx < len(programs)):
-                self.set_status(f"PLC: program #{program_number} tidak ada", 3000)
-                return
-            prog = programs[idx]
-            if prog["name"] == self._active_program:
-                return
-            self._active_program = prog["name"]
             templates = self._pm.list_templates(self._active_program)
-            if templates:
-                active_id = self._pm.get_active_template(self._active_program)
-                if active_id and any(t["id"] == active_id for t in templates):
-                    self._active_template = active_id
-                else:
-                    self._active_template = templates[0]["id"]
-                    self._pm.set_active_template(self._active_program,
-                                                 self._active_template)
+            if not templates:
+                self.set_status("PLC: tidak ada template pada program ini", 3000)
+                return
+            idx = int(template_number) - 1   # PLC: 1 = template pertama
+            if not (0 <= idx < len(templates)):
+                self.set_status(
+                    f"PLC: template #{template_number} tidak ada "
+                    f"(tersedia 1–{len(templates)})", 4000)
+                logger.warning("PLC switch template: nomor %s di luar rentang "
+                               "1–%d", template_number, len(templates))
+                return
+            tmpl = templates[idx]
+            if tmpl["id"] == self._active_template:
+                return
+            self._pm.set_active_template(self._active_program, tmpl["id"])
+            self._active_template = tmpl["id"]
             self._refresh_template_ui()
             self._load_template_model()
-            self._program_label.setText(f"Program: {self._active_program}")
-            self.set_status(f"PLC: program → {self._active_program}", 3000)
+            self.set_status(
+                f"PLC: template → {tmpl.get('name', tmpl['id'])}", 3000)
+            logger.info("PLC switch template #%s → %s",
+                        template_number, tmpl["id"])
         except Exception as e:
-            logger.warning("PLC switch program error: %s", e)
+            logger.warning("PLC switch template error: %s", e)
 
     def _get_io_mode(self) -> dict:
         """I/O behaviour mode aktif (dari config plc.io_mode, selalu lengkap)."""
@@ -3733,10 +3916,16 @@ class MainWindow(QMainWindow):
 
         # Get corrected entries from DB
         try:
+            # HANYA koreksi milik template ini. Tanpa filter template, gambar
+            # koreksi dari template lain ikut tersalin ke folder corrections/
+            # template ini dan menetap di sana — ikut setiap training
+            # berikutnya, sehingga model tidak pernah stabil.
             corrected = self._db.get_history(
-                program=self._active_program, judgement="OK", limit=500)
+                program=self._active_program, judgement="OK", limit=500,
+                template=self._active_template or None)
             corrected += self._db.get_history(
-                program=self._active_program, judgement="NG", limit=500)
+                program=self._active_program, judgement="NG", limit=500,
+                template=self._active_template or None)
             corrected = [e for e in corrected if e.get("corrected")]
         except Exception as ex:
             logger.warning("Rebuild: error fetching corrections: %s", ex)
@@ -3769,8 +3958,11 @@ class MainWindow(QMainWindow):
             logger.info("Rebuild: copied %d correction images", copied)
 
         reply = QMessageBox.question(
-            self, "Rebuild Model",
-            f"Rebuild dengan {copied} gambar koreksi + data asli.\nLanjutkan?",
+            self, "Latih Ulang Model",
+            f"Model akan dilatih ULANG DARI NOL memakai seluruh gambar "
+            f"template '{self._active_template}' + {copied} gambar koreksi "
+            f"milik template ini.\n\nIni bukan penyesuaian ringan — model "
+            f"lama diganti sepenuhnya.\n\nLanjutkan?",
             QMessageBox.Yes | QMessageBox.No)
 
         if reply == QMessageBox.Yes:
@@ -3783,8 +3975,12 @@ class MainWindow(QMainWindow):
             judgement: Filter — None=tampil semua, "OK"=hanya OK, "NG"=hanya NG.
         """
         try:
+            # Hanya hasil template AKTIF. Sebelumnya semua template dalam satu
+            # program tercampur, sehingga nomor entry, koreksi, dan tuning bisa
+            # menunjuk template yang berbeda dari yang sedang dilihat operator.
             entries = self._db.get_history(
-                program=self._active_program, judgement=judgement, limit=100)
+                program=self._active_program, judgement=judgement, limit=100,
+                template=self._active_template or None)
             self._history_page.clear()
             for e in entries:
                 # Tampilkan hasil TERKOREKSI (kalau ada) — judgement asli
@@ -4031,12 +4227,17 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export Model Error", str(e))
 
     def _import_model_dialog(self):
-        """Dialog untuk import model dari file .zip."""
+        """Dialog untuk import model dari file .zip.
+
+        Import SELALU membuat template BARU — tidak pernah menimpa template
+        yang sedang aktif. Karena tujuannya folder kosong, seluruh isi config
+        dari PC training (ROI, part-check, threshold, dst) boleh dipulihkan
+        apa adanya tanpa merusak template yang sudah dikalibrasi di mesin ini.
+        """
         program = self._active_program
-        template = self._active_template
-        if not program or not template:
+        if not program:
             QMessageBox.warning(self, "Import Model",
-                                "Pilih program dan template terlebih dahulu.")
+                                "Pilih program terlebih dahulu.")
             return
 
         from PySide6.QtWidgets import QFileDialog, QMessageBox
@@ -4052,34 +4253,42 @@ class MainWindow(QMainWindow):
             # Konfirmasi
             reply = QMessageBox.question(
                 self, "Import Model",
-                f"Import model ke template '{template}'?\n"
-                "Model yang ada akan diganti.",
+                "Import akan membuat TEMPLATE BARU.\n\n"
+                "Template yang sedang aktif tidak diubah sama sekali — "
+                "ROI, part-check, dan threshold-nya tetap utuh.\n"
+                "Seluruh pengaturan dari PC training ikut dibawa ke "
+                "template baru tersebut.\n\nLanjutkan?",
                 QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return
 
             self.set_status("Importing model...", 0)
 
-            # Unload current model dulu — lepaskan handle OpenVINO biar model.bin gak di-lock
-            if hasattr(self, "_inference_engine") and self._inference_engine is not None:
+            result = self._pm.import_model_from_zip(
+                Path(zip_path), program, as_new_template=True)
+            new_id = result.get("template_id", "")
+            self.set_status(
+                f"Template '{new_id}' diimport (v{result['model_version']})", 3000)
+
+            # Aktifkan template baru + muat modelnya (unload dulu supaya
+            # handle OpenVINO lepas dan model.bin lama tidak di-lock).
+            if self._inference_engine is not None:
                 self._inference_engine.unload_model()
                 import gc
                 gc.collect()
-                gc.collect()
-
-            result = self._pm.import_model_from_zip(
-                Path(zip_path), program, template)
-            self.set_status(f"Model imported (v{result['model_version']})", 3000)
-
-            # Refresh teach page — reload template + model
-            if hasattr(self, "_teach_page"):
+            if new_id:
+                self._activate_template(new_id)
+            else:
                 self._refresh_template_ui()
                 self._load_template_model()
-            QMessageBox.information(self, "Import Model",
-                                    f"Model berhasil diimport!\n"
-                                    f"  Versi: {result['model_version']}\n"
-                                    f"  Files: {result['files_restored']}\n"
-                                    f"  Diexport: {result.get('source_exported_at', '-')}")
+            QMessageBox.information(
+                self, "Import Model",
+                f"Model berhasil diimport sebagai template BARU.\n\n"
+                f"  Template : {new_id}\n"
+                f"  Versi    : {result['model_version']}\n"
+                f"  Files    : {result['files_restored']}\n"
+                f"  Diexport : {result.get('source_exported_at', '-')}\n\n"
+                "Template lama tidak diubah.")
         except Exception as e:
             logger.error("Import model gagal: %s", e)
             QMessageBox.critical(self, "Import Model Error", str(e))

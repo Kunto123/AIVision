@@ -70,9 +70,12 @@ def build_io_map(plc_config: Optional[dict]) -> dict:
         "inputs": {
             "trigger": 0,         # coil 0: PLC minta 1 siklus inspeksi
             "reset_result": 5,    # IN1: reset kondisi coil hasil + counter
-            "switch_program": 6,  # IN2: ganti template aktif (baca program_register)
+            # IN2: ganti TEMPLATE aktif; nomornya dibaca dari program_register.
+            # Nama lama "switch_program" masih dikenali (config lama) — lihat
+            # _on_plc_poll_tick di main_window.
+            "switch_template": 6,
         },
-        "program_register": 10,   # holding register nomor program tujuan
+        "program_register": 10,   # holding register nomor template tujuan
     }
     io = plc_config.get("io_map") if plc_config else None
     if isinstance(io, dict):
@@ -91,7 +94,11 @@ def build_io_map(plc_config: Optional[dict]) -> dict:
 #     persis IV3 — "kept until next status result").
 #   - one_shot : pulse singkat (`one_shot_delay` lalu ON selama `one_shot_on_time`).
 DEFAULT_IO_MODE: dict = {
-    "output_mode": "latching",         # "latching" | "one_shot"
+    # DEFAULT one_shot (bukan latching lagi) — kontrak yang disepakati dengan
+    # ladder: tiap part menghasilkan SATU kedipan tersendiri, dan "diam"
+    # berarti gagal. Latching membuat hasil part sebelumnya tetap terbaca
+    # selama sistem masih menghitung, sehingga vonis basi bisa dianggap baru.
+    "output_mode": "one_shot",         # "latching" | "one_shot"
     "one_shot_on_time_ms": 300,        # durasi coil ON pd one_shot (≤ pulse_ms lama)
     "one_shot_delay_ms": 0,            # tunda sebelum coil ON (one_shot)
     "part_ready_output": False,        # default hanya OK/NG; nyalakan utk kirim coil part_ready

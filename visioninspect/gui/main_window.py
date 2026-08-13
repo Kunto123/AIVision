@@ -1525,11 +1525,28 @@ class MainWindow(QMainWindow):
                     self._teach_page.set_training_config(old_cfg)
                     return
 
-            changed_deploy_relevant = (
+            # Field penentu model berbeda per algoritma — ikuti apa yang
+            # benar-benar berlaku di TEACH page:
+            #   yolo                  → yolo_pretrained (backbone disembunyikan
+            #                           di UI dan nilainya sisa PatchCore)
+            #   patchcore/efficientad → backbone
+            # Sebelum ini `backbone` selalu dibandingkan: template YOLO bisa
+            # ditandai "perlu latih ulang" gara-gara field yang tidak dipakai,
+            # sementara ganti yolo_pretrained (yang BENAR-BENAR mengubah model)
+            # justru lolos tanpa penanda.
+            old_algo = str(old_cfg.get("algorithm", "") or "").lower()
+            new_algo = str(updates.get("algorithm", "") or "").lower()
+            model_fields = ["algorithm"]
+            if "yolo" in (old_algo, new_algo):
+                model_fields.append("yolo_pretrained")
+            if old_algo != "yolo" or new_algo != "yolo":
+                model_fields.append("backbone")
+            changed_deploy_relevant = bool(
                 old_cfg.get("trained")
-                and (old_cfg.get("backbone") != updates.get("backbone")
-                     or old_cfg.get("algorithm") != updates.get("algorithm")
-                     or old_input != new_input))
+                and (old_input != new_input
+                     or any(old_cfg.get(f) != updates.get(f)
+                            for f in model_fields
+                            if f in updates or f in old_cfg)))
             self._pm.update_template_config(
                 self._active_program, self._active_template, updates)
             if changed_deploy_relevant:

@@ -254,9 +254,10 @@ class InferenceEngine:
             last_dim = pshape[-1]
             self._input_size = last_dim.get_length() if last_dim.is_static else self._input_size
 
-            # Pengaman: input_size IR vs config template (kalau ada) — skala
-            # skor PatchCore beda tiap ukuran; mismatch = model tidak cocok.
-            self._warn_input_size_mismatch(xml_path)
+            # Pengaman: apa yang dipilih di TEACH vs apa yang benar-benar
+            # terpasang. `algorithm` dioper eksplisit karena atomic swap di
+            # bawah belum jalan — self._algorithm masih milik model lama.
+            self._warn_config_model_mismatch(xml_path, algorithm)
 
             # Atomic swap
             with self._lock:
@@ -374,13 +375,21 @@ class InferenceEngine:
                     logger.warning("Gagal baca model_meta.json (%s): %s", p, e)
         return {}
 
-    def _warn_input_size_mismatch(self, xml_path: Path):
-        """Bandingkan input_size IR (model terpasang) dengan config template.
+    def _warn_config_model_mismatch(self, xml_path: Path, algorithm: str):
+        """Bandingkan model yang BENAR-BENAR terpasang dengan config template.
 
-        Skala skor PatchCore mentah beda tiap input_size (norm.json di-
-        kalibrasi per ukuran). Kalau template config menyimpan input_size
-        yang berbeda dari IR → model lama tidak cocok, wajib retrain.
-        Hanya log WARNING — jangan mengubah perilaku inference.
+        Nama template = identitas PART, bukan nama arsitektur — jadi nama
+        TIDAK pernah dipakai untuk memeriksa apa pun di sini. Yang dibandingkan
+        adalah pengaturan yang dipilih operator di halaman TEACH (config)
+        terhadap catatan independen hasil export (model_meta.json + shape IR).
+
+        Field pembanding mengikuti algoritma, karena tiap algoritma memakai
+        field yang berbeda di TEACH:
+          yolo                  → `yolo_pretrained`  (field `backbone` tidak
+                                  berlaku & memang disembunyikan di UI)
+          patchcore/efficientad → `backbone`
+
+        Hanya log WARNING — tidak mengubah perilaku inference.
         """
         import json
         cfg_path = xml_path.parent.parent.parent / "config.json"
@@ -397,24 +406,39 @@ class InferenceEngine:
                     "wajib training ulang sebelum dipakai produksi.",
                     self._input_size, cfg_path, cfg_size)
 
-            # Tugas 8: backbone/algorithm tidak terbaca dari IR, jadi
-            # dibandingkan dengan model_meta.json — catatan independen yang
-            # ditulis saat export. Model lama (sebelum Tugas 8) tidak punya
+            # backbone/algorithm tidak terbaca dari IR → dibandingkan dengan
+            # model_meta.json (ditulis saat export). Model lama tidak punya
             # file ini; itu bukan error, cukup dilewati.
             meta = self._read_model_meta(xml_path)
-            if meta:
-                for key, label in (("backbone", "BACKBONE"),
-                                   ("algorithm", "ALGORITHM")):
-                    want, have = cfg.get(key), meta.get(key)
-                    if want and have and str(want) != str(have):
-                        logger.warning(
-                            "%s MISMATCH: model di disk dilatih dengan %s='%s' "
-                            "tapi config template tertulis '%s'. Label di UI "
-                            "TIDAK menggambarkan model yang sedang jalan — "
-                            "training ulang untuk menyamakan.",
-                            label, key, have, want)
+            if not meta:
+                return
+            # Algoritma yang benar-benar terpasang: utamakan catatan export,
+            # fallback ke deteksi dari yolo_meta.json.
+            algo = str(meta.get("algorithm") or algorithm or "").lower()
+
+            if algo == "yolo":
+                want = cfg.get("yolo_pretrained")
+                have = meta.get("yolo_pretrained") or meta.get("backbone")
+                field = "yolo_pretrained"
+            else:
+                want = cfg.get("backbone")
+                have = meta.get("backbone")
+                field = "backbone"
+            if want and have and str(want) != str(have):
+                logger.warning(
+                    "MODEL MISMATCH: model di disk dilatih dengan %s='%s' "
+                    "tapi pengaturan TEACH template ini tertulis '%s'. "
+                    "Yang berjalan adalah model di disk — training ulang "
+                    "untuk menyamakan.", field, have, want)
+
+            cfg_algo = str(cfg.get("algorithm", "") or "").lower()
+            if cfg_algo and algo and cfg_algo != algo:
+                logger.warning(
+                    "ALGORITHM MISMATCH: model di disk = '%s' tapi pengaturan "
+                    "TEACH template ini = '%s'. Training ulang untuk "
+                    "menyamakan.", algo, cfg_algo)
         except Exception as e:  # config tak terbaca → bukan urusan kita
-            logger.debug("Input size config check skipped: %s", e)
+            logger.debug("Cek kecocokan config vs model dilewati: %s", e)
 
     @staticmethod
     def _read_norm(xml_path: Path):

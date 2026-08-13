@@ -807,8 +807,13 @@ class TrainingPipeline:
 
         # Tugas 8: catatan independen — untuk YOLO, "backbone" = bobot
         # pretrained yang dipakai dan input_size = imgsz efektif.
+        # `yolo_pretrained` ditulis EKSPLISIT (bukan hanya menumpang field
+        # `backbone`) supaya pemeriksa kecocokan membandingkan field yang
+        # sejenis: config TEACH menyimpan yolo_pretrained untuk YOLO, dan
+        # `backbone` di sana adalah sisa milik PatchCore yang tidak berlaku.
         self._write_model_meta(
             export_dir, backbone=str(self._config.yolo_pretrained),
+            yolo_pretrained=str(self._config.yolo_pretrained),
             input_size=int(imgsz), algorithm="yolo", classes=yolo_names)
 
         # ── Histogram: prob OK dari model OpenVINO hasil export ──

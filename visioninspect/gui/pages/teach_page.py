@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from visioninspect.gui.widgets.histogram_widget import HistogramWidget
 from visioninspect.gui.widgets.roi_editor import ROIEditor, ROIData
 from visioninspect.gui.widgets.roi_list_panel import ROIListPanel
+from visioninspect.gui.widgets.flow_gallery import FlowGallery
 from visioninspect.gui.widgets.thumbnail import ThumbnailWidget
 from visioninspect.utils.i18n import Translator
 
@@ -244,42 +245,38 @@ class TeachPage(QWidget):
         gallery_layout = QHBoxLayout()
         gallery_layout.setSpacing(8)
 
+        # Judul group box sebelumnya "OK " + "Galeri OK" → tampil ganda
+        # ("OK Galeri OK"). Cukup teks terjemahannya saja.
+        _GAL_QSS = ("background: #111D30; border: 1px solid #233A57; "
+                    "border-radius: 4px;")
+
         # OK
-        ok_group = QGroupBox("OK " + self._tr.tr("teach_gallery_ok"))
+        ok_group = QGroupBox(self._tr.tr("teach_gallery_ok"))
         ok_g = QVBoxLayout(ok_group)
         ok_g.setContentsMargins(6, 6, 6, 6)
         self._ok_count_label = QLabel(self._tr.tr("teach_count_ok", count=0))
         self._ok_count_label.setStyleSheet("color: #22C55E; font-weight: bold;")
         ok_g.addWidget(self._ok_count_label)
-        ok_scroll = QScrollArea()
-        ok_scroll.setWidgetResizable(True)
-        ok_scroll.setMinimumHeight(80)
-        ok_scroll.setStyleSheet("background: #111D30; border: 1px solid #233A57; border-radius: 4px;")
-        self._ok_gallery_widget = QWidget()
-        self._ok_gallery_layout = QHBoxLayout(self._ok_gallery_widget)
-        self._ok_gallery_layout.setContentsMargins(4, 4, 4, 4)
-        self._ok_gallery_layout.addStretch()
-        ok_scroll.setWidget(self._ok_gallery_widget)
-        ok_g.addWidget(ok_scroll)
+        # FlowGallery: thumbnail mengalir ke bawah, scroll vertikal saja.
+        # Tinggi ±2 baris supaya scroll ke bawah benar-benar berguna; ukuran
+        # tiap thumbnail tidak berubah (tetap seragam 78x82).
+        self._ok_gallery = FlowGallery()
+        self._ok_gallery.setMinimumHeight(180)
+        self._ok_gallery.setStyleSheet(_GAL_QSS)
+        ok_g.addWidget(self._ok_gallery)
         gallery_layout.addWidget(ok_group)
 
         # NG
-        ng_group = QGroupBox("NG " + self._tr.tr("teach_gallery_ng"))
+        ng_group = QGroupBox(self._tr.tr("teach_gallery_ng"))
         ng_g = QVBoxLayout(ng_group)
         ng_g.setContentsMargins(6, 6, 6, 6)
         self._ng_count_label = QLabel(self._tr.tr("teach_count_ng", count=0))
         self._ng_count_label.setStyleSheet("color: #EF4444; font-weight: bold;")
         ng_g.addWidget(self._ng_count_label)
-        ng_scroll = QScrollArea()
-        ng_scroll.setWidgetResizable(True)
-        ng_scroll.setMinimumHeight(80)
-        ng_scroll.setStyleSheet("background: #111D30; border: 1px solid #233A57; border-radius: 4px;")
-        self._ng_gallery_widget = QWidget()
-        self._ng_gallery_layout = QHBoxLayout(self._ng_gallery_widget)
-        self._ng_gallery_layout.setContentsMargins(4, 4, 4, 4)
-        self._ng_gallery_layout.addStretch()
-        ng_scroll.setWidget(self._ng_gallery_widget)
-        ng_g.addWidget(ng_scroll)
+        self._ng_gallery = FlowGallery()
+        self._ng_gallery.setMinimumHeight(180)
+        self._ng_gallery.setStyleSheet(_GAL_QSS)
+        ng_g.addWidget(self._ng_gallery)
         gallery_layout.addWidget(ng_group)
 
         left_layout.addLayout(gallery_layout)
@@ -685,13 +682,13 @@ class TeachPage(QWidget):
         t = ThumbnailWidget(pixmap, path, "#22C55E")
         t.deleted.connect(lambda p: self._on_delete_image(p, "ok"))
         t.clicked.connect(self.thumbnail_clicked.emit)
-        self._ok_gallery_layout.insertWidget(self._ok_gallery_layout.count() - 1, t)
+        self._ok_gallery.add_widget(t)
 
     def add_ng_thumbnail(self, pixmap, path=""):
         t = ThumbnailWidget(pixmap, path, "#EF4444")
         t.deleted.connect(lambda p: self._on_delete_image(p, "ng"))
         t.clicked.connect(self.thumbnail_clicked.emit)
-        self._ng_gallery_layout.insertWidget(self._ng_gallery_layout.count() - 1, t)
+        self._ng_gallery.add_widget(t)
 
     def _on_delete_image(self, path, label):
         import os
@@ -703,11 +700,8 @@ class TeachPage(QWidget):
         self.image_deleted.emit(label)
 
     def clear_galleries(self):
-        for layout in [self._ok_gallery_layout, self._ng_gallery_layout]:
-            while layout.count() > 1:
-                item = layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
+        self._ok_gallery.clear()
+        self._ng_gallery.clear()
 
     # ---- Slots ----
 

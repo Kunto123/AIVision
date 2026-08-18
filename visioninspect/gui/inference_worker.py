@@ -34,8 +34,11 @@ logger = logging.getLogger(__name__)
 class InferenceWorker(QObject):
     """Worker inference — hidup di QThread terpisah."""
 
-    # Request infer: (frame, pc_cfg, pc_state, rois, rois_uid, rois_label, yolo_cfg)
-    submit = Signal(object, object, str, list, list, list, object)
+    # Request infer: (seq, frame, pc_cfg, pc_state, rois, rois_uid, rois_label,
+    # yolo_cfg). `seq` dikembalikan apa adanya di hasil supaya GUI bisa
+    # membedakan hasil yang masih relevan dari hasil basi — penting saat ada
+    # dua permintaan beruntun (mis. trigger PLC menyusul inferensi live).
+    submit = Signal(int, object, object, str, list, list, list, object)
     # Hasil lengkap berupa dict (lihat build_result di bawah)
     result_ready = Signal(object)
 
@@ -68,8 +71,9 @@ class InferenceWorker(QObject):
 
     # ---- Pipeline inference murni ----
 
-    def build_result(self, frame, pc_state: str) -> dict:
+    def build_result(self, frame, pc_state: str, seq: int = -1) -> dict:
         return {
+            "seq": seq,
             "frame": frame,
             "pc_state": pc_state,
             "pc_blocked": False,
@@ -79,19 +83,24 @@ class InferenceWorker(QObject):
             "overall_ng": False,
             "roi_results": [],
             "worst_score": 1.0,
+            # Margin = skor − threshold ROI itu. Inilah dasar pemilihan ROI
+            # terburuk sejak threshold bisa berbeda per ROI.
+            "worst_margin": 0.0,
+            "worst_threshold": None,
+            "worst_label": "",
             "avg_latency": 0.0,
             "heatmap": None,
             "raw_judgement": "OK",
             "error": None,
         }
 
-    @Slot(object, object, str, list, list, list, object)
-    def infer(self, frame, pc_cfg: Optional[dict], pc_state: str,
+    @Slot(int, object, object, str, list, list, list, object)
+    def infer(self, seq: int, frame, pc_cfg: Optional[dict], pc_state: str,
               rois: list, rois_uid: list, rois_label: list,
               yolo_cfg: Optional[dict]):
         """Jalankan bagian berat pipeline. Selalu emit result_ready — bahkan
         saat error — supaya token replay tidak pernah hilang."""
-        res = self.build_result(frame, pc_state)
+        res = self.build_result(frame, pc_state, seq)
         try:
             # ── Step 1: Part Presence Check (evaluate — mahal) ──
             # State (active/disabled/incomplete) sudah dihitung GUI; di sini
@@ -134,8 +143,15 @@ class InferenceWorker(QObject):
                         res["class_ng"] = True
 
             # ── Step 2: loop infer per ROI ──
+            # ROI "terburuk" dipilih dari MARGIN (skor − threshold ROI itu),
+            # bukan skor mentah. Dengan threshold per ROI, skor mentah tidak
+            # lagi sebanding antar ROI:
+            #     ROI A skor 0,40 threshold 0,30 → LOLOS (margin +0,10)
+            #     ROI B skor 0,55 threshold 0,60 → GAGAL (margin −0,05)
+            # Skor terendah ada di A, tapi yang menggagalkan part adalah B.
             rois_to_check = [] if res["class_ng"] else rois
             total_latency = 0.0
+            worst_margin = None
             worst = 1.0
             results = []
             for idx, roi_rect in enumerate(rois_to_check):
@@ -145,23 +161,31 @@ class InferenceWorker(QObject):
                     "uid": (rois_uid[idx] if idx < len(rois_uid) else None),
                 }
                 result = self._engine.infer(frame, roi=roi_dict)
+                margin = result.score - result.threshold
                 results.append({
                     "roi": roi_rect,
                     "label": (rois_label[idx] if idx < len(rois_label)
                               else f"ROI{idx + 1}"),
                     "score": result.score,
+                    "threshold": result.threshold,
+                    "margin": margin,
                     "judgement": result.judgement,
                     "latency": result.latency_ms,
                 })
                 total_latency += result.latency_ms
-                if result.score < worst:
+                if worst_margin is None or margin < worst_margin:
+                    worst_margin = margin
                     worst = result.score
+                    res["worst_threshold"] = result.threshold
+                    res["worst_label"] = results[-1]["label"]
                     res["heatmap"] = result.heatmap
                 if result.judgement == "NG":
                     res["overall_ng"] = True
 
             res["roi_results"] = results
             res["worst_score"] = worst
+            res["worst_margin"] = (worst_margin if worst_margin is not None
+                                   else 0.0)
             res["avg_latency"] = (total_latency / len(results)
                                   if results else 0.0)
             res["raw_judgement"] = (

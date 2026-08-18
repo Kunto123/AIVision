@@ -425,27 +425,41 @@ class SettingsPage(QWidget):
 
         main_layout.addWidget(pg_group)
 
-        # === NG Detection Settings ===
-        ng_group = QGroupBox("NG Detection")
+        # === Penghitungan Part ===
+        # Menggantikan "NG Timeout" lama. Setelan itu menambah counter NG tiap
+        # sekian ms selama anomali bertahan — yang dihitung DURASI, bukan
+        # jumlah part, sehingga satu part yang diam lama terhitung berkali-kali
+        # dan pass rate tidak sebanding dengan counter OK.
+        ng_group = QGroupBox("Penghitungan Part")
         ng_form = QVBoxLayout(ng_group)
 
         ng_delay_row = QHBoxLayout()
-        ng_delay_row.addWidget(QLabel("NG Timeout:"))
-        self._ng_delay_spin = QSpinBox()
-        self._ng_delay_spin.setRange(0, 999999)
-        self._ng_delay_spin.setValue(500)
-        self._ng_delay_spin.setSuffix(" ms")
-        self._ng_delay_spin.setSingleStep(100)
-        self._ng_delay_spin.setFixedWidth(130)
-        ng_delay_row.addWidget(self._ng_delay_spin)
+        ng_delay_row.addWidget(QLabel("Jarak minimum antar hitungan:"))
+        self._count_cooldown_spin = QSpinBox()
+        self._count_cooldown_spin.setRange(0, 60000)
+        self._count_cooldown_spin.setValue(1500)
+        self._count_cooldown_spin.setSuffix(" ms")
+        self._count_cooldown_spin.setSingleStep(100)
+        self._count_cooldown_spin.setFixedWidth(130)
+        self._count_cooldown_spin.setToolTip(
+            "Hanya dipakai kalau tidak ada sumber 'satu part' yang pasti.\n"
+            "Trigger PLC dan gate part-check lebih akurat dan dipakai duluan.")
+        ng_delay_row.addWidget(self._count_cooldown_spin)
         ng_delay_row.addStretch()
         ng_form.addLayout(ng_delay_row)
 
         ng_help = QLabel(
-            "Jeda minimum sebelum NG dihitung.\n"
-            "Timer mulai saat anomali terdeteksi.\n"
-            "Setiap kali timer habis → NG +1, lalu timer reset.\n"
-            "0 = instant (setiap frame NG dihitung).")
+            "Satu part harus terhitung SEKALI, berapa pun frame yang sempat "
+            "diperiksa selagi part itu ada di depan kamera. Berlaku sama "
+            "untuk OK dan NG.\n\n"
+            "Urutan sumber 'satu part':\n"
+            "  1. Trigger PLC — 1 trigger = 1 part (paling tepat)\n"
+            "  2. Gate part-check — sekali per part yang lewat; butuh ada "
+            "celah kosong antar part\n"
+            "  3. Jarak waktu di atas — dipakai kalau dua-duanya tidak ada\n\n"
+            "Setel LEBIH PENDEK dari jarak kedatangan part tercepat, kalau "
+            "tidak ada part yang tidak terhitung. 0 = hitung tiap inspeksi "
+            "(perilaku lama, satu part bisa terhitung berkali-kali).")
         ng_help.setObjectName("secondaryText")
         ng_help.setWordWrap(True)
         ng_form.addWidget(ng_help)
@@ -602,6 +616,7 @@ class SettingsPage(QWidget):
                 "cpu_pcore_only": self._cpu_pcore_only.isChecked(),
                 "infer_when_idle": self._infer_when_idle.isChecked(),
                 "trigger_timeout_ms": self._trigger_timeout_spin.value(),
+                "count_cooldown_ms": self._count_cooldown_spin.value(),
             },
             "yolo": {
                 "enabled": self._yolo_enabled.isChecked(),
@@ -635,7 +650,6 @@ class SettingsPage(QWidget):
                 'connect_timeout': 10,
             },
             "language": "id" if self._lang_combo.currentIndex() == 0 else "en",
-            "ng_debounce_ms": self._ng_delay_spin.value(),
             "show_debug": self._show_debug_cb.isChecked(),
         }
 
@@ -645,9 +659,10 @@ class SettingsPage(QWidget):
     def get_camera_device_spin(self) -> QSpinBox:
         return self._cam_device
 
-    def get_ng_debounce_ms(self) -> int:
-        """Get current NG debounce delay from config."""
-        return self._config.get("ng_debounce_ms", 500)
+    def get_count_cooldown_ms(self) -> int:
+        """Jarak minimum antar hitungan part (dipakai bila tidak ada trigger
+        PLC / gate part-check sebagai sumber 'satu part')."""
+        return self._config.get("inference.count_cooldown_ms", 1500)
 
     def get_cycle_delay_ms(self) -> int:
         """Get cycle delay from config (ms). 0 = no delay."""
@@ -868,7 +883,8 @@ class SettingsPage(QWidget):
         self._lang_combo.setCurrentIndex(0 if lang == "id" else 1)
 
         # NG Timeout
-        self._ng_delay_spin.setValue(self._config.get("ng_debounce_ms", 500))
+        self._count_cooldown_spin.setValue(
+            self._config.get("inference.count_cooldown_ms", 1500))
 
         # Cycle Delay
         self._cycle_delay_spin.setValue(self._config.get("inference.cycle_delay_ms", 1000))

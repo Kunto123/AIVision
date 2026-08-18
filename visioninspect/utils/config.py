@@ -104,6 +104,11 @@ class Config:
             # Default MATI: di CPU 2 core ini menambah antrean dan
             # memperlambat hasil resmi hampir 2x.
             "infer_when_idle": False,
+            # Jarak minimum antar hitungan part — supaya satu part tidak
+            # terhitung berkali-kali selagi masih di depan kamera. Hanya
+            # dipakai bila tidak ada trigger PLC / gate part-check (keduanya
+            # lebih akurat). 0 = hitung tiap inspeksi (perilaku lama).
+            "count_cooldown_ms": 1500,
             "cycle_delay_ms": 1000,  # jeda antar siklus inspeksi (ms), 0=langsung
         },
 
@@ -180,7 +185,12 @@ class Config:
         },
 
         # Global settings
-        "ng_debounce_ms": 500,
+        # CATATAN: `ng_debounce_ms` (timer interval NG) SUDAH TIDAK DIPAKAI.
+        # Ia menambah counter NG tiap tick selama anomali bertahan — yang
+        # diukur DURASI kondisi NG, bukan jumlah part NG. Penggantinya
+        # `inference.count_cooldown_ms`. Key ini dibiarkan agar config lama
+        # tetap terbaca tanpa error, tapi tidak berpengaruh apa pun.
+        "ng_debounce_ms": 500,   # [TIDAK DIPAKAI]
 
         # Active program
         "active_program": "",

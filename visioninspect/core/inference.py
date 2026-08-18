@@ -79,6 +79,11 @@ class InferenceEngine:
         self._model: Optional[ov.CompiledModel] = None
         self._model_path: Optional[Path] = None
         self._threshold: float = 0.5
+        # Threshold PER ROI (kunci = roi uid). Tiap ROI melihat fitur yang
+        # berbeda, jadi ambang yang pas untuk satu ROI belum tentu pas untuk
+        # ROI lain. Kosong = semua ROI memakai `_threshold` global (perilaku
+        # lama, dan tetap begitu untuk template yang belum menyetel per-ROI).
+        self._threshold_per_roi: dict = {}
         # Referensi normalisasi skor (raw PatchCore → [0,1]); score_ref → 0.5.
         # Dibaca dari norm.json di samping model.xml saat load_model.
         # _score_ref = fallback global; _score_ref_per_roi = {roi_uid: ref}
@@ -150,6 +155,38 @@ class InferenceEngine:
     @threshold.setter
     def threshold(self, value: float) -> None:
         self._threshold = max(0.0, min(1.0, value))
+
+    def set_roi_thresholds(self, per_roi: Optional[dict]) -> None:
+        """Setel threshold per ROI ({uid: nilai}). None/kosong = pakai global.
+
+        Nilai di luar [0,1] dan uid kosong diabaikan — supaya config yang
+        rusak tidak diam-diam membuat satu ROI selalu lolos atau selalu NG.
+        """
+        clean = {}
+        for uid, val in (per_roi or {}).items():
+            if not uid:
+                continue
+            try:
+                f = float(val)
+            except (TypeError, ValueError):
+                continue
+            if 0.0 <= f <= 1.0:
+                clean[str(uid)] = f
+            else:
+                logger.warning(
+                    "Threshold ROI '%s' di luar [0,1] (%s) — diabaikan, "
+                    "ROI ini memakai threshold global.", uid, val)
+        with self._lock:
+            self._threshold_per_roi = clean
+        if clean:
+            logger.info("Threshold per ROI aktif untuk %d ROI: %s",
+                        len(clean), clean)
+
+    def get_roi_threshold(self, uid: Optional[str]) -> float:
+        """Threshold efektif untuk satu ROI (global bila belum disetel)."""
+        if uid and uid in self._threshold_per_roi:
+            return self._threshold_per_roi[uid]
+        return self._threshold
 
     @property
     def latency_avg_ms(self) -> float:
@@ -266,6 +303,10 @@ class InferenceEngine:
                 self._model_path = model_path
                 self._score_ref = score_ref
                 self._score_ref_per_roi = score_ref_per_roi
+                # Threshold per ROI milik TEMPLATE, bukan model — dibersihkan
+                # di sini supaya tidak bocor dari template sebelumnya, lalu
+                # dipasang ulang oleh pemanggil (set_roi_thresholds).
+                self._threshold_per_roi = {}
                 self._algorithm = algorithm
                 self._yolo_names = yolo_names
                 self._yolo_task = yolo_task
@@ -506,6 +547,7 @@ class InferenceEngine:
             self._model_path = None
             self._score_ref = None
             self._score_ref_per_roi = {}
+            self._threshold_per_roi = {}
             self._simple_mean = None
             self._simple_std = None
             self._simple_loaded = False
@@ -552,6 +594,7 @@ class InferenceEngine:
         with self._lock:
             model = self._model
             threshold = self._threshold
+            threshold_per_roi = self._threshold_per_roi
             score_ref = self._score_ref
             score_ref_per_roi = self._score_ref_per_roi
             simple_mean = self._simple_mean
@@ -563,8 +606,12 @@ class InferenceEngine:
 
         # Multi-ROI: tiap ROI punya skala skor berbeda → pakai ref khusus ROI
         # ini (by uid) bila ada, jika tidak fallback ke ref global.
-        if roi and roi.get("uid") in score_ref_per_roi:
-            score_ref = score_ref_per_roi[roi["uid"]]
+        roi_uid = roi.get("uid") if roi else None
+        if roi_uid in score_ref_per_roi:
+            score_ref = score_ref_per_roi[roi_uid]
+        # Threshold per ROI — fallback ke global bila ROI ini belum disetel.
+        if roi_uid in threshold_per_roi:
+            threshold = threshold_per_roi[roi_uid]
 
         if model is None and not simple_loaded:
             elapsed = (time.perf_counter() - start) * 1000

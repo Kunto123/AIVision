@@ -59,6 +59,7 @@ rcc_*.py
 # --- Logs ---
 *.log
 logs/
+kernel.errors.txt
 
 # --- Temp ---
 tmp/

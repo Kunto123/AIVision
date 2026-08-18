@@ -29,9 +29,12 @@ class ROIData:
         self.height = height
         self.enabled = enabled
         self.label = label or f"ROI"
+        # Threshold khusus ROI ini. None = ikut threshold global template
+        # (perilaku lama, dan tetap begitu untuk template yang belum disetel).
+        self.threshold = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "uid": self.uid,
             "x": self.x,
             "y": self.y,
@@ -40,6 +43,12 @@ class ROIData:
             "enabled": self.enabled,
             "label": self.label,
         }
+        # Key `threshold` HANYA ditulis kalau ROI ini benar-benar punya
+        # ambang sendiri — supaya config template lama tidak berubah bentuk
+        # dan "ikut global" tetap terbaca sebagai ketiadaan field.
+        if self.threshold is not None:
+            d["threshold"] = float(self.threshold)
+        return d
 
     @staticmethod
     def from_dict(d: dict) -> "ROIData":
@@ -50,6 +59,12 @@ class ROIData:
             label=d.get("label", "ROI"),
         )
         roi.uid = d.get("uid", roi.uid)
+        thr = d.get("threshold")
+        if thr is not None:
+            try:
+                roi.threshold = max(0.0, min(1.0, float(thr)))
+            except (TypeError, ValueError):
+                roi.threshold = None
         return roi
 
     def rect(self) -> tuple:

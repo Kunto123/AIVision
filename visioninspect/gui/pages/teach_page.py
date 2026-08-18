@@ -756,6 +756,9 @@ class TeachPage(QWidget):
         self._threshold_spin.blockSignals(True)
         self._threshold_spin.setValue(round(value, 3))
         self._threshold_spin.blockSignals(False)
+        # Panel ROI menampilkan nilai global ini saat sebuah ROI "ikut global",
+        # supaya jelas angka mana yang sebenarnya berlaku untuk ROI itu.
+        self._roi_panel.set_global_threshold(float(value))
 
     def _on_threshold_changed(self, value: int):
         """Slider digeser → update spin (diblok anti-loop) + label besar."""

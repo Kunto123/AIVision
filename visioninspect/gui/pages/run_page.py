@@ -329,9 +329,14 @@ class RunPage(QWidget):
             judge = r["judgement"]
             icon = "OK" if judge == "OK" else "NG"
             color = colors[i % len(colors)]
+            # Threshold ikut ditampilkan karena tiap ROI bisa punya ambang
+            # sendiri — tanpa itu, skor 0,55 di satu baris dan 0,40 di baris
+            # lain tidak bisa dibandingkan operator.
+            thr = r.get("threshold")
+            thr_txt = f" / {thr:.3f}" if isinstance(thr, (int, float)) else ""
             lines.append(
                 f'<span style="color:{color}">{icon} {label}:'
-                f' score={r["score"]:.3f} ({judge})</span>'
+                f' score={r["score"]:.3f}{thr_txt} ({judge})</span>'
             )
         self._roi_results_label.setText("<br>".join(lines))
 

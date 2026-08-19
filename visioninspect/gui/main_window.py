@@ -1332,6 +1332,13 @@ class MainWindow(QMainWindow):
                         self._inspection_ok, self._inspection_ng)
                     # Feedback ke PLC: publikasi hasil OK
                     self._publish_result("OK")
+                    # Push ke PostgreSQL: SETIAP part OK, bukan sampel.
+                    # Tabel produksi ini adalah HITUNGAN part bagus — kalau
+                    # di-sampling (dulu 1 dari 30), angkanya jadi 30x lebih
+                    # kecil dari kenyataan. Lewat outbox, jadi tetap aman
+                    # kalau PG sedang mati.
+                    self._push_inspection_async(
+                        self._build_push_entry(worst_score))
 
             else:  # raw_judgement == "NG"
                 # NG diperlakukan SAMA dengan OK: satu part = satu vonis.
@@ -1370,9 +1377,10 @@ class MainWindow(QMainWindow):
                             "threshold": r.get("threshold"),
                             "margin": r.get("margin"),
                         } for i, r in enumerate(roi_results)])
-                        ng_entry_id = self._db.add_inspection({
+                        self._db.add_inspection({
                             "program": self._active_program,
                             "template": self._active_template,
+                            "operator": self._current_operator_name(),
                             "score": worst_score,
                             "judgement": "NG",
                             "threshold": self._inference_engine.threshold,
@@ -1385,10 +1393,10 @@ class MainWindow(QMainWindow):
                                 "template_name": self._active_partname,
                             },
                         })
-                        # Sink ke PostgreSQL via outbox (C1/C3) — local_id = id SQLite
-                        # agar koreksi operator bisa di-propagasi (C0).
-                        self._push_inspection_async(self._build_push_entry(
-                            "NG", worst_score, img_path, avg_latency, ng_entry_id))
+                        # NG TIDAK dikirim ke PostgreSQL. Tabel produksi di
+                        # sana hanya menampung hasil OK; seluruh bukti cacat
+                        # (gambar, skor per ROI, threshold, koreksi) tetap
+                        # lengkap di SQLite lokal.
 
             # ── Siklus trigger selesai: model BENAR-BENAR menilai, pulse
             # OK/NG sudah dikirim di atas → lepas freeze tanpa fault. ──
@@ -1434,9 +1442,10 @@ class MainWindow(QMainWindow):
                         "label": r.get("label", f"ROI{i + 1}"),
                         "score": r["score"], "judgement": r["judgement"],
                     } for i, r in enumerate(roi_results)])
-                    ok_entry_id = self._db.add_inspection({
+                    self._db.add_inspection({
                         "program": self._active_program,
                         "template": self._active_template,
+                        "operator": self._current_operator_name(),
                         "score": worst_score,
                         "judgement": "OK",
                         "threshold": self._inference_engine.threshold,
@@ -1447,8 +1456,9 @@ class MainWindow(QMainWindow):
                                       'template': self._active_template,
                                       'template_name': self._active_partname},
                     })
-                    self._push_inspection_async(self._build_push_entry(
-                        "OK", worst_score, img_path, avg_latency, ok_entry_id))
+                    # Push PG TIDAK di sini — sampling 1-dari-30 ini khusus
+                    # penyimpanan gambar+history lokal (mahal di disk).
+                    # PostgreSQL menerima SETIAP part OK, di blok verdict OK.
 
         except Exception as e:
             logger.warning("Inference result error: %s", e)
@@ -1456,30 +1466,51 @@ class MainWindow(QMainWindow):
             # Token replay: ack SETELAH hasil diproses — jangan sampai hilang
             self._replay_finish_if_pending()
 
-    def _build_push_entry(self, judgement: str, score: float,
-                          img_path: str, latency: float, local_id: int) -> dict:
-        """Bangun dict kwargs untuk ``PostgresDB.push_inspection`` (C1).
+    def _current_operator_name(self) -> str:
+        """Nama akun yang sedang login (untuk history lokal & mpcheck PG)."""
+        if not self._current_user:
+            return ""
+        return (self._current_user.get("display_name")
+                or self._current_user.get("username", ""))
 
-        Perbaikan mapping lama: ``mpcheck`` = verdict OK/NG (sebelumnya
-        salah diisi nama operator). Nama operator pindah ke kolom ``operator``;
-        ``line`` diambil dari config (sebelumnya tidak pernah ditulis).
+    def _build_push_entry(self, score: float) -> dict:
+        """Bangun kwargs untuk ``PostgresDB.push_inspection`` — 5 kolom saja.
+
+        Tabel `qc_inspection_push` adalah skema milik sistem produksi, dan
+        hanya menerima hasil OK dari operator view. Yang dikirim:
+
+          partname    nama template aktif
+          datecheckmc waktu INSPEKSI (diambil di sini, bukan saat insert —
+                      kalau PG mati dan outbox menumpuk, memakai jam insert
+                      akan menggeser semua baris tertunda ke waktu pulih)
+          mpcheck     MP/ManPower = nama akun operator yang login. BUKAN
+                      verdict: tabel ini hanya berisi OK, jadi verdict-nya
+                      tersirat. (Kode lama mengisinya dengan OK/NG — itu
+                      salah baca arti kolomnya.)
+          data1       skor part-check
+          data2       skor ROI penentu
+
+        Gambar, threshold, latensi, verdict, dan koreksi TIDAK dikirim —
+        semuanya tersimpan lengkap di SQLite lokal.
         """
         operator = ""
         if self._current_user:
             operator = (self._current_user.get("display_name")
                         or self._current_user.get("username", ""))
+        if not operator:
+            # Tetap dikirim: hitungan produksi lebih berharga daripada baris
+            # yang hilang. Tapi dicatat supaya ketahuan kalau sering terjadi.
+            logger.warning("Push PG tanpa operator — mpcheck akan kosong.")
+        # Part-check tidak aktif → tidak ada yang diukur. Kirim 0, jangan
+        # nilai awal 1.0 yang terlihat seperti hasil pengukuran.
+        data1 = (float(self._last_part_check_score)
+                 if self._pc_active_for_overlay else 0.0)
         return {
             "partname": self._active_partname or self._active_program,
-            "mpcheck": judgement,                                   # verdict OK/NG
-            "operator": operator,
-            "data1": self._last_part_check_score or 0.0,
+            "datecheckmc": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "mpcheck": operator,
+            "data1": data1,
             "data2": float(score),
-            "image_path": img_path or "",
-            "threshold": getattr(self._inference_engine, "threshold", None),
-            "latency_ms": float(latency) if latency is not None else None,
-            "local_id": int(local_id) if local_id is not None else None,
-            "line": (self._config.get("postgresql.line", "")
-                     or self._config.get("line_name", "") or ""),
         }
 
     def _push_inspection_async(self, entry: dict) -> None:
@@ -3906,12 +3937,9 @@ class MainWindow(QMainWindow):
             self._db.mark_correction(entry_id, correct_judgement)
             self._db.add_audit(self._active_program, "correction",
                          {"entry_id": entry_id, "from": original, "to": correct_judgement})
-            # C0: propagasi koreksi ke PostgreSQL (local_id = id SQLite).
-            # Non-blocking — PG boleh lambat/mati; sink ulang via outbox tick.
-            if self._pg.is_enabled:
-                threading.Thread(
-                    target=self._pg.mark_correction_pg,
-                    args=(entry_id, correct_judgement), daemon=True).start()
+            # Koreksi TIDAK dipropagasi ke PostgreSQL: tabel di sana hanya
+            # menampung hasil OK dan tidak lagi punya kolom penopangnya
+            # (local_id/corrected/...). Koreksi tetap tercatat penuh di SQLite.
             self._refresh_history()
             self.set_status(f"Entry #{entry_id} dikoreksi ke {correct_judgement}", 3000)
         except Exception as e:
@@ -3932,11 +3960,8 @@ class MainWindow(QMainWindow):
             self._db.rollback_correction(entry_id)
             self._db.add_audit(self._active_program, "rollback",
                          {"entry_id": entry_id})
-            # C0: batalkan koreksi di PostgreSQL juga
-            if self._pg.is_enabled:
-                threading.Thread(
-                    target=self._pg.rollback_correction_pg,
-                    args=(entry_id,), daemon=True).start()
+            # Tidak ada yang perlu dibatalkan di PostgreSQL — koreksi memang
+            # tidak pernah dikirim ke sana.
             self._refresh_history()
             self.set_status(f"Koreksi entry #{entry_id} dibatalkan", 3000)
         except Exception as e:

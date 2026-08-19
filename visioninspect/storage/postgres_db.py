@@ -17,22 +17,17 @@ Tabel skema:
     last_login_at   TIMESTAMPTZ
     rfid_uid_hash   TEXT (hashed RFID)
 
-  qc_inspection_push:
+  qc_inspection_push  (SKEMA ASLI — lima kolom, jangan ditambah):
     id              BIGINT PK
-    partname        TEXT
-    datecheckmc     TIMESTAMPTZ
-    mpcheck         TEXT (OK/NG verdict)
-    data1           DOUBLE PRECISION (part ready difference)
-    data2           DOUBLE PRECISION (anomaly/similarity score)
-    line            TEXT (nama lini produksi)
-    operator        TEXT (nama akun operator yang login)
-    image_path      TEXT (path frame tersimpan)
-    threshold       DOUBLE PRECISION (threshold aktif saat inspeksi)
-    latency_ms      DOUBLE PRECISION
-    local_id        BIGINT (id entry SQLite — untuk propagasi koreksi C0)
-    corrected       BOOLEAN DEFAULT FALSE
-    correct_judgement TEXT
-    corrected_at    TIMESTAMPTZ
+    partname        TEXT (nama part = nama template aktif)
+    datecheckmc     TIMESTAMPTZ (waktu INSPEKSI, bukan waktu insert)
+    mpcheck         TEXT (MP/ManPower = nama akun operator yang login)
+    data1           DOUBLE PRECISION (skor part-check; 0 bila tidak aktif)
+    data2           DOUBLE PRECISION (skor ROI penentu)
+
+  Isi tabel ini HANYA hasil inspeksi OK dari operator view. NG tidak pernah
+  dikirim — bukti cacat, gambar, threshold, latensi, dan koreksi operator
+  semuanya tersimpan di SQLite lokal.
 """
 
 import hashlib
@@ -243,6 +238,10 @@ class PostgresDB:
                     rfid_uid_last4 TEXT,
                     rfid_bound_at TIMESTAMPTZ
                 )""")
+            # Skema ASLI tabel produksi — lima kolom, tidak lebih. Aplikasi
+            # ini pernah menambahkan 9 kolom lain (line/operator/image_path/
+            # threshold/latency_ms/local_id/corrected*); semuanya dicabut
+            # kembali, lihat _drop_legacy_push_columns().
             self._execute("""
                 CREATE TABLE IF NOT EXISTS qc_inspection_push (
                     id BIGSERIAL PRIMARY KEY,
@@ -250,45 +249,21 @@ class PostgresDB:
                     datecheckmc TIMESTAMPTZ,
                     mpcheck TEXT,
                     data1 DOUBLE PRECISION,
-                    data2 DOUBLE PRECISION,
-                    line TEXT,
-                    operator TEXT,
-                    image_path TEXT,
-                    threshold DOUBLE PRECISION,
-                    latency_ms DOUBLE PRECISION,
-                    local_id BIGINT,
-                    corrected BOOLEAN NOT NULL DEFAULT FALSE,
-                    correct_judgement TEXT,
-                    corrected_at TIMESTAMPTZ
+                    data2 DOUBLE PRECISION
                 )""")
 
-            # C1: migrasi tabel produksi lama (CREATE IF NOT EXISTS tidak
-            # menambah kolom) — ADD COLUMN IF NOT EXISTS = no-op bila sudah ada.
-            for col, coltype in (
-                ("line", "TEXT"),
-                ("operator", "TEXT"),
-                ("image_path", "TEXT"),
-                ("threshold", "DOUBLE PRECISION"),
-                ("latency_ms", "DOUBLE PRECISION"),
-                ("local_id", "BIGINT"),
-                ("corrected", "BOOLEAN NOT NULL DEFAULT FALSE"),
-                ("correct_judgement", "TEXT"),
-                ("corrected_at", "TIMESTAMPTZ"),
-            ):
-                try:
-                    self._execute(
-                        f"ALTER TABLE qc_inspection_push ADD COLUMN IF NOT EXISTS "
-                        f"{col} {coltype}")
-                except PostgresError as e:
-                    logger.warning("Migrasi kolom %s gagal: %s", col, e)
-
-            # C4: kolom must_change_password untuk akun seed (paksa ganti)
+            # C4: kolom must_change_password untuk akun seed (paksa ganti).
+            # Dijalankan SEBELUM pembersihan kolom lama: tanpa kolom ini login
+            # gagal total, jadi ia tidak boleh bergantung pada langkah lain
+            # yang sifatnya hanya kebersihan skema.
             try:
                 self._execute(
                     "ALTER TABLE qc_user_accounts ADD COLUMN IF NOT EXISTS "
                     "must_change_password BOOLEAN NOT NULL DEFAULT FALSE")
             except PostgresError as e:
                 logger.warning("Migrasi kolom must_change_password gagal: %s", e)
+
+            self._drop_legacy_push_columns()
 
             # 2) Verifikasi tabel benar-benar ada
             missing = []
@@ -653,28 +628,73 @@ class PostgresDB:
             logger.error("Unbind RFID error: %s", e)
             return False
 
+    #: Kolom yang DULU ditambahkan aplikasi ini ke tabel produksi milik
+    #: perusahaan. Dicabut agar tabel kembali ke bentuk aslinya.
+    _LEGACY_PUSH_COLUMNS = (
+        "line", "operator", "image_path", "threshold", "latency_ms",
+        "local_id", "corrected", "correct_judgement", "corrected_at",
+    )
+
+    def _drop_legacy_push_columns(self) -> None:
+        """Hapus permanen kolom yang dulu ditambahkan aplikasi ini.
+
+        PERMANEN: data di kolom-kolom itu ikut hilang dan tidak bisa
+        dikembalikan tanpa backup. Dijalankan sekali — `DROP COLUMN IF EXISTS`
+        bersifat idempoten, jadi startup berikutnya tidak melakukan apa-apa.
+
+        Semua informasi itu TETAP ADA di SQLite lokal (image_path, threshold,
+        latency_ms, verdict, koreksi, skor per ROI), jadi yang hilang hanya
+        salinannya di PostgreSQL.
+        """
+        # Except LEBAR (bukan hanya PostgresError): langkah ini semata-mata
+        # kebersihan skema. Kalau ia gagal karena sebab apa pun, sisa
+        # ensure_ready() — termasuk migrasi kolom yang dibutuhkan LOGIN —
+        # tetap harus jalan. (Pernah terjadi: TypeError di sini membuat
+        # `must_change_password` tidak pernah dibuat dan login mati total.)
+        try:
+            existing = self._execute(
+                """SELECT column_name FROM information_schema.columns
+                   WHERE table_name = 'qc_inspection_push'""",
+                fetch=True) or []
+            have = {r.get("column_name") for r in existing}
+
+            to_drop = [c for c in self._LEGACY_PUSH_COLUMNS if c in have]
+            if not to_drop:
+                return
+            logger.warning(
+                "Menghapus PERMANEN %d kolom tambahan dari qc_inspection_push: "
+                "%s — data di kolom ini hilang. Tabel kembali ke skema asli "
+                "(partname, datecheckmc, mpcheck, data1, data2).",
+                len(to_drop), ", ".join(to_drop))
+            for col in to_drop:
+                try:
+                    self._execute(
+                        "ALTER TABLE qc_inspection_push "
+                        f"DROP COLUMN IF EXISTS {col}")
+                except Exception as e:
+                    logger.error("Gagal menghapus kolom %s: %s", col, e)
+        except Exception as e:
+            logger.warning(
+                "Pembersihan kolom lama qc_inspection_push dilewati: %s", e)
+
     # ── Inspection Push ─────────────────────────────────────────────
 
     def push_inspection(self, partname: str, mpcheck: str,
                         data1: float = 0.0, data2: float = 0.0,
-                        operator: str = "", image_path: str = "",
-                        threshold: Optional[float] = None,
-                        latency_ms: Optional[float] = None,
-                        local_id: Optional[int] = None,
-                        line: str = "") -> Optional[int]:
-        """Push inspection result to qc_inspection_push (C1: skema lengkap).
+                        datecheckmc: Optional[str] = None) -> Optional[int]:
+        """Push hasil inspeksi OK ke qc_inspection_push (skema asli, 5 kolom).
 
         Args:
-            partname: Nama part/program/template
-            mpcheck: Verdict "OK" atau "NG" (bukan nama operator)
-            data1: Part-ready difference score (0 = siap, makin besar beda)
-            data2: Anomaly/similarity score (1.0 = mirip OK, 0.0 = anomali)
-            operator: Nama akun operator yang login
-            image_path: Path frame tersimpan (bukti visual untuk audit)
-            threshold: Threshold aktif saat inspeksi
-            latency_ms: Latensi inferensi (ms)
-            local_id: ID entry di SQLite (untuk propagasi koreksi C0)
-            line: Nama lini produksi
+            partname: Nama part (dari nama template aktif)
+            mpcheck: MP (ManPower) yang memeriksa — NAMA AKUN OPERATOR yang
+                login di operator view. Bukan verdict OK/NG: tabel ini hanya
+                menerima hasil OK, jadi verdict-nya tersirat.
+            data1: Skor part-check (0 bila part-check tidak aktif)
+            data2: Skor inspeksi ROI penentu
+            datecheckmc: Waktu INSPEKSI (bukan waktu insert). Wajib diisi
+                pemanggil — kalau outbox tertahan karena PG mati, memakai
+                jam insert akan menggeser seluruh baris tertunda ke waktu
+                koneksi pulih. None hanya sebagai jaring pengaman.
 
         Returns:
             Inserted row ID, atau None on failure.
@@ -682,24 +702,20 @@ class PostgresDB:
         if not self._enabled:
             return None
 
-        now = _now()
+        when = datecheckmc or _now()
         try:
             row = self._execute(
                 """INSERT INTO qc_inspection_push
-                   (partname, datecheckmc, mpcheck, data1, data2,
-                    line, operator, image_path, threshold, latency_ms, local_id)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   (partname, datecheckmc, mpcheck, data1, data2)
+                   VALUES (%s, %s, %s, %s, %s)
                    RETURNING id""",
-                (partname, now, mpcheck, float(data1), float(data2),
-                 line or "", operator or "", image_path or "",
-                 float(threshold) if threshold is not None else None,
-                 float(latency_ms) if latency_ms is not None else None,
-                 int(local_id) if local_id is not None else None),
+                (partname, when, mpcheck, float(data1), float(data2)),
                 fetch_one=True,
             )
             if row:
                 rid = row.get("id") or row.get("id", 0)
-                logger.debug("Inspection pushed: id=%s part=%s mpcheck=%s data1=%.3f data2=%.3f",
+                logger.debug("Inspection pushed: id=%s part=%s mp=%s "
+                             "data1=%.3f data2=%.3f",
                              rid, partname, mpcheck, data1, data2)
                 return int(rid)
             return None
@@ -707,46 +723,11 @@ class PostgresDB:
             logger.warning("Push inspection error: %s", e)
             return None
 
-    # ── Correction Propagation (C0) ────────────────────────────────
-
-    def mark_correction_pg(self, local_id: int, correct_judgement: str) -> bool:
-        """Propagasi koreksi operator ke qc_inspection_push (C0).
-
-        Mencocokkan via local_id (id entry SQLite). Verdict asli (mpcheck)
-        TIDAK ditimpa — sama seperti SQLite: asli utuh, koreksi di kolom
-        terpisah. Returns True bila UPDATE dieksekusi.
-        """
-        if not self._enabled:
-            return False
-        try:
-            self._execute(
-                """UPDATE qc_inspection_push
-                   SET corrected = TRUE, correct_judgement = %s, corrected_at = %s
-                   WHERE local_id = %s""",
-                (correct_judgement, _now(), int(local_id)),
-            )
-            logger.info("PG correction: local_id=%d -> %s", local_id, correct_judgement)
-            return True
-        except PostgresError as e:
-            logger.warning("PG correction update gagal (local_id=%d): %s", local_id, e)
-            return False
-
-    def rollback_correction_pg(self, local_id: int) -> bool:
-        """Batalkan koreksi di qc_inspection_push (C0)."""
-        if not self._enabled:
-            return False
-        try:
-            self._execute(
-                """UPDATE qc_inspection_push
-                   SET corrected = FALSE, correct_judgement = NULL, corrected_at = NULL
-                   WHERE local_id = %s""",
-                (int(local_id),),
-            )
-            logger.info("PG correction rollback: local_id=%d", local_id)
-            return True
-        except PostgresError as e:
-            logger.warning("PG correction rollback gagal (local_id=%d): %s", local_id, e)
-            return False
+    # CATATAN: propagasi koreksi ke PostgreSQL (mark_correction_pg /
+    # rollback_correction_pg) DIHAPUS. Kolom penopangnya (local_id, corrected,
+    # correct_judgement, corrected_at) sudah tidak ada, dan tabel ini hanya
+    # menerima hasil OK — sementara koreksi hampir selalu menyangkut NG.
+    # Koreksi operator tetap tercatat lengkap di SQLite lokal.
 
     # ── Liveness (C2) ──────────────────────────────────────────────
 

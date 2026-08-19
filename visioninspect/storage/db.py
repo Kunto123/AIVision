@@ -95,6 +95,13 @@ class Database:
         # import yang menimpa config.
         self._migrate_template_column(cursor)
 
+        # ── Migrasi: kolom `operator` ──────────────────────────────────────
+        # Nama operator dulu hanya ditulis ke file .json pendamping gambar,
+        # jadi history lokal tidak bisa menjawab "siapa yang memeriksa part
+        # ini". Sekarang PostgreSQL hanya menerima hasil OK, sehingga jejak
+        # operator untuk part NG SEPENUHNYA bergantung pada database lokal.
+        self._migrate_simple_column(cursor, "operator", "TEXT")
+
         # Program counters (cached for fast access)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS program_counters (
@@ -173,6 +180,15 @@ class Database:
         except (TypeError, ValueError):
             return None
 
+    def _migrate_simple_column(self, cursor, name: str, coltype: str) -> None:
+        """Tambah kolom bila belum ada. Idempoten, aman tiap startup."""
+        cols = [r[1] for r in cursor.execute(
+            "PRAGMA table_info(inspection_history)").fetchall()]
+        if name not in cols:
+            cursor.execute(
+                f"ALTER TABLE inspection_history ADD COLUMN {name} {coltype}")
+            logger.info("Migrasi history: kolom `%s` ditambahkan", name)
+
     def _migrate_template_column(self, cursor) -> None:
         """Tambah kolom `template` + index, lalu backfill dari metadata lama.
 
@@ -220,8 +236,8 @@ class Database:
             INSERT INTO inspection_history
                 (timestamp, program, score, judgement, threshold,
                  latency_ms, image_path, thumbnail_path, roi_region, metadata,
-                 template)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 template, operator)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             entry.get("timestamp", time.strftime("%Y-%m-%d %H:%M:%S")),
             entry.get("program", ""),
@@ -234,6 +250,7 @@ class Database:
             self._json_or_str(entry.get("roi_region")),
             self._json_or_str(entry.get("metadata")),
             template_id or None,
+            str(entry.get("operator", "") or "") or None,
         ))
         self.conn.commit()
 

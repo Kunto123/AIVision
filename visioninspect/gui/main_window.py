@@ -296,6 +296,10 @@ class MainWindow(QMainWindow):
         self._plc_modbus: Optional[ModbusRTUManager] = None
         self._plc_poll_timer: Optional[QTimer] = None
         self._plc_trigger_pending = False
+        # Heartbeat: toggle berkala selama sistem sehat — pembeda satu-satunya
+        # antara "part cacat" dan "sistem rusak" di sisi PLC.
+        self._heartbeat_state = False
+        self._heartbeat_ts = 0.0
 
         # ── Flask API (opsional, bind 127.0.0.1) ──
         self._flask_api: Optional[FlaskAPI] = None
@@ -1348,17 +1352,16 @@ class MainWindow(QMainWindow):
                 # ok/(ok+ng) tidak pernah sebanding.
                 self._run_page.update_judgement("NG", worst_score)
                 if counts:
-                    if not self._replay_test_mode:
-                        self._inspection_ng += 1
-                        self._run_page.update_counters(
-                            self._inspection_ok, self._inspection_ng)
-                    # Feedback ke PLC: publikasi hasil NG — di-bypass otomatis
-                    # oleh guard _replay_test_mode di _publish_result (safety).
-                    # `official` menjaga agar inferensi live (mode "infer saat
-                    # idle") tidak pernah memulsa PLC tanpa trigger.
-                    self._publish_result("NG")
-                    # Save frame + history HANYA untuk inspeksi produksi nyata —
-                    # replay video (mode uji) memakai jalur export sendiri.
+                    # TIDAK ada sinyal NG ke PLC, dan counter NG TIDAK
+                    # ditambah di sini. NG sepenuhnya diputuskan PLC dari
+                    # ketiadaan OK dalam jendela waktunya; counter diisi saat
+                    # sinyal NG masuk (_on_plc_ng) supaya angka di layar
+                    # selalu cocok dengan lampu.
+                    #
+                    # Yang TETAP dilakukan di sini: menyimpan bukti. Gambar
+                    # dan skor per ROI harus diambil pada frame yang dinilai —
+                    # kalau menunggu sinyal PLC, frame itu sudah lewat dan
+                    # tidak ada apa pun yang bisa dipakai untuk tuning.
                     if not self._replay_test_mode:
                         # Save frame untuk tuning
                         img_path = self._save_inspection_frame(
@@ -2014,6 +2017,7 @@ class MainWindow(QMainWindow):
         if self._get_io_mode()["busy_output"]:
             busy = bool(self._camera_worker and self._camera_worker.is_running)
             self._plc_modbus.set_output("busy", busy)
+        self._tick_heartbeat()
         try:
             events = self._plc_modbus.read_inputs()
         except Exception as e:
@@ -2031,6 +2035,69 @@ class MainWindow(QMainWindow):
             num = self._plc_modbus.read_program_register()
             if num is not None:
                 self._on_plc_switch_template(num)
+        if events.get("ng_from_plc"):
+            self._on_plc_ng()
+
+    def _tick_heartbeat(self):
+        """TOGGLE coil heartbeat ±1 Hz selama sistem sehat.
+
+        Sengaja di-toggle, bukan di-ON-kan. Kalau aplikasi mati atau macet,
+        coil level akan tertinggal di nilai terakhirnya dan tampak normal;
+        yang berubah-ubah tidak bisa dipalsukan oleh proses yang berhenti.
+        Ladder memantau PERUBAHANnya: tidak berubah > N detik = sistem rusak.
+
+        "Sehat" = model termuat DAN kamera berjalan. Tanpa dua-duanya, sistem
+        tidak mungkin menghasilkan OK — dan tanpa heartbeat, PLC akan
+        membaca keadaan itu sebagai part cacat beruntun, lalu membuang
+        seluruh produksi bagus tanpa ada yang tahu sebabnya.
+        """
+        healthy = bool(
+            self._inference_engine.is_loaded
+            and self._camera_worker is not None
+            and self._camera_worker.is_running)
+        if not healthy:
+            return          # berhenti toggle = itulah sinyalnya
+        now = time.monotonic()
+        if now - self._heartbeat_ts < self._HEARTBEAT_PERIOD_SEC:
+            return
+        self._heartbeat_ts = now
+        self._heartbeat_state = not self._heartbeat_state
+        try:
+            self._plc_modbus.set_output("heartbeat", self._heartbeat_state)
+        except Exception as e:
+            logger.debug("Heartbeat write gagal: %s", e)
+
+    def _on_plc_ng(self):
+        """PLC memvonis NG (tidak ada OK dalam jendela waktunya).
+
+        Dua hal yang dilakukan:
+        1. Tambah counter NG — inilah SATU-SATUNYA sumber counter NG sekarang,
+           supaya angka di layar tidak pernah berbeda dari lampu. Vonis NG
+           model sendiri sengaja tidak menghitung; kalau keduanya menghitung,
+           satu part terhitung dua kali.
+        2. Bersihkan state siklus → siap menerima trigger part berikutnya.
+           Part yang ini sudah ditolak PLC; tidak ada yang perlu diperiksa
+           ulang (kalau sistem ikut infer ulang, NG berikutnya memicu NG lagi
+           dan jadi lingkaran tanpa henti).
+        """
+        if self._replay_test_mode:
+            return          # replay uji: jangan sentuh counter produksi
+        self._inspection_ng += 1
+        self._run_page.update_counters(self._inspection_ok, self._inspection_ng)
+        self._run_page.update_judgement("NG", self._last_worst_score)
+        self._run_page.set_status_message("PLC: NG — siap part berikutnya")
+        # Siklus dianggap tuntas: lepas freeze, matikan batas waktu, buang
+        # trigger yang mungkin masih tertunda supaya tidak "bocor" ke part
+        # berikutnya.
+        self._plc_trigger_pending = False
+        self._gate_rejected = False
+        if self._trigger_cycle_active:
+            self._finish_trigger_cycle()
+        else:
+            self._display_frozen = False
+            self._freeze_pending = False
+        logger.info("PLC NG diterima — counter NG=%d, siklus di-reset",
+                    self._inspection_ng)
 
     def _on_plc_trigger(self):
         """PLC minta 1 siklus inspeksi (coil trigger ON)."""
@@ -2140,14 +2207,21 @@ class MainWindow(QMainWindow):
             return None
         return self._yolo_det
 
-    def _publish_result(self, judgement: str):
-        """Publikasi hasil OK/NG ke PLC sesuai `plc.io_mode.output_mode`.
+    #: Periode toggle heartbeat. Ladder harus memakai ambang beberapa kali
+    #: nilai ini (mis. 5 dtk) supaya jitter polling tidak memicu alarm palsu.
+    _HEARTBEAT_PERIOD_SEC = 1.0
 
-        - latching: coil OK/NG di-hold sebagai LEVEL sampai hasil berikutnya
-          ditulis / PLC reset (persis "kept until next status result" IV3).
+    def _publish_result(self, judgement: str):
+        """Publikasi hasil OK ke PLC sesuai `plc.io_mode.output_mode`.
+
+        HANYA "OK" yang boleh dikirim. NG diputuskan PLC dari KETIADAAN sinyal
+        OK dalam jendela waktunya sendiri — mengirim NG dari sini akan
+        menduakan sumber keputusan.
+
         - one_shot: pulse — tunda `one_shot_delay_ms`, lalu ON selama
-          `one_shot_on_time_ms` (mirip "One-Shot" IV3).
-        PLC yang memegang timing antar part; aplikasi hanya memublikasikan hasil.
+          `one_shot_on_time_ms`.
+        - latching: coil di-hold sebagai LEVEL sampai hasil berikutnya.
+        PLC yang memegang timing antar part; aplikasi hanya melapor OK.
         """
         # SAFETY: saat replay video (mode uji), TIDAK PERNAH menulis ke PLC —
         # video uji jangan sampai menyalakan actuator reject/accept di lini nyata.
@@ -2155,12 +2229,19 @@ class MainWindow(QMainWindow):
             return
         if not self._plc_modbus or not self._plc_modbus.is_connected:
             return
-        # Rollout shadow mode: NG hanya ditampilkan & dicatat, coil result_ng
-        # TIDAK ditulis — lini tidak berhenti sebelum akurasi terbukti.
-        # OK tetap dipublikasikan normal (coil result_ok).
-        if judgement == "NG" and self._config.get("rollout.shadow_mode", False):
+        if judgement != "OK":
+            # Penjaga terakhir: kalau ada jalur lama yang masih memanggil
+            # dengan "NG", jangan diteruskan — cukup dicatat supaya jalur itu
+            # bisa ditemukan dan dibersihkan.
             logger.warning(
-                "SHADOW MODE: NG ditekan dari coil (tidak diteruskan ke PLC)")
+                "_publish_result('%s') diabaikan — sistem hanya mengirim OK; "
+                "NG adalah wewenang PLC.", judgement)
+            return
+        # Rollout shadow mode: hasil hanya ditampilkan & dicatat, coil TIDAK
+        # ditulis — lini tidak terpengaruh sebelum akurasi terbukti.
+        if self._config.get("rollout.shadow_mode", False):
+            logger.warning(
+                "SHADOW MODE: OK ditekan dari coil (tidak diteruskan ke PLC)")
             return
         io = self._get_io_mode()
         if io["output_mode"] == "one_shot":
@@ -2169,15 +2250,13 @@ class MainWindow(QMainWindow):
             self._publish_latching(judgement)
 
     def _publish_latching(self, judgement: str):
-        """Tulis hasil sebagai LEVEL; coil lawan di-OFF-kan agar PLC bisa
-        deteksi rising/falling edge (pola ladder KV Keyence: INC pd edge OK/NG)."""
-        ok = (judgement == "OK")
-        self._plc_modbus.set_output("result_ok", ok)
-        self._plc_modbus.set_output("result_ng", not ok)
+        """Tulis OK sebagai LEVEL. Tidak ada coil lawan yang di-OFF-kan:
+        coil NG sudah tidak ada — NG adalah wewenang PLC."""
+        self._plc_modbus.set_output("result_ok", judgement == "OK")
 
     def _publish_one_shot(self, judgement: str, io: dict):
         """Pulse singkat sesuai io_mode (delay + ON time) tanpa blokir UI."""
-        name = "result_ok" if judgement == "OK" else "result_ng"
+        name = "result_ok"      # hanya OK yang pernah dikirim
         duration = max(0, int(io.get("one_shot_on_time_ms", 300)))
         delay = max(0, int(io.get("one_shot_delay_ms", 0)))
 

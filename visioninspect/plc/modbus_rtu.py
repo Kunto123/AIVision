@@ -54,35 +54,58 @@ PLC_PROFILES = {
 def build_io_map(plc_config: Optional[dict]) -> dict:
     """IO map default (coil/register) — override dari config.
 
+    Kontrak dengan ladder:
+      - Sistem HANYA mengirim OK. NG diputuskan PLC dari ketiadaan OK dalam
+        jendela waktunya sendiri.
+      - Heartbeat memisahkan "part cacat" dari "sistem rusak"; tanpa itu
+        kedua-duanya terlihat sama (sama-sama tidak ada OK).
+
     outputs  : coil yang SISTEM tulis → PLC baca
-               result_ok / result_ng / part_ready / busy
+               result_ok / heartbeat / part_ready / busy
     inputs   : coil yang PLC tulis → sistem baca
-               trigger (minta inspeksi) / reset_result / switch_program
-    program_register : holding register berisi nomor program untuk switch_program
+               trigger / reset_result / switch_template / ng_from_plc
+    program_register : holding register berisi nomor template tujuan
     """
     default = {
         "outputs": {
             "result_ok": 1,       # coil 1: ON = part OK (pulse)
-            "result_ng": 2,       # coil 2: ON = part NG (pulse)
+            # CATATAN: coil result_ng DIHAPUS. NG sepenuhnya diputuskan PLC
+            # dari KETIADAAN sinyal OK dalam jendela waktu miliknya, jadi
+            # sistem tidak pernah lagi mengirim NG.
             "part_ready": 3,      # coil 3: ON = part terdeteksi (pulse saat transisi)
             "busy": 4,            # coil 4: ON = sistem sedang inspeksi
+            # Heartbeat: di-TOGGLE berkala selama sistem sehat (model termuat
+            # + kamera jalan). Tanpa ini, kamera lepas / aplikasi mati terlihat
+            # sama seperti part cacat di sisi PLC — lini terus membuang
+            # produksi bagus tanpa ada yang tahu. Ladder memantau
+            # PERUBAHANnya: tidak berubah > N detik = sistem rusak, bukan NG.
+            "heartbeat": 7,
         },
         "inputs": {
             "trigger": 0,         # coil 0: PLC minta 1 siklus inspeksi
-            "reset_result": 5,    # IN1: reset kondisi coil hasil + counter
+            "reset_result": 5,    # IN1: reset counter produksi OK/NG
             # IN2: ganti TEMPLATE aktif; nomornya dibaca dari program_register.
             # Nama lama "switch_program" masih dikenali (config lama) — lihat
             # _on_plc_poll_tick di main_window.
             "switch_template": 6,
+            # IN3: PLC memvonis NG (tidak ada OK dalam jendela waktunya).
+            # Dipakai sistem untuk (1) menambah counter NG di layar supaya
+            # cocok dengan lampu, dan (2) membersihkan state siklus agar siap
+            # menerima trigger part berikutnya.
+            "ng_from_plc": 8,
         },
         "program_register": 10,   # holding register nomor template tujuan
     }
     io = plc_config.get("io_map") if plc_config else None
-    if isinstance(io, dict):
-        # Deep-merge: isi key yang ada, sisanya default
-        for section in ("outputs", "inputs"):
-            if isinstance(io.get(section), dict):
-                default[section].update(io[section])
+    # Guard: config `plc` tanpa key `io_map` bukan hal aneh (config lama /
+    # ditulis tangan). Sebelum ini baris program_register di bawah membaca
+    # `io` tanpa cek dan meledak dengan AttributeError.
+    if not isinstance(io, dict):
+        return default
+    # Deep-merge: isi key yang ada, sisanya default
+    for section in ("outputs", "inputs"):
+        if isinstance(io.get(section), dict):
+            default[section].update(io[section])
     if isinstance(io.get("program_register"), int):
         default["program_register"] = io["program_register"]
     return default
@@ -239,10 +262,10 @@ class ModbusRTUManager:
 
     # ---- OUTPUT (sistem → PLC) ----
     # Coil yang sistem tulis; PLC (slave) membaca coil ini di ladder-nya.
-    # Contoh ladder Mitsubishi: M1 → Y0 (reject) = coil result_ng.
+    # Contoh ladder Mitsubishi: M0 → reset timer NG = coil result_ok.
 
     def set_output(self, name: str, value: bool) -> bool:
-        """Set coil output by nama (result_ok/result_ng/part_ready/busy)."""
+        """Set coil output by nama (result_ok/heartbeat/part_ready/busy)."""
         addr = self._io_map["outputs"].get(name)
         if addr is None:
             return False

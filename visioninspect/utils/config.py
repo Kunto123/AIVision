@@ -59,8 +59,11 @@ class Config:
         # Rollout / deploy bertahap
         "rollout": {
             "shadow_mode": False,
-            # True: NG hanya ditampilkan & dicatat, coil result_ng TIDAK
-            # ditulis — lini tidak berhenti sebelum akurasi terbukti.
+            # True: hasil hanya ditampilkan & dicatat, coil result_ok TIDAK
+            # ditulis — lini tidak terpengaruh sebelum akurasi terbukti.
+            # PERHATIAN pada desain sekarang: tanpa sinyal OK, PLC akan
+            # memvonis SEMUA part sebagai NG. Shadow mode kini berarti
+            # "tolak semua", bukan "tidak berpengaruh".
         },
 
         # ROI
@@ -132,14 +135,17 @@ class Config:
             "pulse_ms": 300,          # durasi coil hasil nyala (OK/NG), ms
             "scan_range": 127,        # range probe scan coil (0..N)
             # IO mapping — GANTI DI SINI (atau lewat UI Settings → PLC)
-            # outputs: coil yang SISTEM tulis → PLC baca (OK/NG/part_ready/busy)
-            # inputs : coil yang PLC tulis → sistem baca (trigger/reset/switch program)
+            # outputs: coil yang SISTEM tulis → PLC baca
+            # inputs : coil yang PLC tulis → sistem baca
+            # Sistem HANYA mengirim OK; NG diputuskan PLC dari ketiadaan OK.
             "io_map": {
                 "outputs": {
                     "result_ok": 1,
-                    "result_ng": 2,
                     "part_ready": 3,
                     "busy": 4,
+                    # Di-toggle ±1 Hz selama sistem sehat. Ladder memantau
+                    # PERUBAHANnya: diam > N detik = sistem rusak (bukan NG).
+                    "heartbeat": 7,
                 },
                 "inputs": {
                     "trigger": 0,
@@ -147,6 +153,9 @@ class Config:
                     # Ganti TEMPLATE aktif (nomornya dari program_register).
                     # Config lama dengan key "switch_program" tetap dikenali.
                     "switch_template": 6,
+                    # PLC memvonis NG → sistem menambah counter NG dan
+                    # membersihkan state siklus (siap part berikutnya).
+                    "ng_from_plc": 8,
                 },
                 "program_register": 10,
             },

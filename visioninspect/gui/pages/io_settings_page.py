@@ -22,23 +22,26 @@ from visioninspect.plc.modbus_rtu import build_io_mode
 # (nama internal, label UI) — urutan tampil di tabel assign
 OUTPUT_ROWS = [
     ("result_ok", "OK (hasil OK)"),
-    ("result_ng", "NG (hasil NG)"),
+    # NG tidak lagi dikirim sistem — PLC yang memutuskannya dari ketiadaan OK.
+    ("heartbeat", "Heartbeat (sistem sehat)"),
     ("busy", "BUSY (sibuk sensing)"),
     ("part_ready", "part_ready (part terdeteksi)"),
 ]
 INPUT_ROWS = [
     ("trigger", "Trigger (minta 1x sensing)"),
-    ("reset_result", "Reset hasil / counter"),
+    ("reset_result", "Reset counter produksi"),
     ("switch_template", "Ganti template (nomor dari register)"),
+    ("ng_from_plc", "NG dari PLC (vonis + siap part berikutnya)"),
 ]
 MONITOR_ROWS = [
     ("result_ok", "OK", "output"),
-    ("result_ng", "NG", "output"),
+    ("heartbeat", "Heartbeat", "output"),
     ("part_ready", "part_ready", "output"),
     ("busy", "BUSY", "output"),
     ("trigger", "Trigger", "input"),
     ("reset_result", "Reset", "input"),
     ("switch_template", "Ganti Template", "input"),
+    ("ng_from_plc", "NG dari PLC", "input"),
 ]
 
 _QSS = """

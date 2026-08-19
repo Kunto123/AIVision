@@ -2032,9 +2032,15 @@ class MainWindow(QMainWindow):
         # di io_map, coil yang sama terbaca dua kali dan tanpa penggabungan
         # ini handler akan terpanggil dobel.
         if events.get("switch_template") or events.get("switch_program"):
-            num = self._plc_modbus.read_program_register()
-            if num is not None:
-                self._on_plc_switch_template(num)
+            # Mode "cycle": PLC cukup punya satu tombol "next" — nomor
+            # template tidak perlu dikirim sama sekali. Register hanya dibaca
+            # kalau memang mode "register".
+            if self._template_switch_mode() == "register":
+                num = self._plc_modbus.read_program_register()
+                if num is not None:
+                    self._on_plc_switch_template(num)
+            else:
+                self._on_plc_switch_template(None)
         if events.get("ng_from_plc"):
             self._on_plc_ng()
 
@@ -2133,13 +2139,24 @@ class MainWindow(QMainWindow):
             pass
         self.set_status("PLC: reset OK", 3000)
 
-    def _on_plc_switch_template(self, template_number: int):
-        """IN switch template: ganti TEMPLATE aktif dari nomor register PLC.
+    def _template_switch_mode(self) -> str:
+        """Perilaku input switch_template: "cycle" (default) | "register"."""
+        m = str(self._config.get("plc.template_switch_mode", "cycle") or "").lower()
+        return m if m in ("cycle", "register") else "cycle"
 
-        Nomor 1 = template pertama pada program yang sedang aktif (urutan
-        sama dengan daftar di halaman TEACH). Ganti template = ganti model,
-        jadi ditolak saat siklus trigger sedang berjalan — kalau tidak,
-        vonis bisa keluar dari model yang berbeda dengan frame yang dinilai.
+    def _on_plc_switch_template(self, template_number: Optional[int] = None):
+        """IN switch template — ganti TEMPLATE aktif.
+
+        `template_number=None` → mode "cycle": MAJU satu template, dan
+        kembali ke template pertama setelah yang terakhir. PLC cukup punya
+        satu tombol "next"; tidak perlu mengirim nomor.
+
+        `template_number=N` → mode "register": langsung ke template ke-N
+        (1 = template pertama, urutannya sama dengan daftar di TEACH).
+
+        Ganti template = ganti model, jadi ditolak saat siklus trigger sedang
+        berjalan — kalau tidak, vonis bisa keluar dari model yang berbeda
+        dengan frame yang dinilai.
         """
         try:
             if self._trigger_cycle_active:
@@ -2153,25 +2170,46 @@ class MainWindow(QMainWindow):
             if not templates:
                 self.set_status("PLC: tidak ada template pada program ini", 3000)
                 return
-            idx = int(template_number) - 1   # PLC: 1 = template pertama
-            if not (0 <= idx < len(templates)):
-                self.set_status(
-                    f"PLC: template #{template_number} tidak ada "
-                    f"(tersedia 1–{len(templates)})", 4000)
-                logger.warning("PLC switch template: nomor %s di luar rentang "
-                               "1–%d", template_number, len(templates))
-                return
+
+            if template_number is None:
+                # ── Mode cycle: berputar ke template berikutnya ──
+                ids = [t["id"] for t in templates]
+                if self._active_template in ids:
+                    idx = (ids.index(self._active_template) + 1) % len(ids)
+                else:
+                    # Template aktif sudah tidak ada (dihapus/di-rename) →
+                    # mulai lagi dari yang pertama.
+                    idx = 0
+                if len(ids) < 2:
+                    self.set_status(
+                        "PLC: hanya ada 1 template — tidak ada yang diputar",
+                        3000)
+                    return
+                label = f"#{idx + 1}/{len(ids)}"
+            else:
+                # ── Mode register: nomor eksplisit dari PLC ──
+                idx = int(template_number) - 1   # PLC: 1 = template pertama
+                if not (0 <= idx < len(templates)):
+                    self.set_status(
+                        f"PLC: template #{template_number} tidak ada "
+                        f"(tersedia 1–{len(templates)})", 4000)
+                    logger.warning(
+                        "PLC switch template: nomor %s di luar rentang 1–%d",
+                        template_number, len(templates))
+                    return
+                label = f"#{template_number}"
+
             tmpl = templates[idx]
             if tmpl["id"] == self._active_template:
                 return
-            self._pm.set_active_template(self._active_program, tmpl["id"])
-            self._active_template = tmpl["id"]
-            self._refresh_template_ui()
-            self._load_template_model()
+            # _activate_template menangani semuanya: set aktif, muat model +
+            # threshold per-ROI, sinkron combo TEACH/RUN, reset tampilan.
+            t0 = time.monotonic()
+            self._activate_template(tmpl["id"])
             self.set_status(
-                f"PLC: template → {tmpl.get('name', tmpl['id'])}", 3000)
-            logger.info("PLC switch template #%s → %s",
-                        template_number, tmpl["id"])
+                f"PLC: template {label} → {tmpl.get('name', tmpl['id'])}", 3000)
+            logger.info("PLC switch template %s → %s (muat ulang %.2f dtk)",
+                        label, tmpl["id"], time.monotonic() - t0)
         except Exception as e:
             logger.warning("PLC switch template error: %s", e)
 

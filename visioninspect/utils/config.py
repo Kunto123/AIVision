@@ -132,6 +132,15 @@ class Config:
             "rs485_delay_after_tx": 0.0,
             # Modbus
             "modbus_slave_id": 1,
+            # Perilaku input `switch_template`:
+            #   "cycle"    (default) — tiap sinyal MAJU satu template, dan
+            #              kembali ke template pertama setelah yang terakhir.
+            #              Holding register tidak dipakai; PLC cukup punya
+            #              satu tombol "next".
+            #   "register" — pindah ke nomor template yang ada di
+            #              program_register (1 = template pertama). Dipakai
+            #              kalau PLC memang tahu jenis part yang datang.
+            "template_switch_mode": "cycle",
             "pulse_ms": 300,          # durasi coil hasil nyala (OK/NG), ms
             "scan_range": 127,        # range probe scan coil (0..N)
             # IO mapping — GANTI DI SINI (atau lewat UI Settings → PLC)

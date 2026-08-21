@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QButtonGroup, QScrollArea, QFrame,
 )
 
-from visioninspect.plc.modbus_rtu import build_io_mode
+from visioninspect.plc.io_map import build_io_mode
 
 # (nama internal, label UI) — urutan tampil di tabel assign
 OUTPUT_ROWS = [
@@ -65,13 +65,17 @@ class IOSettingsPage(QWidget):
     # Tombol scan coil — main_window yang menjalankan thread + isi hasil.
     scan_requested = Signal()
     detect_requested = Signal()
+    # Tombol "Test Koneksi" — main_window memanggil FXPLCManager.diagnose()
+    test_connection_requested = Signal()
+    # Uji tulis coil dari I/O Monitor — (nama_coil, nilai).
+    test_coil_requested = Signal(str, bool)
 
     def __init__(self, translator, config, parent=None):
         super().__init__(parent)
         self._tr = translator
         self._config = config
         self._io_map: dict = {}
-        self._monitor_source = None  # ModbusRTUManager — di-set main_window
+        self._monitor_source = None  # FXPLCManager — di-set main_window
         self._monitor_labels: dict = {}
         self._monitor_timer = QTimer(self)
         self._monitor_timer.setInterval(1000)
@@ -90,6 +94,36 @@ class IOSettingsPage(QWidget):
         scroll.setFrameShape(QFrame.NoFrame)
         body = QWidget()
         layout = QVBoxLayout(body)
+
+        # ---- Status Koneksi ----
+        # Ditaruh PALING ATAS karena ini pertanyaan pertama saat sesuatu tidak
+        # jalan. Tanpa panel ini, monitor di bawah hanya bisa bilang "unknown"
+        # untuk tiga sebab yang tindakannya berbeda-beda.
+        grp_conn = QGroupBox("Status Koneksi PLC")
+        gc = QVBoxLayout(grp_conn)
+
+        self._conn_badge = QLabel("BELUM DIUJI")
+        self._conn_badge.setAlignment(Qt.AlignCenter)
+        self._conn_badge.setStyleSheet(self._conn_qss("unknown"))
+        gc.addWidget(self._conn_badge)
+
+        self._conn_detail = QLabel(
+            "Tekan “Test Koneksi” untuk memeriksa port, slave ID, dan apakah "
+            "PLC benar-benar menjawab.")
+        self._conn_detail.setWordWrap(True)
+        self._conn_detail.setStyleSheet("color: #94A3B8;")
+        gc.addWidget(self._conn_detail)
+
+        row_conn = QHBoxLayout()
+        self._btn_test_conn = QPushButton("Test Koneksi")
+        self._btn_test_conn.setToolTip(
+            "Uji bertahap: port bisa dibuka? slave menjawab? alamat coil benar?\n"
+            "Hasilnya menyebut tahap mana yang gagal, bukan sekadar gagal.")
+        self._btn_test_conn.clicked.connect(self.test_connection_requested)
+        row_conn.addWidget(self._btn_test_conn)
+        row_conn.addStretch()
+        gc.addLayout(row_conn)
+        layout.addWidget(grp_conn)
 
         # ---- Output Settings (mirip IV3: Latching / One-Shot) ----
         grp_mode = QGroupBox("Output Settings (mode hasil ke PLC)")
@@ -154,7 +188,7 @@ class IOSettingsPage(QWidget):
             g.addWidget(QLabel(label), i, 0)
             spin = QSpinBox()
             spin.setRange(0, 9999)
-            spin.setToolTip(f"Alamat coil Modbus utk {key}")
+            spin.setToolTip(f"Nomor coil untuk {key} — dipakai langsung sebagai nomor relay M di PLC (coil 1 = M1)")
             g.addWidget(spin, i, 1)
             self._out_spins[key] = spin
         g.setColumnStretch(0, 1)
@@ -170,13 +204,21 @@ class IOSettingsPage(QWidget):
             gi.addWidget(QLabel(label), i, 0)
             spin = QSpinBox()
             spin.setRange(0, 9999)
-            spin.setToolTip(f"Alamat coil Modbus utk {key}")
+            spin.setToolTip(f"Nomor coil untuk {key} — dipakai langsung sebagai nomor relay M di PLC (coil 1 = M1)")
             gi.addWidget(spin, i, 1)
             self._in_spins[key] = spin
-        gi.addWidget(QLabel("Program Register #"), 4, 0)
+        # Baris DIHITUNG dari jumlah input, jangan ditulis keras: dulu angka
+        # 4 benar saat input masih 3 baris, lalu ng_from_plc ditambahkan dan
+        # baris ini menimpanya.
+        _row_prog = len(INPUT_ROWS) + 1
+        gi.addWidget(QLabel("Program Register # (D)"), _row_prog, 0)
         self._spin_prog_reg = QSpinBox()
         self._spin_prog_reg.setRange(0, 9999)
-        gi.addWidget(self._spin_prog_reg, 4, 1)
+        self._spin_prog_reg.setToolTip(
+            "Data register D berisi nomor template tujuan.\n"
+            "Hanya dipakai bila plc.template_switch_mode = \"register\".\n"
+            "Pada mode \"cycle\" (default) register ini tidak dibaca.")
+        gi.addWidget(self._spin_prog_reg, _row_prog, 1)
         gi.setColumnStretch(0, 1)
         layout.addWidget(grp_in)
 
@@ -206,7 +248,9 @@ class IOSettingsPage(QWidget):
         gmon.addWidget(QLabel("Signal"), 0, 0)
         gmon.addWidget(QLabel("Arah"), 0, 1)
         gmon.addWidget(QLabel("Status"), 0, 2)
+        gmon.addWidget(QLabel("Uji tulis"), 0, 3)
         self._monitor_labels = {}
+        self._test_buttons: dict = {}
         for i, (key, label, direction) in enumerate(MONITOR_ROWS, start=1):
             gmon.addWidget(QLabel(label), i, 0)
             dir_label = QLabel("→ PLC" if direction == "output" else "← PLC")
@@ -217,7 +261,43 @@ class IOSettingsPage(QWidget):
             st.setStyleSheet(self._monitor_qss("unknown"))
             gmon.addWidget(st, i, 2)
             self._monitor_labels[key] = st
+
+            # Tombol uji HANYA untuk output. Input ditulis oleh ladder PLC —
+            # menulisnya dari sini berarti melawan ladder, dan hasilnya akan
+            # tertimpa di scan berikutnya sehingga terlihat "tidak berfungsi".
+            if direction == "output":
+                cell = QWidget()
+                row = QHBoxLayout(cell)
+                row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(4)
+                b_on = QPushButton("ON")
+                b_off = QPushButton("OFF")
+                for b in (b_on, b_off):
+                    b.setFixedWidth(52)
+                    b.setEnabled(False)
+                    row.addWidget(b)
+                b_on.clicked.connect(
+                    lambda _=False, k=key: self.test_coil_requested.emit(k, True))
+                b_off.clicked.connect(
+                    lambda _=False, k=key: self.test_coil_requested.emit(k, False))
+                gmon.addWidget(cell, i, 3)
+                self._test_buttons[key] = (b_on, b_off)
         gmon.setColumnStretch(0, 1)
+
+        self._cb_allow_test = QCheckBox(
+            "Izinkan uji tulis coil — MEMATIKAN pengaman")
+        self._cb_allow_test.setToolTip(
+            "Menyalakan tombol ON/OFF di atas.\n"
+            "Coil yang ditulis di sini masuk ke PLC SUNGGUHAN: ladder akan\n"
+            "bereaksi, counter bisa bertambah, lampu bisa menyala.\n"
+            "Jangan dinyalakan saat lini sedang produksi.")
+        self._cb_allow_test.toggled.connect(self._on_allow_test_toggled)
+        gmon.addWidget(self._cb_allow_test, len(MONITOR_ROWS) + 1, 0, 1, 4)
+
+        self._lbl_test_warn = QLabel(self._TEST_HINT_OFF)
+        self._lbl_test_warn.setWordWrap(True)
+        self._lbl_test_warn.setStyleSheet("color: #94A3B8;")
+        gmon.addWidget(self._lbl_test_warn, len(MONITOR_ROWS) + 2, 0, 1, 4)
         layout.addWidget(grp_mon)
 
         # ---- Apply ----
@@ -299,10 +379,10 @@ class IOSettingsPage(QWidget):
 
     # ------------------------------------------------------------ monitor
 
-    def set_monitor_source(self, modbus) -> None:
-        """Pasang sumber monitor (ModbusRTUManager) & mulai polling."""
-        self._monitor_source = modbus
-        if modbus is not None and getattr(modbus, "is_connected", False):
+    def set_monitor_source(self, link) -> None:
+        """Pasang sumber monitor (FXPLCManager) & mulai polling."""
+        self._monitor_source = link
+        if link is not None and getattr(link, "is_connected", False):
             self._monitor_timer.start()
         else:
             self._monitor_timer.stop()
@@ -311,14 +391,96 @@ class IOSettingsPage(QWidget):
     def stop_monitor(self) -> None:
         self._monitor_timer.stop()
 
+    #: Tiga keadaan panel uji tulis. Dipisah sebagai konstanta supaya tidak
+    #: ada cabang yang lupa memperbarui label.
+    _TEST_HINT_OFF = (
+        "Uji tulis berguna saat commissioning: nyalakan coil, lalu lihat "
+        "apakah ladder bereaksi sesuai harapan. Aplikasi juga menulis coil "
+        "yang sama saat berjalan — kalau keduanya aktif bersamaan, nilai "
+        "Anda akan tertimpa.")
+    _TEST_HINT_ARMED = (
+        "Uji tulis AKTIF. Coil yang Anda tekan masuk ke PLC sungguhan — "
+        "ladder akan bereaksi, counter bisa bertambah, lampu bisa menyala.")
+    _TEST_HINT_NO_LINK = (
+        "PLC belum terhubung — tombol uji tetap mati. "
+        "Tekan “Test Koneksi” di atas dulu.")
+
+    def _on_allow_test_toggled(self, on: bool) -> None:
+        """Aktifkan tombol uji, tapi hanya kalau PLC memang terhubung.
+
+        Tanpa syarat kedua, tombol akan tampak siap padahal setiap penekanan
+        gagal diam-diam — dan operator akan mengira ladder-nya yang salah.
+        """
+        live = (self._monitor_source is not None
+                and getattr(self._monitor_source, "is_connected", False))
+        for b_on, b_off in self._test_buttons.values():
+            b_on.setEnabled(on and live)
+            b_off.setEnabled(on and live)
+        # Label harus ditulis di SETIAP cabang. Sebelumnya hanya cabang gagal
+        # yang mengisinya, sehingga pesan "PLC belum terhubung" tetap terpampang
+        # setelah koneksi berhasil — bertabrakan dengan badge hijau di atasnya.
+        if not on:
+            self._lbl_test_warn.setText(self._TEST_HINT_OFF)
+        elif live:
+            self._lbl_test_warn.setText(self._TEST_HINT_ARMED)
+        else:
+            self._lbl_test_warn.setText(self._TEST_HINT_NO_LINK)
+
+    def set_test_result(self, name: str, value: bool, ok_: bool) -> None:
+        """Umpan balik satu penulisan uji, dipanggil main_window."""
+        self._lbl_test_warn.setText(
+            f"{'BERHASIL' if ok_ else 'GAGAL'} menulis {name} = "
+            f"{'ON' if value else 'OFF'}."
+            + ("" if ok_ else " Cek status koneksi di atas."))
+
+    @staticmethod
+    def _conn_qss(state: str) -> str:
+        base = ("font-weight: 700; font-size: 15px; letter-spacing: 1px; "
+                "padding: 9px; border-radius: 5px; ")
+        return base + {
+            "ok": "background-color: #14532D; color: #86EFAC;",
+            "fail": "background-color: #4C1D24; color: #FCA5A5;",
+        }.get(state, "background-color: #1E293B; color: #94A3B8;")
+
+    def set_connection_status(self, info: dict) -> None:
+        """Tampilkan hasil FXPLCManager.diagnose() (atau status kasar).
+
+        `info` minimal berisi: ok (bool), stage (str), detail (str).
+        """
+        ok = bool(info.get("ok"))
+        stage = str(info.get("stage") or "")
+        labels = {
+            "ok": "TERHUBUNG",
+            "port": "GAGAL — PORT SERIAL",
+            "serial": "GAGAL — TRANSAKSI SERIAL",
+            "slave": "GAGAL — PLC TIDAK MENJAWAB",
+            "library": "GAGAL — FXPLC TIDAK TERPASANG",
+            "disabled": "PLC BELUM DIAKTIFKAN",
+        }
+        self._conn_badge.setText(labels.get(stage, "GAGAL" if not ok else "TERHUBUNG"))
+        self._conn_badge.setStyleSheet(
+            self._conn_qss("ok" if ok else "fail" if stage else "unknown"))
+        self._conn_detail.setText(str(info.get("detail") or ""))
+
     def refresh_monitor_connection(self) -> None:
         """Panggil saat status koneksi PLC berubah (start/stop polling)."""
+        # Tombol uji ikut status koneksi — kalau tidak, ia tetap terlihat
+        # aktif setelah PLC putus dan setiap penekanan gagal tanpa penjelasan.
+        self._on_allow_test_toggled(self._cb_allow_test.isChecked())
         if self._monitor_source is not None and \
                 getattr(self._monitor_source, "is_connected", False):
             self._monitor_timer.start()
         else:
             self._monitor_timer.stop()
             self._set_all_monitor("unknown")
+            # Jangan menimpa hasil diagnose yang lebih rinci dengan pesan
+            # generik — hanya isi kalau memang belum pernah diuji.
+            if self._conn_badge.text() == "BELUM DIUJI":
+                self.set_connection_status({
+                    "ok": False, "stage": "",
+                    "detail": "PLC tidak terhubung. Tekan “Test Koneksi” "
+                              "untuk tahu tahap mana yang gagal.",
+                })
 
     def _poll_monitor(self):
         src = self._monitor_source

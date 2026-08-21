@@ -129,26 +129,13 @@ class SettingsPage(QWidget):
             "color: #9FB3C8; background-color: #1A2A44;")
         plc_layout.addWidget(self._plc_status_label)
 
-        plc_mode_row = QHBoxLayout()
-        plc_mode_row.addWidget(QLabel("Mode:"))
-        self._plc_mode = QComboBox()
-        self._plc_mode.addItems([self._tr.tr("plc_rs232"), self._tr.tr("plc_rs485")])
-        plc_mode_row.addWidget(self._plc_mode)
-
-        plc_mode_row.addWidget(QLabel("Protocol:"))
-        self._plc_protocol = QComboBox()
-        self._plc_protocol.addItems([self._tr.tr("plc_modbus"), self._tr.tr("plc_ascii")])
-        # ASCII deprecated — hanya Modbus RTU yang didukung saat ini
-        _proto_model = self._plc_protocol.model()
-        if isinstance(_proto_model, QStandardItemModel):
-            _item = _proto_model.item(1)
-            if _item is not None:
-                _item.setEnabled(False)
-        self._plc_protocol.setToolTip(
-            "Protocol ASCII tidak lagi didukung — hanya Modbus RTU.")
-        plc_mode_row.addWidget(self._plc_protocol)
-        plc_mode_row.addStretch()
-        plc_layout.addLayout(plc_mode_row)
+        lbl_proto = QLabel(
+            "Protokol: FX Computer Link — jalur yang sama dengan GX Works2. "
+            "Format serial dikunci 7E1 oleh protokolnya; hanya baudrate yang "
+            "bisa diatur.")
+        lbl_proto.setWordWrap(True)
+        lbl_proto.setStyleSheet("color: #94A3B8;")
+        plc_layout.addWidget(lbl_proto)
 
         self._plc_port = QLineEdit("COM1")
         plc_layout.addWidget(QLabel("Port:"))
@@ -159,21 +146,10 @@ class SettingsPage(QWidget):
         self._plc_baud = QComboBox()
         self._plc_baud.addItems(["9600", "19200", "38400", "57600", "115200"])
         plc_params.addWidget(self._plc_baud)
-        plc_params.addWidget(QLabel("Parity:"))
-        self._plc_parity = QComboBox()
-        self._plc_parity.addItems(["N", "E", "O"])
-        plc_params.addWidget(self._plc_parity)
         plc_params.addStretch()
         plc_layout.addLayout(plc_params)
 
         plc_addr_row = QHBoxLayout()
-        plc_addr_row.addWidget(QLabel("Slave ID:"))
-        self._plc_slave_id = QSpinBox()
-        self._plc_slave_id.setRange(1, 247)
-        self._plc_slave_id.setValue(1)
-        self._plc_slave_id.setToolTip(
-            "Modbus slave ID (device address) PLC — default 1 untuk Mitsubishi.")
-        plc_addr_row.addWidget(self._plc_slave_id)
         plc_addr_row.addWidget(QLabel("Scan range:"))
         self._plc_scan_range = QSpinBox()
         self._plc_scan_range.setRange(0, 9999)
@@ -199,12 +175,15 @@ class SettingsPage(QWidget):
         mode_row.addWidget(QLabel("Start Cycle Mode:"))
         self._inference_mode = QComboBox()
         self._inference_mode.addItems(
-            ["Auto Sequence (jalan terus)", "PLC Trigger", "Start Cycle (tombol)"])
+            ["Auto Sequence (jalan terus)", "PLC Trigger"])
         self._inference_mode.setToolTip(
             "Auto Sequence: inspeksi tiap frame tanpa trigger (jalan terus).\n"
-            "PLC Trigger: inspeksi hanya saat coil trigger PLC ON — timing "
-            "antar part di ladder PLC (filosofi Keyence IV3).\n"
-            "Start Cycle: inspeksi hanya saat tombol Start Cycle ditekan.")
+            "Dipakai untuk self-trigger lewat part-check: begitu tahap 1\n"
+            "mengenali part, coil part_ready dikirim dan PLC yang memulai\n"
+            "timer. Nyalakan 'Tulis coil part_ready' di I/O Settings.\n\n"
+            "PLC Trigger: inspeksi hanya saat ada trigger — timing antar part\n"
+            "di ladder PLC (filosofi Keyence IV3). Sumber trigger setara:\n"
+            "coil PLC, tombol Trigger Now, atau POST /trigger.")
         mode_row.addWidget(self._inference_mode)
         mode_row.addStretch()
         infer_layout.addLayout(mode_row)
@@ -600,17 +579,13 @@ class SettingsPage(QWidget):
             },
             "plc": {
                 "enabled": self._plc_enabled.isChecked(),
-                "mode": "rs232" if self._plc_mode.currentIndex() == 0 else "rs485",
-                "protocol": "modbus" if self._plc_protocol.currentIndex() == 0 else "ascii",
                 "port": self._plc_port.text(),
                 "baudrate": int(self._plc_baud.currentText()),
-                "parity": self._plc_parity.currentText(),
-                "modbus_slave_id": self._plc_slave_id.value(),
                 "scan_range": self._plc_scan_range.value(),
                 "pulse_ms": self._plc_pulse_ms.value(),
             },
             "inference": {
-                "mode": ["continuous", "plc_trigger", "manual"][self._inference_mode.currentIndex()],
+                "mode": ["continuous", "plc_trigger"][self._inference_mode.currentIndex()],
                 "cycle_delay_ms": self._cycle_delay_spin.value(),
                 "openvino_device": self._ov_device.currentText(),
                 "cpu_pcore_only": self._cpu_pcore_only.isChecked(),
@@ -711,8 +686,8 @@ class SettingsPage(QWidget):
                 "color: #9FB3C8; background-color: #1A2A44;")
 
     def get_inference_mode(self) -> str:
-        """Get selected inference mode (continuous|plc_trigger|manual)."""
-        return ["continuous", "plc_trigger", "manual"][self._inference_mode.currentIndex()]
+        """Get selected inference mode (continuous|plc_trigger)."""
+        return ["continuous", "plc_trigger"][self._inference_mode.currentIndex()]
 
     def set_runtime_status(self, has_openvino: bool, has_torch: bool,
                            active_runtime: str = "",
@@ -820,33 +795,25 @@ class SettingsPage(QWidget):
 
         # PLC
         self._plc_enabled.setChecked(self._config.get("plc.enabled", False))
-        plc_mode = self._config.get("plc.mode", "rs232")
-        self._plc_mode.setCurrentIndex(0 if plc_mode == "rs232" else 1)
-        plc_protocol = self._config.get("plc.protocol", "modbus")
-        self._plc_protocol.setCurrentIndex(0 if plc_protocol == "modbus" else 1)
         self._plc_port.setText(self._config.get("plc.port", "COM1"))
         baudrate = str(self._config.get("plc.baudrate", 9600))
         idx = self._plc_baud.findText(baudrate)
         if idx >= 0:
             self._plc_baud.setCurrentIndex(idx)
-        parity = self._config.get("plc.parity", "N")
-        idx = self._plc_parity.findText(parity)
-        if idx >= 0:
-            self._plc_parity.setCurrentIndex(idx)
 
         # PLC IO Mapping — TIDAK di sini lagi (tab I/O Settings yang pegang).
         # io_map hanya bisa diubah lewat halaman I/O Settings → Apply,
         # supaya tidak ada dua sumber config plc.io_map.
         self._plc_pulse_ms.setValue(self._config.get("plc.pulse_ms", 300))
 
-        # PLC Slave ID + Scan range
-        self._plc_slave_id.setValue(self._config.get("plc.modbus_slave_id", 1))
         self._plc_scan_range.setValue(self._config.get("plc.scan_range", 127))
 
         # Inference mode
         infer_mode = self._config.get("inference.mode", "continuous")
+        # "manual" tetap dipetakan sebagai jaring pengaman kalau ada config
+        # yang lolos dari Config._migrate() — jangan sampai jatuh ke index 0.
         self._inference_mode.setCurrentIndex(
-            {"continuous": 0, "plc_trigger": 1, "manual": 2}.get(infer_mode, 0))
+            {"continuous": 0, "plc_trigger": 1, "manual": 1}.get(infer_mode, 0))
         self._infer_when_idle.setChecked(
             self._config.get("inference.infer_when_idle", False))
         self._trigger_timeout_spin.setValue(

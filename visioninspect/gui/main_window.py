@@ -46,9 +46,8 @@ from visioninspect.gui.video_replay_worker import VideoReplayWorker
 from visioninspect.gui.training_worker import TrainingThread, TrainingWorker
 from visioninspect.gui.widgets.roi_editor import ROIData
 from visioninspect.gui.pages.run_page import RunPage
-from visioninspect.plc.modbus_rtu import (
-    ModbusRTUManager, HAS_MODBUS, build_io_mode,
-)
+from visioninspect.plc.fx_link import FXPLCManager, HAS_FXPLC
+from visioninspect.plc.io_map import build_io_mode
 from visioninspect.api.flask_app import FlaskAPI, HAS_FLASK
 from visioninspect.gui.pages.teach_page import TeachPage
 from visioninspect.gui.pages.history_page import HistoryPage
@@ -292,9 +291,10 @@ class MainWindow(QMainWindow):
             "ng_frames": [],                   # [(frame_idx, score), ...]
         }
 
-        # ── PLC (Modbus master) ──
-        self._plc_modbus: Optional[ModbusRTUManager] = None
+        # ── PLC (FX Computer Link) ──
+        self._plc_link: Optional[FXPLCManager] = None
         self._plc_poll_timer: Optional[QTimer] = None
+        self._plc_reconnect_timer: Optional[QTimer] = None
         self._plc_trigger_pending = False
         # Heartbeat: toggle berkala selama sistem sehat — pembeda satu-satunya
         # antara "part cacat" dan "sistem rusak" di sisi PLC.
@@ -564,10 +564,13 @@ class MainWindow(QMainWindow):
         # PLC scan (I/O Settings → Scan Coils) — hasil dari thread worker
         self._io_page.scan_requested.connect(self._on_plc_scan)
         self._io_page.detect_requested.connect(self._on_plc_detect_active)
+        self._io_page.test_connection_requested.connect(
+            self._on_plc_test_connection)
+        self._io_page.test_coil_requested.connect(self._on_plc_test_coil)
         self._plc_scan_done_signal.connect(self._on_plc_scan_done)
         self._plc_detect_done_signal.connect(self._on_plc_detect_done)
 
-        # Manual trigger (Run page 'Trigger Now' — juga dipakai mode manual)
+        # Trigger dari tombol UI — jalur yang sama dengan coil trigger PLC
         self._run_page.get_trigger_button().clicked.connect(self._on_trigger_now)
 
         # WSL training results (emitted from a plain background thread —
@@ -946,17 +949,41 @@ class MainWindow(QMainWindow):
 
     # ---- Inference ----
 
-    def _on_trigger_now(self):
-        """Trigger inspeksi manual — tombol 'Trigger Now' / POST /trigger.
+    def _request_trigger(self, source: str) -> bool:
+        """Satu-satunya jalur permintaan trigger, dari sumber mana pun.
 
-        Di mode manual/plc_trigger: frame berikutnya di-inspeksi sekali.
-        Di mode continuous: hanya log (inspeksi sudah jalan terus).
+        Sumber yang setara: coil trigger PLC (tombol eksternal), tombol
+        "Trigger Now" di halaman Run, dan POST /trigger. Ketiganya melewati
+        fungsi ini supaya perilakunya sama secara struktur — bukan karena
+        kebetulan ada dua blok kode yang mirip.
+
+        Returns True bila permintaan diterima.
         """
-        self._plc_trigger_pending = True
         mode = self._config.get("inference.mode", "continuous")
-        logger.info("Manual trigger dikirim (mode=%s)", mode)
-        self.statusBar().showMessage(
-            f"Trigger dikirim ({mode})", 3000)
+        if mode == "plc_trigger":
+            if self._trigger_cycle_active:
+                # Siklus lama belum tuntas. Menerima trigger di sini akan
+                # menimpa _trigger_seq, membuat hasil inferensi yang sedang
+                # berjalan dibuang sebagai basi — tidak ada pulse OK, dan
+                # part yang BAGUS ikut divonis NG oleh timeout ladder.
+                logger.warning(
+                    "Trigger dari %s diabaikan — siklus sebelumnya masih "
+                    "berjalan.", source)
+                self.set_status(
+                    f"{source}: trigger diabaikan — siklus sebelumnya "
+                    "belum selesai", 3000)
+                return False
+            self._plc_trigger_pending = True
+            self.set_status(f"{source}: trigger inspeksi", 2000)
+        # Mode continuous: tidak ada siklus untuk dimulai — trigger hanya
+        # memotong cycle delay supaya part berikutnya langsung diperiksa.
+        self._cycle_delay_active = False
+        logger.info("Trigger diterima dari %s (mode=%s)", source, mode)
+        return True
+
+    def _on_trigger_now(self):
+        """Tombol 'Trigger Now' / POST /trigger — setara tombol eksternal."""
+        self._request_trigger("Tombol")
 
     # ---- Siklus trigger PLC ------------------------------------------------
 
@@ -1111,13 +1138,13 @@ class MainWindow(QMainWindow):
         # boleh menahan siklus.
         if self._cycle_delay_active and not self._is_trigger_mode():
             return False
-        # Mode plc_trigger/manual: inspeksi hanya saat ada trigger
+        # Mode plc_trigger: inspeksi hanya saat ada trigger
         # (coil trigger PLC ON, tombol Trigger Now, atau POST /trigger).
         # Replay video (mode uji): trigger PLC tidak relevan — jalankan
         # seperti continuous supaya uji tidak terkunci menunggu trigger.
         infer_mode = self._config.get("inference.mode", "continuous")
         triggered = False
-        if infer_mode in ("plc_trigger", "manual") and not self._replay_test_mode:
+        if infer_mode == "plc_trigger" and not self._replay_test_mode:
             if self._plc_trigger_pending:
                 self._plc_trigger_pending = False
                 triggered = True
@@ -1422,7 +1449,7 @@ class MainWindow(QMainWindow):
                 else:
                     self._cycle_delay_active = False
             else:
-                # plc_trigger/manual: timing antar siklus dari PLC — tanpa jeda
+                # plc_trigger: timing antar siklus dari PLC — tanpa jeda
                 self._cycle_delay_active = False
 
             # Diagnostics latency
@@ -1901,41 +1928,56 @@ class MainWindow(QMainWindow):
         self._program_label.setText(f"Program: {self._active_program}")
         logger.info("Active program: %s, template: %s", self._active_program, self._active_template)
 
-    # ═══════════════════════════ PLC — Modbus Master ═══════════════════════════
-    # Sistem = MASTER, PLC = slave. Semua alamat coil/register dari
-    # config "plc.io_map" (Settings → PLC → IO Mapping) — ganti PLC tinggal
-    # ganti angka di config, tanpa edit kode.
+    # ══════════════════════ PLC — FX Computer Link ══════════════════════
+    # Protokol yang sama dengan GX Works2, lewat port pemrograman FX.
+    # Nomor coil di "plc.io_map" dipakai langsung sebagai nomor relay M
+    # (coil 1 → M1), jadi ladder dan config memakai penomoran yang sama.
+    #
+    # MODBUS tidak dipakai: FX3U menuntut adaptor -MB khusus, dan pada unit
+    # yang tidak memilikinya D8400/D8401 tetap nol berapa kali pun
+    # di-power-cycle. Jalur FX terbukti bekerja di lapangan.
 
     def _build_plc_config(self) -> dict:
-        """Kumpulkan konfigurasi PLC dari Config → dict untuk ModbusRTUManager."""
+        """Konfigurasi PLC dari Config → dict untuk FXPLCManager.
+
+        Format serial TIDAK disertakan: fxplc mengunci 7E1 (format port
+        pemrograman FX). Hanya baudrate yang bisa diatur.
+        """
         return {
             "port": self._config.get("plc.port", "COM1"),
             "baudrate": self._config.get("plc.baudrate", 9600),
-            "parity": self._config.get("plc.parity", "N"),
-            "bytesize": 8,
-            "stopbits": 1,
-            "timeout": 1.0,
-            "modbus_slave_id": self._config.get("plc.modbus_slave_id", 1),
+            "timeout": self._config.get("plc.timeout", 1.0),
             "pulse_ms": self._config.get("plc.pulse_ms", 300),
+            "reconnect_interval": self._config.get("plc.reconnect_interval", 5.0),
             "io_map": self._config.get("plc.io_map", {}),
         }
 
     def _init_plc(self):
-        """Inisialisasi ModbusRTUManager dari config + connect + start poll."""
+        """Inisialisasi FXPLCManager dari config + connect + start poll."""
         if not self._config.get("plc.enabled", False):
             return
-        if not HAS_MODBUS:
-            logger.warning("PLC enabled tapi pymodbus tidak terinstall")
+        if not HAS_FXPLC:
+            logger.warning(
+                "PLC enabled tapi fxplc tidak terinstall. Pasang dengan: "
+                "pip install git+https://github.com/KrystianD/fxplc.git")
             return
         try:
-            self._plc_modbus = ModbusRTUManager(self._build_plc_config())
+            self._plc_link = FXPLCManager(self._build_plc_config())
         except Exception as e:
             logger.error("PLC init error: %s", e)
             return
-        self._plc_modbus.set_on_status_change(self._on_plc_status_change)
-        if not self._plc_modbus.connect():
-            # Gagal connect — ModbusRTUManager akan auto-retry saat
-            # user tekan tombol Scan/Deteksi atau restart app.
+        self._plc_link.set_on_status_change(self._on_plc_status_change)
+        # WAJIB: tanpa ini _monitor_source di halaman I/O tetap None, sehingga
+        # I/O Monitor tidak pernah polling (selalu "unknown") dan tombol uji
+        # tulis tidak akan pernah hidup. Dipasang SEBELUM connect() supaya
+        # halaman sudah punya sumbernya saat status pertama diumumkan.
+        try:
+            self._io_page.set_monitor_source(self._plc_link)
+        except Exception as e:
+            logger.warning("Pasang sumber I/O Monitor gagal: %s", e)
+        if not self._plc_link.connect():
+            # Gagal connect — timer reconnect yang akan mencoba lagi,
+            # atau user menekan Test Koneksi di I/O Settings.
             logger.warning("PLC connect gagal saat startup")
             return
         self._start_plc_polling()
@@ -1943,13 +1985,47 @@ class MainWindow(QMainWindow):
     def _start_plc_polling(self):
         if self._plc_poll_timer is None:
             self._plc_poll_timer = QTimer(self)
-            self._plc_poll_timer.setInterval(200)  # 5 Hz — poll input PLC
+            # 2 Hz. Satu siklus poll FX terukur ±42 ms (borongan baca +
+            # tulis heartbeat) dan berjalan SINKRON di thread GUI; di 200 ms
+            # itu memakan seperlima waktu GUI. Di rancangan self-trigger tak
+            # ada input yang mendesak — trigger datang dari tahap 1, sisanya
+            # dipicu manusia.
+            self._plc_poll_timer.setInterval(500)
             self._plc_poll_timer.timeout.connect(self._on_plc_poll_tick)
         self._plc_poll_timer.start()
 
     def _stop_plc_polling(self):
         if self._plc_poll_timer is not None:
             self._plc_poll_timer.stop()
+
+    def _start_plc_reconnect(self):
+        """Timer pemulihan koneksi PLC.
+
+        Dibutuhkan karena circuit breaker di FXPLCManager memutus
+        komunikasi begitu PLC berhenti menjawab — tanpa timer ini, koneksi
+        tidak akan pernah pulih sendiri sampai aplikasi di-restart.
+        Manager yang menahan lajunya; tick di sini murah kalau belum waktunya.
+        """
+        if self._plc_reconnect_timer is None:
+            self._plc_reconnect_timer = QTimer(self)
+            interval = max(1.0, float(
+                self._config.get("plc.reconnect_interval", 5.0)))
+            self._plc_reconnect_timer.setInterval(int(interval * 1000))
+            self._plc_reconnect_timer.timeout.connect(self._on_plc_reconnect_tick)
+        self._plc_reconnect_timer.start()
+
+    def _stop_plc_reconnect(self):
+        if self._plc_reconnect_timer is not None:
+            self._plc_reconnect_timer.stop()
+
+    def _on_plc_reconnect_tick(self):
+        if self._plc_link is None or self._plc_link.is_connected:
+            return
+        try:
+            if self._plc_link.try_reconnect():
+                logger.info("PLC tersambung kembali")
+        except Exception as e:
+            logger.warning("Percobaan reconnect PLC gagal: %s", e)
 
     def _on_plc_status_change(self, connected: bool):
         """Status PLC berubah — update label di RUN page + mulai/henti poll."""
@@ -1970,13 +2046,18 @@ class MainWindow(QMainWindow):
             # setelah menulis hasil, coil itu tetap ON di PLC — tanpa reset,
             # part pertama setelah restart akan dibaca memakai vonis lama.
             try:
-                if self._plc_modbus:
-                    self._plc_modbus.reset_outputs()
+                if self._plc_link:
+                    self._plc_link.reset_outputs()
             except Exception as e:
                 logger.warning("Reset coil hasil saat connect gagal: %s", e)
             self._start_plc_polling()
+            self._stop_plc_reconnect()
         else:
             self._stop_plc_polling()
+            # PLC putus (mis. breaker terbuka karena tidak menjawab) — mulai
+            # mencoba memulihkan. Tanpa ini koneksi mati permanen.
+            if self._config.get("plc.enabled", False):
+                self._start_plc_reconnect()
         # Sinkronkan I/O Monitor (halaman I/O Settings) dgn status koneksi
         try:
             self._io_page.refresh_monitor_connection()
@@ -1993,7 +2074,7 @@ class MainWindow(QMainWindow):
             logger.warning("I/O settings save error: %s", e)
             self.set_status("I/O Settings gagal disimpan", 3000)
             return
-        # Re-init PLC agar io_map baru berlaku di ModbusRTUManager
+        # Re-init PLC agar io_map baru berlaku di FXPLCManager
         plc_cfg = self._config.get("plc") or {}
         self._shutdown_plc()
         if plc_cfg.get("enabled"):
@@ -2007,19 +2088,19 @@ class MainWindow(QMainWindow):
     def _on_plc_poll_tick(self):
         """Poll input PLC tiap 200ms — deteksi trigger/reset/switch program."""
         # Tugas 2: PLC hanya relevan saat mode RUN — tab lain tidak perlu
-        # memakan bus Modbus (5 Hz).
+        # memakai jalur serial ke PLC.
         if self._tabs.currentIndex() != 0:
             return
-        if not self._plc_modbus or not self._plc_modbus.is_connected:
+        if not self._plc_link or not self._plc_link.is_connected:
             return
         # Sync coil busy dengan state kamera (level, bukan pulse) — hanya
         # bila konfigurasi io_mode menyalakan busy_output (default hanya OK/NG).
         if self._get_io_mode()["busy_output"]:
             busy = bool(self._camera_worker and self._camera_worker.is_running)
-            self._plc_modbus.set_output("busy", busy)
+            self._plc_link.set_output("busy", busy)
         self._tick_heartbeat()
         try:
-            events = self._plc_modbus.read_inputs()
+            events = self._plc_link.read_inputs()
         except Exception as e:
             logger.warning("PLC read inputs error: %s", e)
             return
@@ -2036,7 +2117,7 @@ class MainWindow(QMainWindow):
             # template tidak perlu dikirim sama sekali. Register hanya dibaca
             # kalau memang mode "register".
             if self._template_switch_mode() == "register":
-                num = self._plc_modbus.read_program_register()
+                num = self._plc_link.read_program_register()
                 if num is not None:
                     self._on_plc_switch_template(num)
             else:
@@ -2069,7 +2150,7 @@ class MainWindow(QMainWindow):
         self._heartbeat_ts = now
         self._heartbeat_state = not self._heartbeat_state
         try:
-            self._plc_modbus.set_output("heartbeat", self._heartbeat_state)
+            self._plc_link.set_output("heartbeat", self._heartbeat_state)
         except Exception as e:
             logger.debug("Heartbeat write gagal: %s", e)
 
@@ -2106,31 +2187,16 @@ class MainWindow(QMainWindow):
                     self._inspection_ng)
 
     def _on_plc_trigger(self):
-        """PLC minta 1 siklus inspeksi (coil trigger ON)."""
-        mode = self._config.get("inference.mode", "continuous")
-        if mode == "plc_trigger":
-            if self._trigger_cycle_active:
-                # Trigger baru saat siklus lama belum selesai. Ladder tidak
-                # seharusnya melakukan ini (ia menunggu pulse), jadi ini
-                # penanda timing lini terlalu rapat vs waktu inferensi —
-                # dicatat, bukan didiamkan.
-                logger.warning(
-                    "PLC trigger diterima saat siklus sebelumnya masih "
-                    "berjalan — diabaikan. Cycle time lini kemungkinan lebih "
-                    "pendek dari waktu inferensi.")
-                self.set_status(
-                    "PLC: trigger diabaikan — siklus sebelumnya belum selesai",
-                    3000)
-                return
-            self._plc_trigger_pending = True
-            self.set_status("PLC: trigger inspeksi", 2000)
-        # Mode continuous: trigger hanya melewati cycle delay
-        self._cycle_delay_active = False
+        """PLC minta 1 siklus inspeksi (coil trigger ON).
+
+        Jalur yang sama persis dengan tombol UI — lihat _request_trigger().
+        """
+        self._request_trigger("PLC")
 
     def _on_plc_reset(self):
         """IN reset: matikan semua coil hasil + reset counter."""
-        if self._plc_modbus:
-            self._plc_modbus.reset_outputs()
+        if self._plc_link:
+            self._plc_link.reset_outputs()
         self._inspection_ok = 0
         self._inspection_ng = 0
         try:
@@ -2265,7 +2331,7 @@ class MainWindow(QMainWindow):
         # video uji jangan sampai menyalakan actuator reject/accept di lini nyata.
         if self._replay_test_mode:
             return
-        if not self._plc_modbus or not self._plc_modbus.is_connected:
+        if not self._plc_link or not self._plc_link.is_connected:
             return
         if judgement != "OK":
             # Penjaga terakhir: kalau ada jalur lama yang masih memanggil
@@ -2290,7 +2356,7 @@ class MainWindow(QMainWindow):
     def _publish_latching(self, judgement: str):
         """Tulis OK sebagai LEVEL. Tidak ada coil lawan yang di-OFF-kan:
         coil NG sudah tidak ada — NG adalah wewenang PLC."""
-        self._plc_modbus.set_output("result_ok", judgement == "OK")
+        self._plc_link.set_output("result_ok", judgement == "OK")
 
     def _publish_one_shot(self, judgement: str, io: dict):
         """Pulse singkat sesuai io_mode (delay + ON time) tanpa blokir UI."""
@@ -2301,7 +2367,7 @@ class MainWindow(QMainWindow):
         def _fire():
             if self._replay_test_mode:
                 return  # safety: jangan tulis PLC kalau replay video aktif
-            if self._plc_modbus and self._plc_modbus.set_output(name, True):
+            if self._plc_link and self._plc_link.set_output(name, True):
                 if duration > 0:
                     QTimer.singleShot(duration,
                                       lambda: self._safe_plc_output_off(name))
@@ -2315,21 +2381,63 @@ class MainWindow(QMainWindow):
         """Pulse coil output tanpa memblokir UI: ON → QTimer singleShot → OFF."""
         if self._replay_test_mode:
             return  # safety: replay video — jangan sentuh PLC
-        if not self._plc_modbus or not self._plc_modbus.is_connected:
+        if not self._plc_link or not self._plc_link.is_connected:
             return
         ms = max(0, int(self._config.get("plc.pulse_ms", 300)))
-        if not self._plc_modbus.set_output(name, True):
+        if not self._plc_link.set_output(name, True):
             return
         if ms > 0:
             QTimer.singleShot(ms, lambda: self._safe_plc_output_off(name))
 
     def _safe_plc_output_off(self, name: str):
-        if self._plc_modbus:
-            self._plc_modbus.set_output(name, False)
+        if self._plc_link:
+            self._plc_link.set_output(name, False)
+
+    def _on_plc_test_connection(self):
+        """Tombol 'Test Koneksi' di I/O Settings — jalankan diagnosa bertahap."""
+        if not self._config.get("plc.enabled", False) or self._plc_link is None:
+            self._io_page.set_connection_status({
+                "ok": False,
+                "stage": "disabled",
+                "detail": "PLC belum diaktifkan. Buka Settings → PLC → centang "
+                          "Enable PLC, isi port dan baudrate, lalu Save.",
+            })
+            return
+        try:
+            info = self._plc_link.diagnose()
+        except Exception as e:
+            logger.exception("Diagnosa PLC gagal")
+            info = {"ok": False, "stage": "serial",
+                    "detail": f"Diagnosa tidak selesai: {e}"}
+        self._io_page.set_connection_status(info)
+        self._io_page.refresh_monitor_connection()
+        logger.info("Test koneksi PLC: stage=%s ok=%s",
+                    info.get("stage"), info.get("ok"))
+
+    def _on_plc_test_coil(self, name: str, value: bool):
+        """Uji tulis satu coil dari I/O Monitor (commissioning).
+
+        Sengaja memakai jalur yang SAMA dengan produksi (`set_output`) supaya
+        yang diuji benar-benar jalur yang dipakai nanti — bukan jalur khusus
+        yang bisa berperilaku beda.
+        """
+        if self._plc_link is None or not self._plc_link.is_connected:
+            self._io_page.set_test_result(name, value, False)
+            self.set_status("PLC belum terhubung — uji tulis dibatalkan", 3000)
+            return
+        try:
+            ok = bool(self._plc_link.set_output(name, value))
+        except Exception as e:
+            logger.exception("Uji tulis coil gagal")
+            ok = False
+            self.set_status(f"Uji tulis {name} error: {e}", 4000)
+        self._io_page.set_test_result(name, value, ok)
+        logger.info("Uji tulis coil %s = %s -> %s", name, value,
+                    "berhasil" if ok else "gagal")
 
     def _on_plc_scan(self):
         """Tombol 'Scan Coils' (I/O Settings): probe alamat valid di background."""
-        if not self._plc_modbus or not self._plc_modbus.is_connected:
+        if not self._plc_link or not self._plc_link.is_connected:
             self._io_page.set_scan_result(
                 "⚠️ PLC belum connect — cek Settings → PLC → Enable + Save")
             return
@@ -2339,14 +2447,14 @@ class MainWindow(QMainWindow):
         self._io_page.set_scan_busy(True)
 
         def _worker():
-            valid = self._plc_modbus.scan_coils(max_addr)
+            valid = self._plc_link.scan_coils(max_addr)
             self._plc_scan_done_signal.emit(valid)
 
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_plc_detect_active(self):
         """Tombol 'Deteksi Aktif' (I/O Settings): cari coil yang sedang ON."""
-        if not self._plc_modbus or not self._plc_modbus.is_connected:
+        if not self._plc_link or not self._plc_link.is_connected:
             self._io_page.set_scan_result(
                 "⚠️ PLC belum connect — cek Settings → PLC → Enable + Save")
             return
@@ -2356,7 +2464,7 @@ class MainWindow(QMainWindow):
         self._io_page.set_scan_busy(True)
 
         def _worker():
-            active = self._plc_modbus.find_active_coils(max_addr)
+            active = self._plc_link.find_active_coils(max_addr)
             self._plc_detect_done_signal.emit(active)
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -2389,10 +2497,10 @@ class MainWindow(QMainWindow):
     def _shutdown_plc(self):
         """Matikan semua coil output + tutup port (dipanggil saat keluar)."""
         self._stop_plc_polling()
-        if self._plc_modbus:
-            self._plc_modbus.reset_outputs()
-            self._plc_modbus.disconnect()
-            self._plc_modbus = None
+        if self._plc_link:
+            self._plc_link.reset_outputs()
+            self._plc_link.disconnect()
+            self._plc_link = None
 
     # ═══════════════════════════ Flask API (opsional) ═══════════════════════════
     # REST API lokal di 127.0.0.1 untuk integrasi eksternal.
@@ -2471,7 +2579,7 @@ class MainWindow(QMainWindow):
             "program": self._active_program,
             "template": self._active_template,
             "camera_running": bool(self._camera_thread and self._camera_thread.isRunning()),
-            "plc_enabled": bool(self._plc_modbus and self._plc_modbus.is_connected),
+            "plc_enabled": bool(self._plc_link and self._plc_link.is_connected),
             "inference_mode": self._config.get("inference.mode", "continuous"),
         }
 

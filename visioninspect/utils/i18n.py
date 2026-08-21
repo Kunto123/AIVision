@@ -131,10 +131,6 @@ class Translator:
         "diagnostics_plc_test_sent": "Frame terkirim: {frame}",
 
         # PLC
-        "plc_rs232": "RS232",
-        "plc_rs485": "RS485",
-        "plc_modbus": "Modbus RTU",
-        "plc_ascii": "ASCII Sederhana",
         "plc_auto_direction": "Auto Direction",
         "plc_rts_controlled": "RTS-Controlled",
 
@@ -246,10 +242,6 @@ class Translator:
         "diagnostics_plc_test": "PLC Test",
         "diagnostics_plc_send_test": "Send Test Frame",
         "diagnostics_plc_test_sent": "Frame sent: {frame}",
-        "plc_rs232": "RS232",
-        "plc_rs485": "RS485",
-        "plc_modbus": "Modbus RTU",
-        "plc_ascii": "Simple ASCII",
         "plc_auto_direction": "Auto Direction",
         "plc_rts_controlled": "RTS-Controlled",
         "error_camera_open": "Failed to open camera: {error}",

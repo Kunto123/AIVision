@@ -90,7 +90,15 @@ class Config:
 
         # Inference
         "inference": {
-            "mode": "continuous",  # continuous | plc_trigger | manual
+            # continuous  — infer terus tanpa trigger. Dipakai untuk
+            #               self-trigger lewat part-check: tahap 1 lolos →
+            #               coil part_ready dikirim, PLC yang mulai timer.
+            # plc_trigger — infer hanya saat ada trigger. Sumbernya setara:
+            #               coil PLC, tombol "Trigger Now", POST /trigger.
+            # Mode lama "manual" DIHAPUS — setelah tombol UI dibuat setara
+            # trigger eksternal, ia identik dengan plc_trigger dalam segala
+            # hal. Config lama dinormalisasi di _migrate().
+            "mode": "continuous",  # continuous | plc_trigger
             "openvino_device": "CPU",   # CPU | GPU | AUTO (Tugas 5)
             # CPU hybrid (P-core + E-core, mis. i3-1315U): batasi inference ke
             # P-core → latency lebih stabil + E-core bebas untuk GUI/decode.
@@ -117,21 +125,17 @@ class Config:
 
         # PLC
         "plc": {
+            # Transport: FX Computer Link (protokol port pemrograman
+            # Mitsubishi) — jalur yang sama dengan GX Works2. MODBUS dihapus:
+            # FX3U menuntut adaptor -MB khusus, dan pada unit tanpa adaptor
+            # itu D8400/D8401 tetap nol berapa kali pun di-power-cycle.
+            #
+            # Format serial TIDAK ada di sini: protokolnya mengunci 7E1.
+            # Hanya port dan baudrate yang bisa diatur.
             "enabled": False,
-            "mode": "rs232",        # rs232 | rs485
             "port": "COM1",
             "baudrate": 9600,
-            "bytesize": 8,
-            "parity": "N",
-            "stopbits": 1,
             "timeout": 1.0,
-            "protocol": "modbus",    # modbus | ascii
-            # RS485 specific
-            "rs485_direction": "auto",  # auto | rts
-            "rs485_delay_before_tx": 0.0,
-            "rs485_delay_after_tx": 0.0,
-            # Modbus
-            "modbus_slave_id": 1,
             # Perilaku input `switch_template`:
             #   "cycle"    (default) — tiap sinyal MAJU satu template, dan
             #              kembali ke template pertama setelah yang terakhir.
@@ -298,6 +302,25 @@ class Config:
 
         # Merge with defaults to ensure new keys exist
         self._data = self._deep_merge(self._deep_copy(self.DEFAULTS), self._data)
+        self._migrate()
+
+    #: Nilai config lama → penggantinya. Tanpa tabel ini, mode yang sudah
+    #: dihapus akan jatuh ke index 0 ("continuous") di UI — dan stasiun yang
+    #: tadinya menunggu trigger akan diam-diam mulai menulis coil OK sendiri.
+    MODE_ALIASES: Dict[str, str] = {
+        "manual": "plc_trigger",
+    }
+
+    def _migrate(self) -> None:
+        """Normalisasi config lama supaya tidak jatuh ke default diam-diam.
+
+        Sengaja TIDAK menulis file: mutasi cukup di memori, dan file ikut
+        terkoreksi saat penyimpanan berikutnya. Konstruktor yang menulis ke
+        disk sebagai efek samping lebih sulit ditebak daripada yang tidak.
+        """
+        mode = self._get_nested(self._data, "inference.mode")
+        if isinstance(mode, str) and mode in self.MODE_ALIASES:
+            self.set("inference.mode", self.MODE_ALIASES[mode])
 
     def _ensure_data_dir(self) -> None:
         self._config_path.parent.mkdir(parents=True, exist_ok=True)

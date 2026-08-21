@@ -88,8 +88,11 @@ class RunPage(QWidget):
         self._trigger_btn = QPushButton("Start Cycle")
         self._trigger_btn.setObjectName("primaryButton")
         self._trigger_btn.setToolTip(
-            "Jalankan 1 siklus sensing manual (mode 'Start Cycle' / "
-            "'PLC Trigger' — tombol tetap bisa dipakai untuk tes cepat).")
+            "Mode PLC Trigger: jalankan 1 siklus inspeksi — setara dengan "
+            "tombol trigger eksternal lewat PLC.\n"
+            "Mode Auto Sequence: memotong cycle delay supaya part berikutnya "
+            "langsung diperiksa.\n"
+            "Ditolak selama siklus sebelumnya belum selesai.")
         ctrl_layout.addWidget(self._trigger_btn)
         layout.addWidget(cam_ctrl)
 
@@ -390,11 +393,13 @@ class RunPage(QWidget):
         return self._trigger_btn
 
     def set_trigger_mode(self, mode: str) -> None:
-        """Update label Start Cycle sesuai mode (continuous/plc_trigger/manual)."""
+        """Update label Start Cycle sesuai mode (continuous/plc_trigger)."""
         labels = {
             "continuous": "Auto Sequence (jalan terus)",
             "plc_trigger": "PLC Trigger",
-            "manual": "Start Cycle (tombol)",
+            # Config lama yang lolos migrasi — jangan tampil sebagai
+            # "Auto Sequence", itu mode yang perilakunya berbeda jauh.
+            "manual": "PLC Trigger",
         }
         self._trigger_mode_label.setText(
             labels.get(mode, "Auto Sequence (jalan terus)"))

@@ -25,6 +25,15 @@ logger = get_logger("camera")
 
 
 class CameraWorker(QObject):
+    #: Frame gagal beruntun sebelum operator diberi tahu. Di 30 fps ini
+    #: ~0,5 detik — cukup lama untuk melewati kedipan sesaat.
+    _BAD_FRAME_WARN = 15
+
+    #: Frame gagal beruntun sebelum kamera dibuka ulang sendiri (~1,5 detik).
+    #: Sengaja jauh lebih longgar dari ambang peringatan: membuka ulang device
+    #: memakan waktu, jadi jangan dilakukan untuk gangguan sekejap.
+    _BAD_FRAME_RECOVER = 45
+
     """
     Worker untuk kamera yang berjalan di QThread terpisah.
     QTimer dibuat LAZY di _do_start() agar thread affinity-nya benar.
@@ -51,6 +60,9 @@ class CameraWorker(QObject):
         self._device_index = 0
         # F2: param kamera dari Settings (exposure/gain/white_balance)
         self._camera_params: dict = {}
+        # Deteksi kamera lepas — lihat _note_capture_failure().
+        self._consec_bad = 0
+        self._recovering = False
 
     # ---- F2: kamera config dari Settings ----
 
@@ -138,6 +150,7 @@ class CameraWorker(QObject):
     def _do_start(self, device_index: int):
         """Internal: benar-benar start kamera. HARUS di CameraThread."""
         self._device_index = device_index
+        self._consec_bad = 0
 
         try:
             config = CameraConfig(device_index=device_index,
@@ -169,6 +182,11 @@ class CameraWorker(QObject):
             return
         self._ensure_timer_stopped()
         self._running = False
+        self._consec_bad = 0
+        # Batalkan pemulihan yang mungkin sedang tertunda. Tanpa ini,
+        # QTimer.singleShot dari _note_capture_failure akan menghidupkan
+        # kembali kamera yang baru saja sengaja dimatikan operator.
+        self._recovering = False
         if self._camera:
             self._camera.close()
             self._camera = None
@@ -238,15 +256,86 @@ class CameraWorker(QObject):
 
     # ---- Internal: grab frame ----
 
+    def _frame_is_blank(self, frame) -> bool:
+        """True bila frame benar-benar kosong (semua piksel nol).
+
+        Kegagalan kamera USB yang paling menipu: device tetap "terbuka",
+        cap.read() tetap mengembalikan ret=True, tapi isinya nol semua.
+        Layar jadi hitam sementara ROI tetap tergambar dengan rasio benar —
+        persis gejala yang dilaporkan.
+
+        Sensor sungguhan selalu punya derau, jadi frame yang BENAR-BENAR nol
+        tidak pernah sah. Diperiksa dengan subsampel supaya murah: 1080p
+        jadi ~500 piksel, bukan 2 juta.
+        """
+        try:
+            return not frame[::48, ::48].any()
+        except Exception:
+            return False
+
+    def _note_capture_failure(self, sebab: str) -> None:
+        """Hitung kegagalan beruntun; pulihkan sendiri bila melewati batas.
+
+        Sebelum ini `_grab_frame` hanya `return` tanpa jejak: kamera bisa
+        lepas dan aplikasi diam saja sampai operator sadar dan menekan
+        stop/start sendiri.
+        """
+        self._consec_bad += 1
+        if self._consec_bad == self._BAD_FRAME_WARN:
+            self.status_message.emit(
+                f"Kamera bermasalah ({sebab}) — mencoba memulihkan...")
+            logger.warning("Kamera bermasalah (%s), %d frame beruntun",
+                           sebab, self._consec_bad)
+        if self._consec_bad < self._BAD_FRAME_RECOVER:
+            return
+        if self._recovering:
+            return
+        self._recovering = True
+        self._consec_bad = 0
+        idx = self._device_index
+        logger.error("Kamera tidak memberi frame sah (%s) — membuka ulang "
+                     "device %d", sebab, idx)
+        self.camera_error.emit(
+            f"Kamera terputus ({sebab}). Membuka ulang device {idx}...")
+        try:
+            self._ensure_timer_stopped()
+            self._running = False
+            if self._camera:
+                self._camera.close()
+                self._camera = None
+        except Exception as e:
+            logger.warning("Menutup kamera saat pemulihan gagal: %s", e)
+        # Beri jeda supaya driver melepas handle sebelum dibuka lagi.
+        QTimer.singleShot(400, self._recover_reopen)
+
+    def _recover_reopen(self) -> None:
+        # stop_camera() membatalkan pemulihan dengan mengosongkan flag ini —
+        # jangan menghidupkan kamera yang sengaja dimatikan operator.
+        if not self._recovering:
+            return
+        try:
+            self._do_start(self._device_index)
+            if self._running:
+                self.status_message.emit("Kamera pulih")
+                logger.info("Kamera pulih di device %d", self._device_index)
+        finally:
+            self._recovering = False
+
     def _grab_frame(self):
         """Polling: ambil frame dari kamera dan emit signal."""
-        if not self._camera:
+        if not self._camera or self._recovering:
             return
 
         # read() = one-shot cap.read(), update _latest_frame + FPS counter
         frame = self._camera.read()
         if frame is None:
+            self._note_capture_failure("tidak ada frame")
             return
+        if self._frame_is_blank(frame):
+            self._note_capture_failure("frame kosong")
+            return
+        if self._consec_bad:
+            self._consec_bad = 0
 
         # Emit raw frame untuk inference
         self.frame_raw.emit(frame)

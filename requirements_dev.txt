@@ -6,6 +6,37 @@
 # Diverifikasi (2026-08) di WSL: anomalib 2.5.0, numpy 2.4.6,
 # torch 2.13.0+cpu, ultralytics 8.4.117, openvino 2026.2.1, nncf 3.2.0,
 # lightning 2.6.5, PySide6 6.6.3.1.
+#
+# ─────────────────────────────────────────────────────────────────────
+# CATATAN PENTING — DEPENDENSI DI LUAR PyPI
+# ─────────────────────────────────────────────────────────────────────
+# Satu paket TIDAK tersedia di PyPI dan diambil langsung dari GitHub:
+#
+#   fxplc — protokol port pemrograman Mitsubishi FX (FX Computer Link),
+#           jalur yang sama dengan GX Works2. Dipakai untuk komunikasi PLC
+#           di visioninspect/plc/fx_link.py.
+#
+#   Repo   : https://github.com/KrystianD/fxplc
+#   Commit : ed1e5aab2a1ff9e5418a301649322cbeceaabae8
+#   Lisensi: MIT
+#
+# TIDAK PERLU GIT. Baris di bawah memakai URL arsip .zip GitHub, jadi pip
+# cukup mengunduh lewat HTTPS biasa. Ini disengaja: PC edge Windows sering
+# tidak punya executable `git`, dan bentuk `git+https://` akan gagal di sana
+# walau internetnya ada.
+#
+# Yang dibutuhkan PC edge hanya AKSES INTERNET ke github.com.
+#
+# Kalau suatu saat perlu meng-clone manual (mis. untuk membaca/memodifikasi
+# sumbernya):
+#     git clone https://github.com/KrystianD/fxplc.git
+#     cd fxplc && git checkout ed1e5aab2a1ff9e5418a301649322cbeceaabae8
+#     pip install .
+#
+# Kalau PC edge TANPA internet, ada wheel siap pakai di repo ini:
+#     pip install --no-index --find-links vendor fxplc
+# (vendor/fxplc-0.4.0-py3-none-any.whl)
+# ─────────────────────────────────────────────────────────────────────
 
 # ===== GUI =====
 PySide6>=6.6.0,<6.7
@@ -43,7 +74,14 @@ nncf>=3.0,<4.0
 
 # ===== Serial / PLC =====
 pyserial>=3.5,<4.0
-pymodbus>=3.6,<4.0
+# fxplc — lihat CATATAN PENTING di bagian atas file ini.
+# Dipin ke commit supaya build bisa diulang; tanpa pin, HEAD bisa berubah
+# kapan saja dan itu tidak pantas untuk sistem produksi.
+fxplc @ https://github.com/KrystianD/fxplc/archive/ed1e5aab2a1ff9e5418a301649322cbeceaabae8.zip
+#
+# pymodbus DIHAPUS: FX3U menuntut adaptor -MB khusus untuk MODBUS, dan unit
+# di lini ini tidak memilikinya — D8400/D8401 tetap nol berapa kali pun
+# di-power-cycle. Transport diganti FX Computer Link.
 
 # ===== Keamanan / API internal =====
 # cryptography: enkripsi Fernet secret_store (password PG)

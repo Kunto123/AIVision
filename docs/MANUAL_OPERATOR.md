@@ -90,8 +90,38 @@ Aplikasi memiliki 5 halaman utama:
 |---------|--------|
 | Kamera tidak terdeteksi | Cek device index di SETTINGS, coba 0, 1, 2 |
 | Gambar gelap/terlalu terang | Atur exposure di SETTINGS |
-| Training gagal | Pastikan ada minimal 1 gambar OK |
+| Training gagal | Pastikan ada minimal 2 gambar OK (PatchCore/EfficientAd) |
 | False positive (OK dinyatakan NG) | Turunkan threshold (geser ke kiri) |
 | False negative (NG dinyatakan OK) | Naikkan threshold (geser ke kanan) |
 | PLC tidak terhubung | Cek kabel, port COM, baudrate |
 | Aplikasi lambat | Turunkan resolusi kamera, gunakan EfficientAd |
+
+## Lampu Fault PLC Menyala (Y002) — Prosedur Pemulihan
+
+**Untuk operator.** Lampu fault di panel menyala berarti sistem pengawas PLC
+mendeteksi sistem inspeksi tidak sehat: aplikasi ditutup/mati, kamera lepas,
+model tidak termuat, atau komunikasi terputus lebih dari ±10 detik. Selama
+lampu ini menyala, **lini tidak memvonis apa pun** — ini memang disengaja,
+supaya part tidak lolos tanpa diperiksa.
+
+### Cara pulihkan
+
+1. Pastikan aplikasi VisionInspect sudah jalan normal lagi (kamera aktif,
+   model termuat — status PLC hijau "OK Terhubung" di layar RUN).
+2. Tekan tombol **reset (X001)** di panel selama **1–2 detik**, lalu lepas.
+3. Lampu fault (Y002) padam — lini siap menerima part lagi.
+
+### Catatan penting
+
+- **Reset counter?** Kalau sekalian ingin mengembalikan counter OK/NG
+  di panel ke nol, tahan tombol reset **≥ 3 detik** (bukan hanya 1–2 detik).
+- Lampu fault TIDAK padam dengan sendirinya meski aplikasi sudah normal —
+  wajib tekan reset X001. Ini desain yang benar, bukan rusak.
+- Saat admin melakukan teaching/training di VisionInspect, heartbeat
+  inspeksi memang berhenti → lampu fault akan menyala setelah ±10 detik.
+  Itu normal: lini sedang memang tidak bisa menginspeksi. Pulihkan dengan
+  langkah di atas setelah training selesai.
+- Kalau lampu fault menyala berkali-kali padahal tidak ada training:
+  periksa kamera (sering lepas?) dan log aplikasi (`data/logs/app.log`),
+  lalu laporkan ke teknisi.
+

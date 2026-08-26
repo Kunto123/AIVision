@@ -47,6 +47,17 @@ M_BITS_PER_BYTE = 8
 #: read_bytes mengemas jumlah byte dalam satu oktet (struct ">HB").
 _MAX_BATCH_BYTES = 255
 
+# ⚠️ PETA ALAMAT fxplc ITU LINEAR (FXPLCClient.py:32):
+#   registers_map_bit_images["M"] = (0x0100, 8)  →  0x0100 + nomor//8
+# Artinya M8000 dihitung ke 0x0100 + 1000 = 0x04E8 — blok memori yang TIDAK
+# ADA isinya, padahal special relay FX M8000+ sesungguhnya duduk di 0x01E0
+# (terverifikasi lapangan 2026-08-26: read_bytes(0x01E0,1)=0x09 saat RUN,
+# sementara read_bit("M8000") selalu NoResponseError). Konsekuensinya:
+# JANGAN PERNAH memakai relay M ≥ M1000 (special relay) sebagai probe atau
+# pembacaan lewat library ini — hanya relay M biasa (M0–M3071 area umum)
+# yang alamatnya benar di bawah pemetaan linear itu.
+CONNECT_PROBE_COIL = None   # probe = coil result_ok dari io_map (lihat connect())
+
 
 class FXPLCManager:
     """FX Computer Link — antarmuka sama persis dengan ModbusRTUManager."""
@@ -68,6 +79,11 @@ class FXPLCManager:
         self._client = None
         self._transport = None
         self._connected = False
+        # Tahap kegagalan connect() terakhir: None | "port" | "slave".
+        # connect() menutup transport di semua jalur gagal, jadi pembeda
+        # "port gagal dibuka" vs "PLC tidak menjawab" tidak bisa diambil
+        # dari port_open setelahnya — diagnose() membaca flag ini.
+        self._last_connect_fail: Optional[str] = None
         self._lock = threading.RLock()
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -89,6 +105,36 @@ class FXPLCManager:
         self._breaker_logged = False
         self._reconnect_tries = 0
         self._reconnect_gave_up = False
+
+    # ---- Status koneksi (2 lapis) ------------------------------------------
+
+    @property
+    def port_open(self) -> bool:
+        """Port serial terbuka — TIDAK membuktikan PLC menjawab.
+
+        Kabel dicabut setelah open() tetap membuat flag ini True; itulah
+        sebabnya badge di UI wajib membedakannya dari `is_connected`
+        (blueprint §T6: dulu keduanya tidak dibedakan, badge hijau bohong).
+        """
+        return self._transport is not None
+
+    def _seed_input_state(self) -> None:
+        """Isi `_last_inputs` dari kondisi coil saat ini SEBELUM poll pertama.
+
+        `read_inputs()` mendeteksi event dari tepi-naik (False → True).
+        Tanpa seeding, coil input yang kebetulan sedang ON saat aplikasi
+        connect (mis. reset_result ditahan operator) langsung terhitung
+        sebagai event palsu pada tick pertama.
+        """
+        inputs = self._io_map.get("inputs") or {}
+        if not inputs:
+            return
+        names = list(inputs.keys())
+        values = self._read_coils_batch([inputs[n] for n in names])
+        for name in names:
+            val = values.get(inputs[name])
+            if val is not None:
+                self._last_inputs[name] = val
 
     # ---- Callbacks ----
 
@@ -163,15 +209,51 @@ class FXPLCManager:
                 self._transport = TransportSerial(
                     self._port, baudrate=self._baudrate, timeout=self._timeout)
                 self._client = FXPLCClient(self._transport)
-                self._connected = True
             except Exception as e:
                 self._close_transport()
                 self._client = None
                 self._connected = False
+                self._last_connect_fail = "port"
+                # WARNING, bukan debug — insiden 2026-08-26 butuh berjam-jam
+                # karena satu-satunya jejak ("PLC connect gagal saat startup"
+                # di app.log) tidak punya sebab di plc.log.
+                logger.warning("Port %s tidak bisa dibuka: %r", self._port, e)
                 self._log(f"FX connect gagal: {e}")
                 if self._on_status_change:
                     self._on_status_change(False)
                 return False
+            # Port terbuka ≠ PLC menjawab (blueprint §T6 / Fase 4). Dulu
+            # status langsung hijau di sini — badge "Terhubung" tampil walau
+            # kabel dicabut. Probe = coil result_ok dari io_map (relay M
+            # BIASA). BUKAN M8000: peta alamat fxplc linear (0x0100+n//8)
+            # tidak pernah sampai ke special relay M8000+ yang duduk di
+            # 0x01E0 — read_bit("M8000") tidak akan pernah dijawab PLC.
+            probe_label = self._label(
+                self._io_map.get("outputs", {}).get("result_ok", 1))
+            try:
+                bool(self._run(self._client.read_bit(probe_label)))
+            except Exception as e:
+                logger.warning(
+                    "Probe %s gagal saat connect (%r) — port %s terbuka "
+                    "tapi PLC tidak menjawab", probe_label, e, self._port)
+                self._close_transport()
+                self._client = None
+                self._connected = False
+                self._last_connect_fail = "slave"
+                self._log(
+                    f"Port {self._port} terbuka tapi PLC tidak menjawab "
+                    f"(probe {probe_label}) — status tetap putus")
+                if self._on_status_change:
+                    self._on_status_change(False)
+                return False
+            self._last_connect_fail = None
+            self._connected = True
+            # Seed state input SEBELUM poll pertama: coil input yang kebetulan
+            # ON saat connect tidak boleh dihitung sebagai tepi-naik palsu.
+            try:
+                self._seed_input_state()
+            except Exception as e:
+                logger.debug("Seed input state gagal (diabaikan): %r", e)
             self._log(f"FX terhubung ({self._port} @ {self._baudrate}, 7E1)")
             if self._on_status_change:
                 self._on_status_change(True)
@@ -252,8 +334,13 @@ class FXPLCManager:
     def try_reconnect(self) -> bool:
         if self._reconnect_gave_up:
             return False
-        if not self._breaker_open:
-            return self.is_connected
+        # Dulu: `if not self._breaker_open: return self.is_connected`.
+        # Lubangnya: kegagalan connect SAAT STARTUP (port dipakai aplikasi
+        # lain / PLC belum menyala sehingga probe gagal) tidak membuka
+        # breaker, jadi timer pemulihan melewati jalur ini dan tidak pernah
+        # mencoba ulang — diam sampai operator menekan Test Koneksi.
+        if self.is_connected:
+            return True
         if time.monotonic() < self._breaker_until:
             return False
 
@@ -447,21 +534,40 @@ class FXPLCManager:
             return info
 
         self.clear_breaker()
-        if not self.is_connected and not self.connect():
-            info["stage"] = "port"
-            info["detail"] = (
-                f"Port {self._port} tidak bisa dibuka. Cek nomor COM, dan "
-                "pastikan GX Works2 tidak sedang memakai port yang sama.")
+        was_connected = self.is_connected
+        if not was_connected and not self.connect():
+            # connect() menutup transport di setiap jalur gagal, jadi
+            # port_open saja TIDAK cukup untuk membedakan penyebab — tahap
+            # gagalnya dicatat di `_last_connect_fail`. Sebelum 2026-08-26
+            # semua kegagalan dilempar ke stage="port" ("Port tidak bisa
+            # dibuka") walau port terbuka sempurna dan yang gagal coil
+            # probe-nya — bohong yang mengarahkan debugging ke kabel.
+            if self._last_connect_fail == "slave":
+                probe = self._io_map.get("outputs", {}).get("result_ok", 1)
+                info["probe_addr"] = probe
+                info["stage"] = "slave"
+                info["detail"] = (
+                    f"Port {self._port} terbuka, tapi PLC tidak menjawab "
+                    f"(probe {self._label(probe)}). Cek baudrate (sekarang "
+                    f"{self._baudrate}) dan pastikan PLC menyala.")
+            else:
+                info["stage"] = "port"
+                info["detail"] = (
+                    f"Port {self._port} tidak bisa dibuka. Cek nomor COM, "
+                    "dan pastikan GX Works2 tidak sedang memakai port yang "
+                    "sama.")
             return info
 
         probe = self._io_map.get("outputs", {}).get("result_ok", 1)
         info["probe_addr"] = probe
-        if self._read_coil(probe) is None:
+        # Jalur ini hanya tersisa untuk link yang SUDAH terhubung sebelumnya
+        # (was_connected): cek ulang cepat tanpa connect() lagi. Untuk link
+        # yang baru saja connect() berhasil, probe yang sama sudah lulus.
+        if not self.is_connected or self._read_coil(probe) is None:
             info["stage"] = "slave"
             info["detail"] = (
-                f"Port {self._port} terbuka, tapi PLC tidak menjawab di "
-                f"{self._label(probe)}. Cek baudrate (sekarang "
-                f"{self._baudrate}) dan pastikan PLC menyala.")
+                f"PLC berhenti menjawab di {self._label(probe)}. Cek "
+                f"baudrate ({self._baudrate}) dan pastikan PLC menyala.")
             return info
 
         info["ok"] = True

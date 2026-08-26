@@ -547,7 +547,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._go_windowed)
         else:
             self._tabs.setCurrentIndex(0)  # Start on RUN for operator
-            self._reset_counters()          # Fresh counters for operator
+            self._reset_counters()          # Fresh counters for operator (app-side)
+            self._plc_reset_session()       # Opt-in: minta ladder bersihkan state basi
             QTimer.singleShot(0, self._go_fullscreen)
 
         # Update user display in status bar
@@ -2030,7 +2031,13 @@ class MainWindow(QMainWindow):
     def _on_plc_status_change(self, connected: bool):
         """Status PLC berubah — update label di RUN page + mulai/henti poll."""
         try:
-            self._run_page.set_plc_status(connected)
+            # Blueprint §T6/Fase 4: bedakan "port terbuka" dari "PLC menjawab".
+            # Callback dipanggil SETELAH transport ditutup pada jalur gagal,
+            # jadi port_open=False di sini berarti benar-benar tidak ada
+            # jalur serial — bukan sekadar PLC diam.
+            port_open = bool(
+                self._plc_link is not None and self._plc_link.port_open)
+            self._run_page.set_plc_status(connected, port_open)
         except Exception:
             pass
         try:
@@ -2086,9 +2093,17 @@ class MainWindow(QMainWindow):
         self.set_status("I/O Settings tersimpan & diterapkan", 3000)
 
     def _on_plc_poll_tick(self):
-        """Poll input PLC tiap 200ms — deteksi trigger/reset/switch program."""
-        # Tugas 2: PLC hanya relevan saat mode RUN — tab lain tidak perlu
-        # memakai jalur serial ke PLC.
+        """Poll input PLC tiap 500 ms — deteksi trigger/reset/switch program."""
+        # Heartbeat dievaluasi SETIAP tick, di atas guard tab (blueprint §T4 /
+        # Fase 2): satu-satunya tempat definisi "sistem sehat" hidup adalah di
+        # dalam _tick_heartbeat itu sendiri — dan menurut Keputusan A,
+        # kemampuan menginspeksi memang bagian dari definisi itu (lihat
+        # can_inspect di sana). Dulu pemanggilannya di bawah guard sehingga
+        # sesi admin membuat evaluasi kesehatan tidak pernah jalan sama
+        # sekali — keputusan sehat/tidak jadi implisit pada posisi kode.
+        self._tick_heartbeat()
+        # Bacaan input hanya relevan saat mode RUN — tab lain tidak memakai
+        # hasilnya (sinkronisasi coil busy pun ikut di bawah guard ini).
         if self._tabs.currentIndex() != 0:
             return
         if not self._plc_link or not self._plc_link.is_connected:
@@ -2098,7 +2113,6 @@ class MainWindow(QMainWindow):
         if self._get_io_mode()["busy_output"]:
             busy = bool(self._camera_worker and self._camera_worker.is_running)
             self._plc_link.set_output("busy", busy)
-        self._tick_heartbeat()
         try:
             events = self._plc_link.read_inputs()
         except Exception as e:
@@ -2133,15 +2147,36 @@ class MainWindow(QMainWindow):
         yang berubah-ubah tidak bisa dipalsukan oleh proses yang berhenti.
         Ladder memantau PERUBAHANnya: tidak berubah > N detik = sistem rusak.
 
-        "Sehat" = model termuat DAN kamera berjalan. Tanpa dua-duanya, sistem
-        tidak mungkin menghasilkan OK — dan tanpa heartbeat, PLC akan
-        membaca keadaan itu sebagai part cacat beruntun, lalu membuang
-        seluruh produksi bagus tanpa ada yang tahu sebabnya.
+        "Sehat" = sistem SEDANG bisa menginspeksi (Keputusan A, blueprint
+        §5): operator di tab RUN + model termuat + kamera benar-benar
+        mem-polling frame. Tanpa itu, tidak ada yang mungkin menghasilkan
+        vonis — dan tanpa heartbeat, PLC akan membaca keadaan itu sebagai
+        part cacat beruntun, lalu membuang seluruh produksi bagus tanpa ada
+        yang tahu sebabnya.
         """
+        # Dipanggil dari _on_plc_poll_tick SEBELUM guard tab/koneksi.
+        # Pasca-Keputusan A hasilnya sama saja bila dipanggil di bawah guard
+        # (can_inspect sudah memuat syarat tab), tapi dipangkatkan ke atas
+        # dengan sengaja: DEFINISI "sistem sehat" hidup di SATU tempat saja
+        # (_tick_heartbeat), tidak tersebar antara susunan pemanggilan dan
+        # isi fungsi. Tanpa cek link ini, panggilan pertama setelah PLC
+        # hilang akan meledak di AttributeError (link None) atau menulis ke
+        # port yang sudah dilepas circuit breaker.
+        if self._plc_link is None or not self._plc_link.is_connected:
+            return
+        # Keputusan A (blueprint §5): heartbeat berarti "sistem SEDANG bisa
+        # menginspeksi". Tab RUN disembunyikan untuk admin (_apply_role_visibility)
+        # → inferensi mustahil jalan (_on_frame_for_inference hanya melayani
+        # tab 0) → PLC TIDAK BOLEH diberi tahu sehat. Dulu hanya cek model +
+        # kamera, sehingga sesi admin teaching/training berpuluh menit tetap
+        # "sehat" di mata ladder — persis mode gagal T3: part lewat tanpa ada
+        # yang memvonis, tapi lampu fault tidak menyala.
+        can_inspect = self._tabs.currentIndex() == 0
         healthy = bool(
-            self._inference_engine.is_loaded
+            can_inspect
+            and self._inference_engine.is_loaded
             and self._camera_worker is not None
-            and self._camera_worker.is_running)
+            and self._camera_worker.is_polling_frames)
         if not healthy:
             return          # berhenti toggle = itulah sinyalnya
         now = time.monotonic()
@@ -2353,10 +2388,24 @@ class MainWindow(QMainWindow):
         else:
             self._publish_latching(judgement)
 
+    def _log_publish(self, coil_name: str, ok: bool):
+        """Satu baris INFO per vonis — jejak audit jalur aplikasi → PLC.
+
+        Insiden "OK tidak sampai ke PLC" (blueprint §T7) butuh berjam-jam
+        karena jalur ini tidak meninggalkan jejak: history SQLite mencatat
+        vonis model, tapi TIDAK membuktikan pulse benar tertulis ke coil.
+        """
+        logger.info(
+            "Vonis OK → coil %s (%s) [template=%s]",
+            coil_name,
+            "tertulis" if ok else "GAGAL DITULIS",
+            self._active_template or "-")
+
     def _publish_latching(self, judgement: str):
         """Tulis OK sebagai LEVEL. Tidak ada coil lawan yang di-OFF-kan:
         coil NG sudah tidak ada — NG adalah wewenang PLC."""
-        self._plc_link.set_output("result_ok", judgement == "OK")
+        ok = self._plc_link.set_output("result_ok", judgement == "OK")
+        self._log_publish("result_ok", ok)
 
     def _publish_one_shot(self, judgement: str, io: dict):
         """Pulse singkat sesuai io_mode (delay + ON time) tanpa blokir UI."""
@@ -2368,9 +2417,14 @@ class MainWindow(QMainWindow):
             if self._replay_test_mode:
                 return  # safety: jangan tulis PLC kalau replay video aktif
             if self._plc_link and self._plc_link.set_output(name, True):
+                self._log_publish(name, True)
                 if duration > 0:
                     QTimer.singleShot(duration,
                                       lambda: self._safe_plc_output_off(name))
+            else:
+                # Tulis gagal (breaker terbuka / port hilang di antara tick)
+                # — tanpa baris ini kegagalan pulse lenyap tanpa jejak.
+                self._log_publish(name, False)
 
         if delay > 0:
             QTimer.singleShot(delay, _fire)
@@ -2388,6 +2442,22 @@ class MainWindow(QMainWindow):
             return
         if ms > 0:
             QTimer.singleShot(ms, lambda: self._safe_plc_output_off(name))
+
+    def _plc_reset_session(self):
+        """Opt-in (`plc.reset_on_run_entry`): minta ladder bersihkan state
+        basi sesi sebelumnya saat operator masuk RUN — pulse `session_reset`
+        (M9).
+
+        SENGAJA tidak ada guard "sedang di tengah siklus?" di sisi sini:
+        ladder yang menjaga lewat kontak `/M100` (M9 diabaikan kalau M100
+        ON), supaya satu-satunya sumber kebenaran soal "aman untuk direset"
+        tetap PLC, bukan tebakan aplikasi lewat race read-then-write.
+        Lihat blueprint .claude/blueprint/kenapa-ok-tidak-sampai-plc.md.
+        """
+        if not self._config.get("plc.reset_on_run_entry", False):
+            return
+        self._plc_pulse("session_reset")
+        logger.info("Reset sesi PLC diminta (session_reset/M9) saat masuk RUN")
 
     def _safe_plc_output_off(self, name: str):
         if self._plc_link:
@@ -4606,7 +4676,9 @@ class MainWindow(QMainWindow):
             self._init_plc()
         else:
             try:
-                self._run_page.set_plc_status(False)
+                # PLC dimatikan → port memang tidak pernah dibuka:
+                # badge merah "Terputus", bukan amber "tidak menjawab".
+                self._run_page.set_plc_status(False, False)
             except Exception:
                 pass
             self._settings_page.set_plc_status(False, "Tidak diaktifkan")

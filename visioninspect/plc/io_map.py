@@ -40,6 +40,12 @@ def build_io_map(plc_config: Optional[dict]) -> dict:
             # produksi bagus tanpa ada yang tahu. Ladder memantau
             # PERUBAHANnya: tidak berubah > N detik = sistem rusak, bukan NG.
             "heartbeat": 7,
+            # M9: pulse saat operator masuk RUN — ladder membersihkan
+            # M100/M110/M114/Y000/Y001/C0/C1/C2 kalau tidak sedang di
+            # tengah siklus (ladder yang menjaga lewat kontak /M100, bukan
+            # aplikasi). Opt-in lewat plc.reset_on_run_entry — lihat
+            # blueprint .claude/blueprint/kenapa-ok-tidak-sampai-plc.md.
+            "session_reset": 9,
         },
         "inputs": {
             "trigger": 0,         # M0: PLC minta 1 siklus inspeksi

@@ -249,6 +249,18 @@ class CameraWorker(QObject):
         return self._running
 
     @property
+    def is_polling_frames(self) -> bool:
+        """True bila timer grab frame benar-benar berjalan.
+
+        `is_running` hanya berarti kamera terbuka — polling bisa sengaja
+        dihentikan (`set_polling(False)` saat tab non-RUN/replay, Tugas 2)
+        tanpa menutup device. Heartbeat PLC harus mengikuti polling: kalau
+        frame tidak lagi diambil, tidak ada yang bisa dinilai, jadi "sehat"
+        juga bohon.
+        """
+        return bool(self._timer is not None and self._timer.isActive())
+
+    @property
     def fps(self) -> float:
         if self._camera:
             return self._camera.fps

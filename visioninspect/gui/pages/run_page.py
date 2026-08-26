@@ -281,13 +281,28 @@ class RunPage(QWidget):
         self._ng_counter.setText(str(ng_count))
 
     @Slot()
-    def set_plc_status(self, connected: bool):
+    def set_plc_status(self, connected: bool, port_open: bool = True):
+        """Badge status PLC di layar operator — TIGA keadaan, bukan dua.
+
+        "Port terbuka" (serial berhasil dibuka) dan "PLC menjawab" adalah
+        dua hal berbeda dengan tindakan perbaikan yang berbeda: kabel lepas
+        → cek kabel/konektor; PLC diam → cek daya PLC / rebutan port
+        (GX Works2). Dulu keduanya dilebur jadi hijau/merah dan badge bisa
+        hijau padahal PLC tidak menjawab sama sekali.
+        """
         if connected:
             self._plc_status_label.setText("OK " + self._tr.tr("connected"))
-            self._plc_status_label.setStyleSheet("color: #22C55E; font-weight: bold;")
+            self._plc_status_label.setStyleSheet(
+                "color: #22C55E; font-weight: bold;")
+        elif port_open:
+            self._plc_status_label.setText(
+                self._tr.tr("plc_no_response"))
+            self._plc_status_label.setStyleSheet(
+                "color: #F59E0B; font-weight: bold;")
         else:
             self._plc_status_label.setText(self._tr.tr("disconnected"))
-            self._plc_status_label.setStyleSheet("color: #EF4444; font-weight: bold;")
+            self._plc_status_label.setStyleSheet(
+                "color: #EF4444; font-weight: bold;")
 
     @Slot()
     def set_model_info(self, template_name: str, model_loaded: bool, threshold: float = 0.5):

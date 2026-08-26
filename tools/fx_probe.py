@@ -9,9 +9,12 @@ Kalau ini jalan, SELURUH ladder yang sudah dirancang tetap terpakai apa adanya,
 karena kontraknya memang memakai relay M. Yang berubah hanya transport di
 aplikasi.
 
-Uji ini sengaja membaca M8000 (selalu ON saat RUN) dan M8013 (clock 1 detik).
-M8013 yang BERUBAH antar pembacaan adalah bukti terkuat: ia membuktikan angka
-yang kembali benar-benar dari PLC, bukan kebetulan atau buffer sisa.
+Uji ini sengaja membaca blok special relay M8000+ lewat ALAMAT ASLINYA
+(0x01E0) memakai read_bytes — BUKAN read_bit("M8000"). Peta alamat fxplc
+itu LINEAR (FXPLCClient.py:32): "M": (0x0100, 8) → 0x0100 + nomor//8, sehingga
+read_bit("M8000") mengarah ke 0x04E8 yang tidak ada isinya dan tidak pernah
+dijawab PLC (terverifikasi lapangan 2026-08-26: read_bytes(0x01E0,1)=0x09 saat
+PLC RUN, read_bit("M8000") selalu NoResponseError).
 
     python tools/fx_probe.py --port COM11
     python tools/fx_probe.py --port COM11 --baud 9600
@@ -33,6 +36,11 @@ except ImportError:
     )
 
 
+#: Byte pertama blok special relay M8000+ di peta FX Computer Link.
+#: M8000 = byte ini bit 0; M8013 = byte berikutnya (offset 1) bit 5.
+SPECIAL_M_BASE = 0x01E0
+
+
 async def probe(port: str, baud: int, timeout: float) -> int:
     print(f"Membuka {port} @ {baud} …")
     try:
@@ -45,13 +53,16 @@ async def probe(port: str, baud: int, timeout: float) -> int:
     client = FXPLCClient(transport)
     ok_any = False
 
-    # ── 1. M8000 — selalu ON selama PLC RUN ────────────────────────────
-    print("\n[1] M8000 (selalu ON saat RUN)")
+    # ── 1. Blok special relay M8000+ — baca RAW di alamat aslinya ──────
+    # (Bukan read_bit("M8000"): peta linear fxplc tidak pernah sampai ke
+    # sini. Lihat catatan docstring di atas.)
+    print(f"\n[1] Special relay M8000+ — read_bytes(0x{SPECIAL_M_BASE:04X}, 2)")
     try:
-        v = await client.read_bit("M8000")
-        print(f"    terbaca: {v}")
-        if v:
-            print("    PLC menjawab dan sedang RUN.")
+        raw = await client.read_bytes(SPECIAL_M_BASE, 2)
+        m8000 = bool(raw[0] & 0x01)
+        print(f"    mentah: {raw.hex()}")
+        if m8000:
+            print("    M8000 ON — PLC menjawab dan sedang RUN.")
             ok_any = True
         else:
             print("    Menjawab, tapi M8000 OFF — PLC kemungkinan STOP.")
@@ -60,13 +71,16 @@ async def probe(port: str, baud: int, timeout: float) -> int:
         print(f"    GAGAL: {e!r}")
 
     # ── 2. M8013 — clock 1 detik; harus BERUBAH ────────────────────────
+    # Sama seperti [1]: dibaca dari byte blok special relay (byte ke-2,
+    # bit 5), bukan lewat read_bit.
     print("\n[2] M8013 (clock 1 detik) — diamati 3 detik")
     seen = set()
     try:
         for _ in range(12):
-            seen.add(await client.read_bit("M8013"))
+            raw = await client.read_bytes(SPECIAL_M_BASE, 2)
+            seen.add(bool(raw[1] & (1 << 5)))
             await asyncio.sleep(0.25)
-        print(f"    nilai yang muncul: {sorted(seen)}")
+        print(f"    nilai yang muncul: {sorted(int(v) for v in seen)}")
         if len(seen) > 1:
             print("    BERUBAH — ini bukti kuat komunikasi sungguhan.")
             ok_any = True

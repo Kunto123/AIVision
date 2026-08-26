@@ -159,6 +159,8 @@ class Config:
                     # Di-toggle ±1 Hz selama sistem sehat. Ladder memantau
                     # PERUBAHANnya: diam > N detik = sistem rusak (bukan NG).
                     "heartbeat": 7,
+                    # Pulse saat operator masuk RUN — lihat plc.reset_on_run_entry.
+                    "session_reset": 9,
                 },
                 "inputs": {
                     "trigger": 0,
@@ -175,6 +177,15 @@ class Config:
             # Reconnect
             "reconnect_interval": 5.0,
             "max_reconnect_attempts": 0,  # 0 = unlimited
+            # Opt-in: pulse coil `session_reset` (M9) saat operator masuk RUN,
+            # supaya M100/M110/M114/Y000/Y001/C0/C1/C2 di PLC bersih dari state
+            # basi sesi sebelumnya. DEFAULT MATI — butuh rung baru di ladder
+            # dulu (M9 · /M100 → RST ...), dan tanpa rung itu pulse-nya tidak
+            # berpengaruh apa pun (aman untuk dinyalakan lebih awal, cuma
+            # tidak berguna sampai ladder menyusul). Ladder yang menjaga lewat
+            # kontak /M100 — TIDAK dieksekusi kalau siklus sedang berjalan,
+            # supaya vonis part yang sedang diperiksa tidak tersapu diam-diam.
+            "reset_on_run_entry": False,
         },
 
         # Flask API

@@ -34,6 +34,7 @@ class Translator:
         "stopped": "Berhenti",
         "connected": "Terhubung",
         "disconnected": "Terputus",
+        "plc_no_response": "PLC tidak menjawab",
 
         # Navigation
         "nav_run": "RUN",
@@ -161,6 +162,7 @@ class Translator:
         "stopped": "Stopped",
         "connected": "Connected",
         "disconnected": "Disconnected",
+        "plc_no_response": "PLC not responding",
         "nav_run": "RUN",
         "nav_teach": "TEACH",
         "nav_history": "HISTORY",

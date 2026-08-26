@@ -217,6 +217,21 @@ class TrainingPipeline:
             return self._train_yolo(ok_images, ng_images, ok_dir, ng_dir,
                                     output_dir)
 
+        # Anomalib (PatchCore/EfficientAd) butuh minimal 2 gambar OK, bukan 1.
+        # Alasannya BUKAN sembarang aturan — dengan tepat 1 gambar OK, langkah
+        # internal Folder.setup() yang mencoba menyisihkan sebagian gambar OK
+        # untuk test-set (test_split_ratio) membagi 1 gambar dengan rasio
+        # [0.8, 0.2]: floor(0.8)=0 dan floor(0.2)=0, sehingga totalnya nol dan
+        # anomalib membagi sisa gambar dengan "i % 0" → ZeroDivisionError
+        # ("integer modulo by zero"). Diverifikasi: OK=1 selalu gagal dengan
+        # abnormal_dir apa pun; OK≥2 aman untuk langkah ini (lihat juga
+        # val_split_mode=SAME_AS_TEST di bawah untuk kasus OK 5-9 dst.).
+        if len(ok_images) < 2:
+            raise TrainingError(
+                "Minimal 2 gambar OK diperlukan untuk PatchCore/EfficientAd "
+                "(dataset internal anomalib butuh cukup gambar untuk membagi "
+                "train/test-set tanpa error)")
+
         # Try Anomalib import
         try:
             import torch  # noqa: F401 — check torch is loadable first
@@ -241,6 +256,7 @@ class TrainingPipeline:
             # Sekarang import Engine — dia akan mengambil create_versioned_dir
             # yang sudah di-patch dari namespace anomalib.utils.path
             from anomalib.data import Folder
+            from anomalib.data.utils import ValSplitMode
             from anomalib.models import Patchcore, EfficientAd
             from anomalib.engine import Engine
             from anomalib.deploy import ExportType
@@ -291,35 +307,54 @@ class TrainingPipeline:
                 batch_size = 1  # EfficientAd Wajib batch_size=1
                 num_workers = 0
             else:
-                # PatchCore — pakai rekomendasi dari config atau auto-detect
+                # PatchCore — pakai rekomendasi dari config atau auto-detect.
+                # detect_resource() SELALU dipanggil (murah) supaya num_workers
+                # tetap terisi walau batch_size sudah ditentukan config — versi
+                # lama meninggalkan num_workers tak terdefinisi pada kombinasi
+                # itu (UnboundLocalError laten, belum pernah kena karena UI
+                # belum ada yang mengisi batch_size > 0).
+                res = detect_resource()
                 if self._config.batch_size > 0:
                     batch_size = self._config.batch_size
                 else:
-                    res = detect_resource()
                     batch_size = res.batch_size
-                    num_workers = res.num_workers
                     logger.info(
                         "ResourceDetector: mode=%s, batch_size=%d, num_workers=%d, device=%s",
-                        res.mode, batch_size, num_workers, res.device)
+                        res.mode, batch_size, res.num_workers, res.device)
                     if res.warnings:
                         for w in res.warnings:
                             logger.warning("Resource: %s", w)
                 # Pastikan batch_size minimal 1
                 batch_size = max(1, batch_size)
-                if self._config.num_workers > 0:
-                    num_workers = self._config.num_workers
-                else:
-                    num_workers = num_workers  # dari detect_resource
+                num_workers = (self._config.num_workers
+                               if self._config.num_workers > 0
+                               else res.num_workers)
+            # abnormal_dir HANYA diisi kalau benar-benar ada gambar NG —
+            # sebelumnya dicek dari `ng_dir` (objek Path, selalu truthy walau
+            # foldernya kosong), sehingga folder NG kosong membuat anomalib
+            # gagal dengan "Found 0 DirType.ABNORMAL images" alih-alih
+            # dianggap "tidak ada NG" (mode train-only, yang memang didukung).
             datamodule = Folder(
                 name="visioninspect",
                 task=TaskType.CLASSIFICATION,
                 root=ok_dir.parent,
                 normal_dir=ok_dir.name,
-                abnormal_dir=ng_dir.name if ng_dir else None,
+                abnormal_dir=ng_dir.name if ng_images else None,
                 image_size=(self._config.input_size, self._config.input_size),
                 train_batch_size=batch_size,
                 eval_batch_size=batch_size,
                 num_workers=num_workers,
+                # SAME_AS_TEST menghindari random_split kedua (val dari test)
+                # yang jadi sumber crash "integer modulo by zero": default
+                # anomalib (FROM_TEST, label_aware=True, ratio 0.5) memecah
+                # test-set per label, dan kalau salah satu label (mis. gambar
+                # normal yang disisihkan test_split_ratio) berjumlah tepat 1,
+                # pembagian 50/50-nya menghasilkan pembagi nol. Diverifikasi
+                # empiris: OK 5-9 (dengan NG=8) crash dengan default, aman
+                # dengan SAME_AS_TEST — begitu juga rentang lebih besar.
+                # Val==test bukan masalah untuk PatchCore (1 epoch, tidak ada
+                # early-stopping antar-epoch yang berarti).
+                val_split_mode=ValSplitMode.SAME_AS_TEST,
             )
             datamodule.setup()
         except Exception as e:

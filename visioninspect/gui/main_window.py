@@ -515,6 +515,10 @@ class MainWindow(QMainWindow):
         self._logout_btn.setVisible(False)
         self._user_label.setText("👤 —")
 
+        # Batas sesi: sama seperti masuk RUN, opt-in lewat
+        # plc.reset_on_run_entry (lihat _plc_reset_session).
+        self._plc_reset_session()
+
         # Hentikan kamera & inferensi selama logout — view berhenti berjalan
         # sampai user login lagi.
         if self._camera_worker and self._camera_worker.is_running:
@@ -2445,13 +2449,20 @@ class MainWindow(QMainWindow):
 
     def _plc_reset_session(self):
         """Opt-in (`plc.reset_on_run_entry`): minta ladder bersihkan state
-        basi sesi sebelumnya saat operator masuk RUN — pulse `session_reset`
-        (M9).
+        basi sesi sebelumnya — pulse `session_reset` (M9).
+
+        Dipanggil di TIGA titik batas sesi: operator masuk RUN
+        (`_apply_role_visibility`), logout (`_on_logout`), dan keluar
+        aplikasi (`closeEvent`, sebelum `_shutdown_plc()` memutus koneksi —
+        setelah disconnect, pulse ini tidak akan sampai ke PLC).
 
         SENGAJA tidak ada guard "sedang di tengah siklus?" di sisi sini:
         ladder yang menjaga lewat kontak `/M100` (M9 diabaikan kalau M100
         ON), supaya satu-satunya sumber kebenaran soal "aman untuk direset"
-        tetap PLC, bukan tebakan aplikasi lewat race read-then-write.
+        tetap PLC, bukan tebakan aplikasi lewat race read-then-write. Kalau
+        app tertutup/logout tepat di tengah siklus, PLC tetap menuntaskan
+        sendiri (T0 jalan terus tanpa app) — reset berikutnya (login lagi)
+        yang akan membersihkannya.
         Lihat blueprint .claude/blueprint/kenapa-ok-tidak-sampai-plc.md.
         """
         if not self._config.get("plc.reset_on_run_entry", False):
@@ -4971,6 +4982,9 @@ class MainWindow(QMainWindow):
             self._export_queue.put(None)
         except Exception:
             pass
+        # Batas sesi (opt-in, lihat _plc_reset_session) — HARUS sebelum
+        # _shutdown_plc(): begitu terputus, pulse M9 tidak akan sampai.
+        self._plc_reset_session()
         # Tutup port PLC + matikan coil output (biar PLC tidak menerima
         # sinyal OK/NG dari sistem yang sudah mati)
         self._shutdown_plc()

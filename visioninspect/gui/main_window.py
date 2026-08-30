@@ -2865,7 +2865,7 @@ class MainWindow(QMainWindow):
             crop = apply_polygon_mask(crop, mask_polygon)
             self._pm.save_template_image(
                 self._active_program, self._active_template,
-                crop, f"{lbl}_per_roi", update_count=False)
+                crop, f"{lbl}_per_roi", update_count=False, roi_uid=roi.uid)
             if lbl == "ok":
                 saved_ok += 1
             else:
@@ -3991,27 +3991,99 @@ class MainWindow(QMainWindow):
         self._save_rois(updated_rois)
         self._refresh_template_ui()
 
+    @staticmethod
+    def _parse_roi_uid_from_filename(path: str) -> Optional[str]:
+        """Ekstrak `roi_uid` dari nama file `{ts}_roi-{uid}_{uuid8}.png`
+        (lihat program.py::save_template_image). File lama (sebelum
+        segmen ini ada) atau foto legacy non-per-ROI → None."""
+        stem = Path(path).stem
+        if "_roi-" not in stem:
+            return None
+        remainder = stem.split("_roi-", 1)[1]
+        # remainder = "{uid}_{uuid8}" — uid sendiri tidak pernah mengandung
+        # underscore ("default" atau hex 8 char), jadi potong dari kanan.
+        uid, _, _tail = remainder.rpartition("_")
+        return uid or None
+
     def _on_thumbnail_mask_requested(self, image_path: str):
         """Tombol ⬠ di thumbnail galeri — adjust mask polygon KHUSUS foto
         ini (outlier, mis. part kebetulan geser lebih dari biasanya).
         Mayoritas foto tidak perlu ini — cukup pakai mask default ROI.
 
-        Cuma didukung untuk template dengan SATU ROI aktif: gambar di
-        `images/ok`/`images/ng` adalah full-frame (di-crop nanti saat
-        training), jadi jelas ROI mana yang dimaksud. Template 2+ ROI
-        me-review & bakar mask-nya saat capture (CaptureReviewDialog),
-        bukan lewat galeri ini.
+        Galeri menggabungkan dua jenis foto (lihat _list_all_images) yang
+        butuh penanganan BEDA:
+          - `*_per_roi/` — crop FINAL dari CaptureReviewDialog, sudah
+            berbentuk potongan satu ROI. training_worker.py menyalin
+            folder ini apa adanya (tidak di-crop/mask ulang), jadi
+            satu-satunya cara adjust berlaku adalah TIMPA file di disk
+            langsung sekarang — override lazy tidak akan pernah terbaca.
+          - `ok`/`ng` legacy — full-frame, di-crop nanti saat training,
+            jadi cukup simpan override lazy di config (dibaca
+            _crop_images_to_rois). Perlu tahu persis ROI mana → cuma
+            didukung kalau template punya SATU ROI aktif.
         """
         if not self._active_template:
             return
-        rois = [r for r in self._teach_page.get_roi_editor().get_rois() if r.enabled]
-        if len(rois) != 1:
-            self.set_status(
-                "Adjust mask per-foto cuma didukung untuk template 1 ROI. "
-                "Template multi-ROI: adjust saat review capture.", 4000)
-            return
-        roi = rois[0]
+        is_per_roi = Path(image_path).parent.name.endswith("_per_roi")
+        roi_uid = self._parse_roi_uid_from_filename(image_path) if is_per_roi else None
 
+        if is_per_roi:
+            if roi_uid is None:
+                self.set_status(
+                    "Foto ini disimpan sebelum fitur adjust-per-foto ada — "
+                    "nama filenya tidak menyimpan info ROI, tidak bisa "
+                    "diketahui ROI mana yang dimaksud.", 4500)
+                return
+            all_rois = self._teach_page.get_roi_editor().get_rois()
+            roi = next((r for r in all_rois if r.uid == roi_uid), None)
+            if roi is None:
+                self.set_status(
+                    f"ROI pemilik foto ini (uid={roi_uid}) sudah dihapus "
+                    "dari template — tidak bisa di-adjust.", 4500)
+                return
+            self._adjust_mask_per_roi_file(image_path, roi)
+        else:
+            rois = [r for r in self._teach_page.get_roi_editor().get_rois() if r.enabled]
+            if len(rois) != 1:
+                self.set_status(
+                    "Adjust mask foto legacy (non per-ROI) cuma didukung "
+                    "untuk template 1 ROI — foto ini full-frame, sistem "
+                    "tidak tahu ROI mana yang dimaksud kalau lebih dari 1.",
+                    4500)
+                return
+            self._adjust_mask_legacy_file(image_path, rois[0])
+
+    def _adjust_mask_per_roi_file(self, image_path: str, roi: ROIData):
+        """Adjust mask untuk crop `_per_roi` — file SUDAH berupa crop final
+        (bukan full-frame), jadi dimuat apa adanya tanpa crop ulang. Hasil
+        DITIMPA langsung ke file yang sama, permanen — tidak ada versi
+        asli yang disimpan terpisah (konsisten dengan mask yang dibakar
+        saat review capture pertama kali)."""
+        img = cv2.imread(image_path)
+        if img is None:
+            self.set_status(f"Gagal baca gambar: {image_path}", 3000)
+            return
+
+        seed = getattr(roi, "mask_polygon", None)
+        dlg = PolygonMaskDialog(img, seed, f"Adjust Mask — {Path(image_path).name}", self)
+        if not dlg.exec():
+            return
+        result = dlg.result_polygon()
+        if not result:
+            self.set_status("Tidak ada mask yang diterapkan — foto tidak diubah.", 3000)
+            return
+
+        masked = apply_polygon_mask(img, result)
+        cv2.imwrite(image_path, masked)
+        self.set_status(
+            f"Mask diterapkan & DITIMPA ke {Path(image_path).name} "
+            f"(ROI {roi.label or roi.uid}) — permanen.", 4000)
+
+    def _adjust_mask_legacy_file(self, image_path: str, roi: ROIData):
+        """Adjust mask untuk foto legacy full-frame — crop dulu pakai ROI
+        (sama seperti _crop_images_to_rois), hasil disimpan sebagai
+        override LAZY di config (bukan menimpa foto full-frame-nya),
+        dibaca balik saat training crop foto ini."""
         img = cv2.imread(image_path)
         if img is None:
             self.set_status(f"Gagal baca gambar: {image_path}", 3000)

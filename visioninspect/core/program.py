@@ -337,17 +337,27 @@ class ProgramManager:
 
     def save_template_image(self, program: str, template_id: str,
                              image: Any, label: str,
-                             update_count: bool = True) -> Path:
+                             update_count: bool = True,
+                             roi_uid: Optional[str] = None) -> Path:
         """
         Save an image to the template's image directory.
         label = "ok" or "ng"
+
+        `roi_uid` (opsional): disisipkan ke nama file (`roi-<uid>`) untuk
+        crop per-ROI (`label` berakhiran `_per_roi`) — tanpa ini, file
+        _per_roi tidak menyimpan info ROI mana asalnya sama sekali, dan
+        template dengan banyak ROI (mis. 10 ROI) tidak bisa membedakan
+        crop mana milik ROI mana setelah tersimpan. Backward-compatible:
+        file lama tanpa segmen ini tetap kebaca normal, cuma dianggap
+        "ROI tidak diketahui" oleh kode yang membacanya balik.
         """
         base = (self._get_template_dir(program) / template_id
                 / "images" / label)
         base.mkdir(parents=True, exist_ok=True)
 
         ts = time.strftime("%Y%m%d_%H%M%S")
-        filename = f"{ts}_{uuid.uuid4().hex[:8]}.png"
+        roi_part = f"_roi-{roi_uid}" if roi_uid else ""
+        filename = f"{ts}{roi_part}_{uuid.uuid4().hex[:8]}.png"
         dest = base / filename
 
         cv2.imwrite(str(dest), image)

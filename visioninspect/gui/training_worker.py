@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from visioninspect.core.training import TrainingPipeline, TrainingConfig, TrainingError
 from visioninspect.core.program import ProgramManager
 from visioninspect.core.augmentation import AUGMENTATION_TYPES, generate_augmentations
+from visioninspect.core.roi_mask import apply_polygon_mask, resolve_polygon_for_image
 from visioninspect.utils.logging_setup import get_logger
 
 logger = get_logger("training")
@@ -22,12 +23,18 @@ def _crop_images_to_rois(
     rois: List[dict],
     dst_dir: Path,
     input_size: int = 256,
+    mask_overrides: Optional[dict] = None,
 ) -> int:
     """Crop all images in *src_dir* to each enabled ROI, resize, and save to *dst_dir*.
 
     Returns number of cropped images saved.
     Handles multiple ROIs: 1 image × N ROIs = N training images.
-    Used so training data matches inference pipeline (ROI-crop → resize).
+    Used so training data matches inference pipeline (ROI-crop → mask → resize).
+
+    `mask_overrides` = `tmpl_cfg.get("image_mask_overrides")`, struktur
+    `{roi_uid: {"ok/<nama_file>.png": [[x,y],...]}}` — override manual per
+    gambar (outlier), fallback ke `roi["mask_polygon"]` kalau tidak ada
+    entry untuk gambar itu. Mayoritas gambar tidak punya entry sama sekali.
     """
     import cv2
     import uuid
@@ -42,12 +49,20 @@ def _crop_images_to_rois(
         if img is None:
             continue
         h_img, w_img = img.shape[:2]
+        image_key = f"{src_dir.name}/{fpath.name}"
         for roi in rois:
             x = max(0, min(int(roi["x"]), w_img - 1))
             y = max(0, min(int(roi["y"]), h_img - 1))
             w = max(1, min(int(roi.get("width", 256)), w_img - x))
             h = max(1, min(int(roi.get("height", 256)), h_img - y))
             crop = img[y:y + h, x:x + w].copy()
+            # Mask polygon (opsional) SEBELUM resize — koordinat ROI-lokal
+            # tetap valid berapa pun input_size yang dipilih. ROI tanpa
+            # mask_polygon dan tanpa override → no-op, identik dengan
+            # perilaku sebelum fitur ini ada.
+            roi_overrides = (mask_overrides or {}).get(roi.get("uid"))
+            polygon = resolve_polygon_for_image(roi, roi_overrides, image_key)
+            crop = apply_polygon_mask(crop, polygon)
             # Resize to input_size x input_size (matching inference)
             crop_resized = cv2.resize(crop, (input_size, input_size))
             uid = uuid.uuid4().hex[:8]
@@ -148,8 +163,9 @@ class TrainingWorker(QObject):
             import shutil
             ok_crop_dir = Path(tempfile.mkdtemp(prefix="visioninspect_ok_crop_"))
             ng_crop_dir = Path(tempfile.mkdtemp(prefix="visioninspect_ng_crop_"))
-            n_ok = _crop_images_to_rois(ok_dir, rois, ok_crop_dir, input_size)
-            n_ng = _crop_images_to_rois(ng_dir, rois, ng_crop_dir, input_size)
+            mask_overrides = tmpl_cfg.get("image_mask_overrides")
+            n_ok = _crop_images_to_rois(ok_dir, rois, ok_crop_dir, input_size, mask_overrides)
+            n_ng = _crop_images_to_rois(ng_dir, rois, ng_crop_dir, input_size, mask_overrides)
             logger.info(
                 "ROI crop: %d OK originals → %d crops across %d ROI(s); "
                 "%d NG originals → %d crops",

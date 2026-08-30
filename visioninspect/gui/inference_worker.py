@@ -35,10 +35,12 @@ class InferenceWorker(QObject):
     """Worker inference — hidup di QThread terpisah."""
 
     # Request infer: (seq, frame, pc_cfg, pc_state, rois, rois_uid, rois_label,
-    # yolo_cfg). `seq` dikembalikan apa adanya di hasil supaya GUI bisa
-    # membedakan hasil yang masih relevan dari hasil basi — penting saat ada
-    # dua permintaan beruntun (mis. trigger PLC menyusul inferensi live).
-    submit = Signal(int, object, object, str, list, list, list, object)
+    # rois_mask_polygon, yolo_cfg). `seq` dikembalikan apa adanya di hasil
+    # supaya GUI bisa membedakan hasil yang masih relevan dari hasil basi —
+    # penting saat ada dua permintaan beruntun (mis. trigger PLC menyusul
+    # inferensi live). `rois_mask_polygon` sejajar dengan `rois`/`rois_uid` —
+    # None per elemen kalau ROI itu tidak bermask.
+    submit = Signal(int, object, object, str, list, list, list, list, object)
     # Hasil lengkap berupa dict (lihat build_result di bawah)
     result_ready = Signal(object)
 
@@ -94,10 +96,10 @@ class InferenceWorker(QObject):
             "error": None,
         }
 
-    @Slot(int, object, object, str, list, list, list, object)
+    @Slot(int, object, object, str, list, list, list, list, object)
     def infer(self, seq: int, frame, pc_cfg: Optional[dict], pc_state: str,
               rois: list, rois_uid: list, rois_label: list,
-              yolo_cfg: Optional[dict]):
+              rois_mask_polygon: list, yolo_cfg: Optional[dict]):
         """Jalankan bagian berat pipeline. Selalu emit result_ready — bahkan
         saat error — supaya token replay tidak pernah hilang."""
         res = self.build_result(frame, pc_state, seq)
@@ -159,6 +161,11 @@ class InferenceWorker(QObject):
                     "x": roi_rect[0], "y": roi_rect[1],
                     "width": roi_rect[2], "height": roi_rect[3],
                     "uid": (rois_uid[idx] if idx < len(rois_uid) else None),
+                    # Sejajar dengan rois — None kalau ROI ini tidak bermask.
+                    # WAJIB ada supaya infer() mask piksel yang sama persis
+                    # dengan yang di-mask saat training (lihat roi_mask.py).
+                    "mask_polygon": (rois_mask_polygon[idx]
+                                     if idx < len(rois_mask_polygon) else None),
                 }
                 result = self._engine.infer(frame, roi=roi_dict)
                 margin = result.score - result.threshold

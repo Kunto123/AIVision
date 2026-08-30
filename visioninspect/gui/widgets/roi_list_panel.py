@@ -29,6 +29,9 @@ class ROIListPanel(QFrame):
     # (index, threshold) — threshold < 0 berarti "ikut global"
     roi_threshold_changed = Signal(int, float)
     roi_threshold_apply_all = Signal(float)
+    # index ROI terpilih — parent yang memanggil roi_editor.start_drawing_mask()
+    mask_polygon_requested = Signal(int)
+    mask_polygon_clear_requested = Signal(int)
 
     #: Baris terpilih harus menonjol jelas di tema gelap — inilah SATU-SATUNYA
     #: pembeda warna di daftar ini. Garis kiri tebal dipakai supaya tetap
@@ -158,6 +161,40 @@ class ROIListPanel(QFrame):
         thr_box.addLayout(thr_row)
         layout.addLayout(thr_box)
 
+        # ── Mask polygon ROI terpilih ────────────────────────────────────
+        # Kontur part di dalam ROI — piksel di luar polygon dinolkan saat
+        # training & inference (lihat visioninspect/core/roi_mask.py).
+        # Opsional: ROI tanpa mask berperilaku identik dengan sebelumnya.
+        mask_box = QVBoxLayout()
+        mask_box.setSpacing(3)
+        mask_title = QLabel("Mask polygon ROI terpilih")
+        mask_title.setStyleSheet("font-weight: bold; color: #FFFFFF; "
+                                 "font-size: 11px;")
+        mask_box.addWidget(mask_title)
+
+        mask_row = QHBoxLayout()
+        mask_row.setSpacing(4)
+        self._mask_status_label = QLabel("Tidak ada mask")
+        self._mask_status_label.setStyleSheet("color: #9FB3C8; font-size: 11px;")
+        mask_row.addWidget(self._mask_status_label, 1)
+
+        self._mask_draw_btn = QPushButton("Gambar Mask")
+        self._mask_draw_btn.setToolTip(
+            "Gambar polygon mengikuti kontur part di dalam ROI ini.\n"
+            "Klik untuk tambah titik, double-click/Enter untuk menutup.\n"
+            "Piksel di luar polygon dinolkan saat training & inference.")
+        self._mask_draw_btn.setEnabled(False)
+        self._mask_draw_btn.clicked.connect(self._on_mask_draw_clicked)
+        mask_row.addWidget(self._mask_draw_btn)
+
+        self._mask_clear_btn = QPushButton("Hapus")
+        self._mask_clear_btn.setObjectName("dangerButton")
+        self._mask_clear_btn.setEnabled(False)
+        self._mask_clear_btn.clicked.connect(self._on_mask_clear_clicked)
+        mask_row.addWidget(self._mask_clear_btn)
+        mask_box.addLayout(mask_row)
+        layout.addLayout(mask_box)
+
         # Info
         self._info_label = QLabel("0 ROI")
         self._info_label.setStyleSheet("color: #9FB3C8; font-size: 11px;")
@@ -198,6 +235,7 @@ class ROIListPanel(QFrame):
             f"{len(rois)} ROI ({sum(1 for r in rois if r.enabled)} aktif{extra})")
         self._updating = False
         self._sync_threshold_widgets(self._list.currentRow())
+        self._sync_mask_widgets(self._list.currentRow())
 
     # ---- Threshold per ROI ----
 
@@ -255,18 +293,48 @@ class ROIListPanel(QFrame):
             return
         self.roi_threshold_apply_all.emit(float(self._thr_spin.value()))
 
+    # ---- Mask polygon per ROI ----
+
+    def _sync_mask_widgets(self, row: int):
+        """Tampilkan status mask ROI terpilih (ada/tidak) di panel."""
+        roi = self._rois[row] if 0 <= row < len(self._rois) else None
+        has_sel = roi is not None
+        has_mask = has_sel and bool(getattr(roi, "mask_polygon", None))
+        self._mask_draw_btn.setEnabled(has_sel)
+        self._mask_draw_btn.setText("Gambar Ulang" if has_mask else "Gambar Mask")
+        self._mask_clear_btn.setEnabled(has_mask)
+        if not has_sel:
+            self._mask_status_label.setText("Pilih ROI dulu")
+        elif has_mask:
+            n = len(roi.mask_polygon)
+            self._mask_status_label.setText(f"Mask aktif ({n} titik)")
+        else:
+            self._mask_status_label.setText("Tidak ada mask — ROI dipakai penuh")
+
+    def _on_mask_draw_clicked(self):
+        row = self._list.currentRow()
+        if row >= 0:
+            self.mask_polygon_requested.emit(row)
+
+    def _on_mask_clear_clicked(self):
+        row = self._list.currentRow()
+        if row >= 0:
+            self.mask_polygon_clear_requested.emit(row)
+
     def select_row(self, index: int):
         if 0 <= index < self._list.count():
             self._list.setCurrentRow(index)
             # Seleksi bisa datang dari editor ROI (klik kotak di gambar) —
             # panel threshold harus ikut menunjuk ROI yang sama.
             self._sync_threshold_widgets(index)
+            self._sync_mask_widgets(index)
 
     def _on_item_clicked(self, item):
         if self._updating:
             return
         row = self._list.row(item)
         self._sync_threshold_widgets(row)
+        self._sync_mask_widgets(row)
         self.roi_selected.emit(row)
 
     def _on_item_double_clicked(self, item):

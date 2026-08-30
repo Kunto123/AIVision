@@ -40,6 +40,8 @@ from visioninspect.utils.logging_setup import setup_logging, get_logger
 from visioninspect.core.program import ProgramManager
 from visioninspect.core.inference import InferenceEngine, overlay_heatmap
 from visioninspect.core.yolo_filter import YOLODetector, class_filter_matches
+from visioninspect.core.roi_mask import apply_polygon_mask
+from visioninspect.gui.dialogs.polygon_mask_dialog import PolygonMaskDialog
 from visioninspect.core import part_check as pc_module
 from visioninspect.gui.camera_worker import CameraThread, CameraWorker
 from visioninspect.gui.video_replay_worker import VideoReplayWorker
@@ -185,6 +187,7 @@ class MainWindow(QMainWindow):
         self._current_all_rois: list = []
         self._current_all_roi_uids: list = []
         self._current_all_roi_labels: list = []
+        self._current_all_roi_mask_polygons: list = []
         self._heatmap_enabled = False
         self._last_frame: Optional[object] = None
         self._last_heatmap: Optional[object] = None
@@ -627,6 +630,10 @@ class MainWindow(QMainWindow):
             self._on_roi_threshold_changed)
         self._teach_page.get_roi_panel().roi_threshold_apply_all.connect(
             self._on_roi_threshold_apply_all)
+        self._teach_page.get_roi_panel().mask_polygon_requested.connect(
+            self._on_roi_mask_draw_requested)
+        self._teach_page.get_roi_panel().mask_polygon_clear_requested.connect(
+            self._on_roi_mask_clear_requested)
 
         # TEACH: Threshold slider → live update inference threshold,
         # lalu simpan permanen ke config template saat slider dilepas
@@ -641,6 +648,8 @@ class MainWindow(QMainWindow):
         self._teach_page.image_deleted.connect(self._on_gallery_image_deleted)
         # TEACH: Thumbnail clicked → popup ROI adjust
         self._teach_page.thumbnail_clicked.connect(self._on_thumbnail_clicked)
+        self._teach_page.thumbnail_mask_requested.connect(
+            self._on_thumbnail_mask_requested)
 
         # ACCOUNT: User changes
         self._account_page.roles_changed.connect(self._refresh_history)
@@ -1210,6 +1219,7 @@ class MainWindow(QMainWindow):
         rois = list(self._current_all_rois)
         rois_uid = list(self._current_all_roi_uids)
         rois_label = list(self._current_all_roi_labels)
+        rois_mask = list(self._current_all_roi_mask_polygons)
         yc = self._yolo_cfg()
 
         # Queue ke worker thread (submit → infer di-connect QueuedConnection
@@ -1221,7 +1231,7 @@ class MainWindow(QMainWindow):
         if triggered:
             self._trigger_seq = seq
         self._inference_worker.submit.emit(
-            seq, frame, pc_cfg, pc_state, rois, rois_uid, rois_label, yc)
+            seq, frame, pc_cfg, pc_state, rois, rois_uid, rois_label, rois_mask, yc)
         return True
     def _on_inference_result(self, result: dict):
         """Hasil infer dari worker thread — SEMUA efek samping di GUI thread.
@@ -2754,11 +2764,17 @@ class MainWindow(QMainWindow):
                 self._current_all_rois = [r.rect() for r in enabled]
                 self._current_all_roi_uids = [r.uid for r in enabled]
                 self._current_all_roi_labels = [r.label for r in enabled]
+                # Sejajar dengan list di atas — dipakai infer() supaya
+                # piksel di luar polygon dinolkan SAMA PERSIS seperti saat
+                # training (lihat roi_mask.py). None = ROI ini tidak
+                # bermask, infer() akan no-op untuk ROI itu.
+                self._current_all_roi_mask_polygons = [r.mask_polygon for r in enabled]
             else:
                 self._current_roi = None
                 self._current_all_rois = []
                 self._current_all_roi_uids = []
                 self._current_all_roi_labels = []
+                self._current_all_roi_mask_polygons = []
 
             # Gallery thumbnails
             self._teach_page.clear_galleries()
@@ -2842,7 +2858,11 @@ class MainWindow(QMainWindow):
         saved_ok = saved_ng = 0
         # get_labeled_crops() SUDAH menyaring crop yang dibuang operator —
         # yang dibuang tidak pernah menyentuh disk.
-        for roi, crop, lbl in dialog.get_labeled_crops():
+        for roi, crop, lbl, mask_polygon in dialog.get_labeled_crops():
+            # Mask dibakar SEKARANG, sebelum disimpan — folder *_per_roi
+            # disalin apa adanya saat training (tidak di-crop ulang), jadi
+            # ini satu-satunya kesempatan mask diterapkan untuk jalur ini.
+            crop = apply_polygon_mask(crop, mask_polygon)
             self._pm.save_template_image(
                 self._active_program, self._active_template,
                 crop, f"{lbl}_per_roi", update_count=False)
@@ -3121,6 +3141,13 @@ class MainWindow(QMainWindow):
                     "width": roi_rect[2], "height": roi_rect[3],
                     "uid": (self._current_all_roi_uids[idx]
                             if idx < len(self._current_all_roi_uids) else None),
+                    # WAJIB sama dengan jalur RUN live (inference_worker.py) —
+                    # tanpa ini, "Test Model" akan menilai foto TANPA mask
+                    # padahal produksi sungguhan pakai mask, hasilnya
+                    # menyesatkan (skor tidak sebanding).
+                    "mask_polygon": (self._current_all_roi_mask_polygons[idx]
+                                     if idx < len(self._current_all_roi_mask_polygons)
+                                     else None),
                 }
                 result = self._inference_engine.infer(
                     img, roi=roi_dict, track_latency=False)
@@ -3795,6 +3822,31 @@ class MainWindow(QMainWindow):
             f"{label}: threshold {'ikut global' if value < 0 else f'{value:.3f}'}",
             3000)
 
+    def _on_roi_mask_draw_requested(self, index: int):
+        """Tombol "Gambar Mask" di panel — mulai mode gambar polygon di
+        ROIEditor untuk ROI terpilih. Penyimpanan otomatis lewat
+        `rois_changed` (dipicu `_finish_drawing_mask()`), jalur yang sama
+        dengan drag/resize rectangle — tidak ada penulisan config baru
+        di sini."""
+        editor = self._teach_page.get_roi_editor()
+        rois = editor.get_rois()
+        if not (0 <= index < len(rois)):
+            return
+        editor.select_roi(index)
+        editor.start_drawing_mask(rois[index])
+        self.set_status(
+            f"Gambar mask untuk {rois[index].label}: klik tambah titik, "
+            "double-click/Enter untuk menutup, Esc untuk batal", 5000)
+
+    def _on_roi_mask_clear_requested(self, index: int):
+        """Tombol "Hapus" mask di panel — kembalikan ROI ke tanpa mask."""
+        editor = self._teach_page.get_roi_editor()
+        rois = editor.get_rois()
+        if not (0 <= index < len(rois)):
+            return
+        editor.clear_mask_polygon(rois[index])
+        self.set_status(f"Mask {rois[index].label} dihapus", 3000)
+
     def _on_roi_threshold_apply_all(self, value: float):
         """Terapkan satu nilai threshold ke SEMUA ROI."""
         rois = self._teach_page.get_roi_editor().get_rois()
@@ -3938,6 +3990,70 @@ class MainWindow(QMainWindow):
         updated_rois = [ROIData.from_dict(d) for d in dialog.get_rois()]
         self._save_rois(updated_rois)
         self._refresh_template_ui()
+
+    def _on_thumbnail_mask_requested(self, image_path: str):
+        """Tombol ⬠ di thumbnail galeri — adjust mask polygon KHUSUS foto
+        ini (outlier, mis. part kebetulan geser lebih dari biasanya).
+        Mayoritas foto tidak perlu ini — cukup pakai mask default ROI.
+
+        Cuma didukung untuk template dengan SATU ROI aktif: gambar di
+        `images/ok`/`images/ng` adalah full-frame (di-crop nanti saat
+        training), jadi jelas ROI mana yang dimaksud. Template 2+ ROI
+        me-review & bakar mask-nya saat capture (CaptureReviewDialog),
+        bukan lewat galeri ini.
+        """
+        if not self._active_template:
+            return
+        rois = [r for r in self._teach_page.get_roi_editor().get_rois() if r.enabled]
+        if len(rois) != 1:
+            self.set_status(
+                "Adjust mask per-foto cuma didukung untuk template 1 ROI. "
+                "Template multi-ROI: adjust saat review capture.", 4000)
+            return
+        roi = rois[0]
+
+        img = cv2.imread(image_path)
+        if img is None:
+            self.set_status(f"Gagal baca gambar: {image_path}", 3000)
+            return
+        h_img, w_img = img.shape[:2]
+        x = max(0, min(roi.x, w_img - 1))
+        y = max(0, min(roi.y, h_img - 1))
+        w = max(1, min(roi.width, w_img - x))
+        h = max(1, min(roi.height, h_img - y))
+        crop = img[y:y + h, x:x + w].copy()
+
+        label = Path(image_path).parent.name  # "ok" | "ng"
+        image_key = f"{label}/{Path(image_path).name}"
+        tmpl_cfg = self._pm.get_template_config(self._active_program, self._active_template)
+        overrides = tmpl_cfg.get("image_mask_overrides") or {}
+        roi_overrides = overrides.get(roi.uid) or {}
+        seed = roi_overrides.get(image_key) or roi.mask_polygon
+
+        dlg = PolygonMaskDialog(crop, seed, f"Adjust Mask — {Path(image_path).name}", self)
+        if not dlg.exec():
+            return
+        result = dlg.result_polygon()
+
+        # Deep-copy manual (bukan copy.deepcopy) — cukup dua level nested
+        # dict di sini, dan ini menghindari import tambahan cuma untuk ini.
+        new_overrides = {k: dict(v) for k, v in overrides.items()}
+        roi_bucket = dict(new_overrides.get(roi.uid, {}))
+        if result:
+            roi_bucket[image_key] = [[int(px), int(py)] for px, py in result]
+        else:
+            roi_bucket.pop(image_key, None)  # kembali ke default ROI
+        if roi_bucket:
+            new_overrides[roi.uid] = roi_bucket
+        else:
+            new_overrides.pop(roi.uid, None)
+
+        self._pm.update_template_config(
+            self._active_program, self._active_template,
+            {"image_mask_overrides": new_overrides})
+        self.set_status(
+            f"Mask khusus {Path(image_path).name}: "
+            f"{'disimpan' if result else 'dikembalikan ke default ROI'}", 3000)
 
     def _on_threshold_slider(self, value: int):
         """Update inference engine threshold when slider is moved."""

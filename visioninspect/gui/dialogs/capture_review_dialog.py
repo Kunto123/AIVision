@@ -7,7 +7,7 @@ dalam satu template berbagi satu memory bank/model yang sama; crop yang
 salah label bisa mengajari model bahwa pola cacat itu normal.
 """
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from visioninspect.gui.widgets.roi_editor import ROIData
+from visioninspect.gui.dialogs.polygon_mask_dialog import PolygonMaskDialog
 
 GREEN = "#22C55E"
 RED = "#EF4444"
@@ -48,6 +49,10 @@ class _ROICropToggle(QFrame):
         self.crop = crop_bgr
         self.label = label      # "ok" | "ng" — state saat ini, bisa di-toggle
         self.excluded = False   # True = tidak ikut disimpan ke dataset
+        # None = pakai mask default milik ROI (roi.mask_polygon) apa
+        # adanya. Diisi HANYA kalau operator sengaja adjust polygon khusus
+        # foto ini (outlier — part kebetulan geser lebih dari biasanya).
+        self.mask_polygon_override: Optional[List[Tuple[int, int]]] = None
 
         self.setFixedWidth(120)
         self.setCursor(Qt.PointingHandCursor)
@@ -63,6 +68,19 @@ class _ROICropToggle(QFrame):
         name_label.setStyleSheet(
             "color: #E2E8F0; font-size: 11px; background: transparent;")
         head.addWidget(name_label, 1)
+        self._mask_btn = QPushButton("⬠")
+        self._mask_btn.setFixedSize(20, 20)
+        self._mask_btn.setCursor(Qt.PointingHandCursor)
+        self._mask_btn.setToolTip(
+            "Adjust mask polygon KHUSUS foto ini — cuma perlu kalau part\n"
+            "kebetulan geser lebih dari biasanya di foto ini. Kosongkan\n"
+            "(default) untuk mayoritas foto lain.")
+        self._mask_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none; "
+            "color: #FBBF24; font-weight: bold; font-size: 13px; }"
+            "QPushButton:hover { color: #FFFFFF; }")
+        self._mask_btn.clicked.connect(self._adjust_mask)
+        head.addWidget(self._mask_btn, 0)
         self._drop_btn = QPushButton("✕")
         self._drop_btn.setFixedSize(20, 20)
         self._drop_btn.setCursor(Qt.PointingHandCursor)
@@ -98,6 +116,18 @@ class _ROICropToggle(QFrame):
         layout.addWidget(self._status_label)
 
         self._refresh_style()
+
+    def _adjust_mask(self):
+        """Buka dialog kecil buat adjust polygon mask khusus crop ini —
+        seed dari override yang sudah ada (kalau sudah pernah di-adjust),
+        atau dari mask default milik ROI."""
+        seed = (self.mask_polygon_override if self.mask_polygon_override
+                else getattr(self.roi, "mask_polygon", None))
+        dlg = PolygonMaskDialog(self.crop, seed,
+                                f"Adjust Mask — {self.roi.label or 'ROI'}", self)
+        if dlg.exec():
+            self.mask_polygon_override = dlg.result_polygon()
+            self._refresh_style()
 
     def _toggle_excluded(self):
         self.excluded = not self.excluded
@@ -135,6 +165,14 @@ class _ROICropToggle(QFrame):
         self._status_label.setStyleSheet(
             f"font-weight: bold; font-size: 12px; color: {color}; "
             f"background: transparent;")
+        # Isi penuh (bukan outline) = foto ini punya mask khusus sendiri,
+        # beda dari default ROI — penanda visual supaya operator tahu
+        # tanpa perlu buka dialog lagi.
+        mask_color = "#FBBF24" if self.mask_polygon_override else "#94A3B8"
+        self._mask_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: none; "
+            f"color: {mask_color}; font-weight: bold; font-size: 13px; }}"
+            f"QPushButton:hover {{ color: #FFFFFF; }}")
 
 
 class CaptureReviewDialog(QDialog):
@@ -241,13 +279,21 @@ class CaptureReviewDialog(QDialog):
         else:
             self._save_btn.setText(f"Simpan {len(kept)} crop")
 
-    def get_labeled_crops(self) -> List[Tuple[ROIData, np.ndarray, str]]:
-        """(roi, crop_bgr, label) untuk crop yang AKAN disimpan.
+    def get_labeled_crops(self) -> List[Tuple[ROIData, np.ndarray, str, Optional[list]]]:
+        """(roi, crop_bgr, label, mask_polygon) untuk crop yang AKAN disimpan.
 
         Crop yang ditandai dibuang tidak ikut — inilah satu-satunya sumber
         kebenaran yang dipakai pemanggil untuk menulis ke dataset.
+
+        `mask_polygon` = override khusus foto ini kalau operator sempat
+        adjust (lihat _adjust_mask), else mask default milik ROI, else
+        None. Pemanggil (main_window._maybe_review_and_save_per_roi) yang
+        menerapkannya via apply_polygon_mask SEBELUM menyimpan — supaya
+        hasil di disk sudah ter-mask (folder *_per_roi tidak di-crop ulang
+        saat training, lihat training_worker.py).
         """
-        return [(t.roi, t.crop, t.label)
+        return [(t.roi, t.crop, t.label,
+                 t.mask_polygon_override or getattr(t.roi, "mask_polygon", None))
                 for t in self._toggles if not t.excluded]
 
     def get_dropped_count(self) -> int:

@@ -16,6 +16,7 @@ import numpy as np
 import numpy.typing as npt
 import cv2
 
+from visioninspect.core.roi_mask import apply_polygon_mask
 from visioninspect.utils.logging_setup import get_logger
 
 logger = get_logger("inference")
@@ -582,6 +583,11 @@ class InferenceEngine:
             w = max(1, min(int(w), w_img - x))
             h = max(1, min(int(h), h_img - y))
             cropped = frame[y:y+h, x:x+w]
+            # Mask polygon (opsional) — HARUS identik dengan yang diterapkan
+            # saat training (lihat training_worker.py::_crop_images_to_rois).
+            # Tidak ada override per-gambar di sini: inference berjalan
+            # real-time tanpa review manusia, jadi selalu pakai default ROI.
+            cropped = apply_polygon_mask(cropped, roi.get("mask_polygon"))
         else:
             cropped = frame
 
@@ -633,6 +639,10 @@ class InferenceEngine:
                     w = max(1, min(int(w), w_img - x))
                     h = max(1, min(int(h), h_img - y))
                     cropped = frame[y:y+h, x:x+w]
+                    # Sama seperti jalur OpenVINO di atas — mask HARUS
+                    # identik dengan training (lihat komentar di blok
+                    # pertama fungsi ini).
+                    cropped = apply_polygon_mask(cropped, roi.get("mask_polygon"))
                 else:
                     cropped = frame
                 resized = cv2.resize(cropped, (self._input_size, self._input_size))

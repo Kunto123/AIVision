@@ -51,6 +51,7 @@ class TeachPage(QWidget):
 
     image_deleted = Signal(str)
     thumbnail_clicked = Signal(str)
+    thumbnail_mask_requested = Signal(str)  # path — adjust mask khusus foto ini
     import_cancelled = Signal()
     training_config_changed = Signal()
     augmentation_config_changed = Signal()
@@ -682,12 +683,14 @@ class TeachPage(QWidget):
         t = ThumbnailWidget(pixmap, path, "#22C55E")
         t.deleted.connect(lambda p: self._on_delete_image(p, "ok"))
         t.clicked.connect(self.thumbnail_clicked.emit)
+        t.mask_requested.connect(self.thumbnail_mask_requested.emit)
         self._ok_gallery.add_widget(t)
 
     def add_ng_thumbnail(self, pixmap, path=""):
         t = ThumbnailWidget(pixmap, path, "#EF4444")
         t.deleted.connect(lambda p: self._on_delete_image(p, "ng"))
         t.clicked.connect(self.thumbnail_clicked.emit)
+        t.mask_requested.connect(self.thumbnail_mask_requested.emit)
         self._ng_gallery.add_widget(t)
 
     def _on_delete_image(self, path, label):

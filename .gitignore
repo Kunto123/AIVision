@@ -25,6 +25,7 @@ env/
 # --- Project Data (training images, models, DB) ---
 data/
 !data/.gitkeep
+none/
 
 # Generated history/NG images
 history/

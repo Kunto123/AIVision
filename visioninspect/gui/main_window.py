@@ -249,6 +249,16 @@ class MainWindow(QMainWindow):
         self._infer_inflight_since = 0.0
         self._trigger_seq = -1         # seq milik vonis resmi trigger
 
+        # ── Epoch sesi RUN — buang hasil inferensi "basi konteks" ──────────
+        # Beda dari _infer_inflight_seq (yang cuma menjaga request LEBIH
+        # BARU tidak ketiban hasil LAMA): epoch ini menjaga supaya hasil
+        # yang sudah kadung di-submit tapi baru selesai SETELAH operator
+        # pindah tab/logout/kamera berhenti tidak ikut memulsa part_ready
+        # atau publish OK/NG ke PLC — konteksnya sudah tidak relevan lagi
+        # walau seq-nya tetap "yang ditunggu". Lihat _bump_run_session_epoch().
+        self._run_session_epoch = 0
+        self._infer_inflight_epoch = 0
+
         # ── Satu part = satu hitungan ──────────────────────────────────────
         # Dulu OK dihitung tiap inspeksi (laju cycle_delay) dan NG dihitung
         # tiap tick timer interval (laju ng_debounce_ms) — dua jam berbeda,
@@ -521,6 +531,11 @@ class MainWindow(QMainWindow):
         # Batas sesi: sama seperti masuk RUN, opt-in lewat
         # plc.reset_on_run_entry (lihat _plc_reset_session).
         self._plc_reset_session()
+
+        # Hasil inferensi yang masih diproses di thread lain tidak boleh
+        # lagi memulsa part_ready/OK ke PLC begitu selesai — sesi ini sudah
+        # berakhir. Lihat _bump_run_session_epoch().
+        self._bump_run_session_epoch()
 
         # Hentikan kamera & inferensi selama logout — view berhenti berjalan
         # sampai user login lagi.
@@ -934,6 +949,10 @@ class MainWindow(QMainWindow):
         self._run_page.set_camera_status(False)
         self._start_cam_action.setText("Start Kamera")
         self._teach_page.set_preview_text("Kamera dimatikan")
+        # Kamera berhenti = tidak ada lagi frame baru yang bisa menyusul —
+        # hasil inferensi in-flight yang masih tersisa tidak boleh memulsa
+        # part_ready/OK ke PLC begitu selesai. Lihat _bump_run_session_epoch().
+        self._bump_run_session_epoch()
 
     def _on_camera_error(self, msg: str):
         self._cam_status_label.setText("Camera Error")
@@ -1130,6 +1149,17 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+    def _bump_run_session_epoch(self):
+        """Tandai konteks sesi RUN berubah (keluar tab RUN / logout / kamera
+        berhenti) — hasil inferensi yang sudah kadung di-submit SEBELUM ini
+        tapi baru selesai SESUDAHNYA akan dibuang di _on_inference_result
+        (lihat pengecekan _infer_inflight_epoch), bukan ikut memulsa
+        part_ready/OK ke PLC. Reset _last_part_ready sekalian supaya state
+        gate tidak menggantung lintas sesi.
+        """
+        self._run_session_epoch += 1
+        self._last_part_ready = False
+
     def _on_frame_for_inference(self, frame):
         """Frame dari kamera → submit ke worker inference (Tugas 3).
 
@@ -1227,6 +1257,7 @@ class MainWindow(QMainWindow):
         self._infer_seq += 1
         seq = self._infer_seq
         self._infer_inflight_seq = seq
+        self._infer_inflight_epoch = self._run_session_epoch
         self._infer_inflight_since = time.monotonic()
         if triggered:
             self._trigger_seq = seq
@@ -1250,6 +1281,17 @@ class MainWindow(QMainWindow):
                 logger.debug("Hasil infer basi (seq=%s) — dilewati", seq)
                 return
             self._infer_inflight_seq = -1
+            # Hasil basi-konteks: frame ini sudah di-submit SEBELUM operator
+            # pindah tab keluar RUN / logout / kamera berhenti, tapi baru
+            # selesai diproses SESUDAHNYA (inferensi jalan di thread lain,
+            # butuh waktu). Tanpa guard ini, part_ready/OK tetap terpulsa ke
+            # PLC walau tidak ada inspeksi yang operator lihat sedang
+            # berlangsung — lihat _bump_run_session_epoch().
+            if self._infer_inflight_epoch != self._run_session_epoch:
+                logger.debug(
+                    "Hasil infer basi-konteks (epoch=%s, sesi sekarang=%s) — "
+                    "dilewati", self._infer_inflight_epoch, self._run_session_epoch)
+                return
             # Vonis resmi trigger hanya boleh datang dari frame ber-trigger.
             # seq < 0 = pemanggil tanpa nomor urut (jalur lama/uji) → ikut
             # keadaan siklus yang sedang aktif.
@@ -4901,6 +4943,10 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._go_fullscreen)
         else:
             QTimer.singleShot(0, self._go_windowed)
+            # Keluar dari RUN: hasil inferensi yang masih diproses di
+            # thread lain tidak boleh lagi memulsa part_ready/OK ke PLC
+            # begitu selesai — lihat _bump_run_session_epoch().
+            self._bump_run_session_epoch()
 
         # Refresh teach preview
         if index == 1:

@@ -232,6 +232,12 @@ class MainWindow(QMainWindow):
         self._freeze_pending = False         # frame berikutnya = frame beku
         self._display_frozen = False         # live view dibekukan
         self._gate_rejected = False          # part-check menolak → gate merah
+        # NG retry (2026-09-02): dalam satu siklus trigger, NG di percobaan
+        # pertama TIDAK langsung menutup siklus — dicoba lagi sampai OK
+        # ketemu atau timeout. Bukti NG (gambar+SQLite) cuma disimpan SEKALI
+        # dari percobaan TERAKHIR saat timeout benar-benar terjadi, bukan
+        # tiap percobaan (supaya satu part fisik tidak jadi banyak entry NG).
+        self._last_ng_evidence: Optional[dict] = None
         self._trigger_timeout_timer = QTimer(self)
         self._trigger_timeout_timer.setSingleShot(True)
         self._trigger_timeout_timer.timeout.connect(self._on_trigger_timeout)
@@ -1034,6 +1040,7 @@ class MainWindow(QMainWindow):
         self._trigger_cycle_active = True
         self._freeze_pending = True
         self._gate_rejected = False
+        self._last_ng_evidence = None
         self._run_page.set_status_message("Trigger — memeriksa…")
         ms = max(200, int(self._config.get("inference.trigger_timeout_ms", 2000)))
         self._trigger_timeout_timer.start(ms)
@@ -1052,6 +1059,15 @@ class MainWindow(QMainWindow):
         self._trigger_cycle_active = False
         self._freeze_pending = False
         self._display_frozen = False
+        # Timeout = jendela waktu benar-benar habis tanpa OK. Percobaan
+        # NG terakhir yang sempat dicoba (kalau ada) baru DITULIS sekarang —
+        # itulah vonis akhir part ini. Fault lain (part_check/error) berarti
+        # siklus batal total, bukti NG yang sempat nyangkut dibuang saja
+        # (bukan part cacat, tapi gangguan/part hilang di tengah jalan).
+        if fault == "timeout" and self._last_ng_evidence is not None:
+            if not self._replay_test_mode:
+                self._save_ng_evidence(**self._last_ng_evidence)
+        self._last_ng_evidence = None
         if not fault:
             return
         msg = {
@@ -1192,13 +1208,20 @@ class MainWindow(QMainWindow):
             if self._plc_trigger_pending:
                 self._plc_trigger_pending = False
                 triggered = True
-            elif not self._config.get("inference.infer_when_idle", False):
-                # Mode default: tanpa trigger tidak ada inferensi sama sekali
-                # (paling ringan, hasil resmi paling cepat keluar).
-                return False
             elif self._trigger_cycle_active:
-                # "Infer saat idle" aktif, tapi siklus resmi sedang berjalan —
-                # jangan menambah antrean di belakangnya.
+                # Siklus trigger masih menunggu OK (belum timeout) —
+                # BUKAN trigger baru: _begin_trigger_cycle() TIDAK dipanggil
+                # lagi di sini (timer batas waktu & freeze tampilan cuma
+                # sekali di awal siklus). Frame ini numpang di siklus yang
+                # sama supaya NG di percobaan pertama tidak langsung jadi
+                # vonis akhir — dicoba lagi sampai OK ketemu atau
+                # trigger_timeout_ms habis. Ladder tetap pegang jendela
+                # waktu asli (T0); timeout app di sini cuma jaring pengaman
+                # supaya tidak retry selamanya.
+                pass
+            elif not self._config.get("inference.infer_when_idle", False):
+                # Mode default: tanpa trigger/siklus aktif, tidak ada
+                # inferensi sama sekali (paling ringan).
                 return False
 
         # ── Rem antrean: jangan menumpuk pekerjaan di worker ──
@@ -1259,7 +1282,10 @@ class MainWindow(QMainWindow):
         self._infer_inflight_seq = seq
         self._infer_inflight_epoch = self._run_session_epoch
         self._infer_inflight_since = time.monotonic()
-        if triggered:
+        if triggered or self._trigger_cycle_active:
+            # Retry (triggered=False tapi siklus masih aktif) ikut dicatat
+            # sebagai "seq yang ditunggu siklus" — supaya hasilnya nanti
+            # tetap dikenali is_trigger_result=True di _on_inference_result.
             self._trigger_seq = seq
         self._inference_worker.submit.emit(
             seq, frame, pc_cfg, pc_state, rois, rois_uid, rois_label, rois_mask, yc)
@@ -1441,53 +1467,33 @@ class MainWindow(QMainWindow):
                     # ketiadaan OK dalam jendela waktunya; counter diisi saat
                     # sinyal NG masuk (_on_plc_ng) supaya angka di layar
                     # selalu cocok dengan lampu.
-                    #
-                    # Yang TETAP dilakukan di sini: menyimpan bukti. Gambar
-                    # dan skor per ROI harus diambil pada frame yang dinilai —
-                    # kalau menunggu sinyal PLC, frame itu sudah lewat dan
-                    # tidak ada apa pun yang bisa dipakai untuk tuning.
                     if not self._replay_test_mode:
-                        # Save frame untuk tuning
-                        img_path = self._save_inspection_frame(
-                            frame, "NG", worst_score, roi_results, avg_latency)
-                        # Simpan ke SQLite agar entry bisa di-tuning
-                        roi_region = json.dumps([{
-                            "x": r["roi"][0], "y": r["roi"][1],
-                            "width": r["roi"][2], "height": r["roi"][3],
-                            "label": r.get("label", f"ROI{i + 1}"),
-                            "score": r["score"], "judgement": r["judgement"],
-                            # Threshold per ROI ikut disimpan: kolom
-                            # `threshold` di tabel hanya muat SATU nilai,
-                            # sedangkan tiap ROI bisa punya ambang sendiri.
-                            # Tanpa ini, entry lama tidak bisa ditelusuri
-                            # ("kenapa ROI ini NG di skor segitu?").
-                            "threshold": r.get("threshold"),
-                            "margin": r.get("margin"),
-                        } for i, r in enumerate(roi_results)])
-                        self._db.add_inspection({
-                            "program": self._active_program,
-                            "template": self._active_template,
-                            "operator": self._current_operator_name(),
-                            "score": worst_score,
-                            "judgement": "NG",
-                            "threshold": self._inference_engine.threshold,
-                            "latency_ms": avg_latency,
-                            "image_path": img_path or "",
-                            "roi_region": roi_region,
-                            "metadata": {
-                                "num_rois": len(roi_results),
-                                "template": self._active_template,
-                                "template_name": self._active_partname,
-                            },
-                        })
-                        # NG TIDAK dikirim ke PostgreSQL. Tabel produksi di
-                        # sana hanya menampung hasil OK; seluruh bukti cacat
-                        # (gambar, skor per ROI, threshold, koreksi) tetap
-                        # lengkap di SQLite lokal.
+                        if self._trigger_cycle_active and is_trigger_result:
+                            # Mode plc_trigger: NG di SATU percobaan bukan
+                            # vonis akhir — jendela waktu masih berjalan,
+                            # frame berikutnya akan dicoba lagi (lihat gate
+                            # retry di _on_frame_for_inference). Simpan bukti
+                            # percobaan TERAKHIR saja (ditimpa tiap retry);
+                            # baru benar-benar ditulis kalau timeout terjadi
+                            # (_finish_trigger_cycle). Kalau nanti ketemu OK,
+                            # bukti ini dibuang tanpa pernah ditulis.
+                            self._last_ng_evidence = {
+                                "frame": frame, "worst_score": worst_score,
+                                "roi_results": roi_results,
+                                "avg_latency": avg_latency,
+                            }
+                        else:
+                            # Continuous/non-trigger: tiap frame NG memang
+                            # satu vonis independen — simpan langsung seperti
+                            # semula.
+                            self._save_ng_evidence(
+                                frame, worst_score, roi_results, avg_latency)
 
-            # ── Siklus trigger selesai: model BENAR-BENAR menilai, pulse
-            # OK/NG sudah dikirim di atas → lepas freeze tanpa fault. ──
-            if self._trigger_cycle_active and is_trigger_result:
+            # ── Siklus trigger: OK BENAR-BENAR menilai → lepas freeze tanpa
+            # fault. NG TIDAK menutup siklus di sini — biarkan retry sampai
+            # OK ketemu atau _on_trigger_timeout yang menutupnya. ──
+            if (self._trigger_cycle_active and is_trigger_result
+                    and raw_judgement == "OK"):
                 self._finish_trigger_cycle()
 
             # ── Cycle delay: jeda antar siklus inspeksi ──
@@ -1702,6 +1708,48 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.warning("Save inspection frame error: %s", e)
             return ""
+
+    def _save_ng_evidence(self, frame, worst_score: float, roi_results: list,
+                           avg_latency: float):
+        """Simpan bukti NG (gambar + entry SQLite) untuk tuning.
+
+        Diekstrak dari _on_inference_result (2026-09-02) supaya bisa dipakai
+        dari dua jalur: NG langsung (continuous/non-trigger, satu frame =
+        satu vonis) dan NG hasil retry mode plc_trigger (dipanggil dari
+        _finish_trigger_cycle saat timeout, pakai bukti percobaan terakhir
+        yang disimpan di _last_ng_evidence). NG TIDAK dikirim ke PostgreSQL —
+        tabel produksi di sana hanya menampung hasil OK; bukti cacat (gambar,
+        skor per ROI, threshold, koreksi) tetap lengkap di SQLite lokal.
+        """
+        img_path = self._save_inspection_frame(
+            frame, "NG", worst_score, roi_results, avg_latency)
+        roi_region = json.dumps([{
+            "x": r["roi"][0], "y": r["roi"][1],
+            "width": r["roi"][2], "height": r["roi"][3],
+            "label": r.get("label", f"ROI{i + 1}"),
+            "score": r["score"], "judgement": r["judgement"],
+            # Threshold per ROI ikut disimpan: kolom `threshold` di tabel
+            # hanya muat SATU nilai, sedangkan tiap ROI bisa punya ambang
+            # sendiri. Tanpa ini, entry lama tidak bisa ditelusuri.
+            "threshold": r.get("threshold"),
+            "margin": r.get("margin"),
+        } for i, r in enumerate(roi_results)])
+        self._db.add_inspection({
+            "program": self._active_program,
+            "template": self._active_template,
+            "operator": self._current_operator_name(),
+            "score": worst_score,
+            "judgement": "NG",
+            "threshold": self._inference_engine.threshold,
+            "latency_ms": avg_latency,
+            "image_path": img_path or "",
+            "roi_region": roi_region,
+            "metadata": {
+                "num_rois": len(roi_results),
+                "template": self._active_template,
+                "template_name": self._active_partname,
+            },
+        })
 
     # CATATAN: _on_ng_interval_tick() dan timernya DIHAPUS. Fungsi itu
     # menambah counter NG tiap tick selama anomali bertahan — yang diukur

@@ -1129,6 +1129,13 @@ class MainWindow(QMainWindow):
            kelebihan-hitung dengan risiko kekurangan-hitung bila part datang
            lebih cepat dari cooldown. Berlaku untuk OK MAUPUN NG dengan jam
            yang sama supaya pass rate tetap sebanding.
+
+        Episode (case 2) SENGAJA cuma dikunci (`_counted_this_episode`) kalau
+        judgement-nya OK (2026-09-02) — NG di evaluasi pertama BUKAN vonis
+        akhir selama part masih di gate; frame berikutnya (part yang sama)
+        masih boleh "menyelamatkan" jadi OK. Episode baru benar-benar ditutup
+        kalau part hilang dari gate (`pc_blocked`, lihat _on_inference_result)
+        tanpa pernah OK — itulah momen vonis NG akhirnya dianggap final.
         """
         if self._is_trigger_mode():
             return True
@@ -1138,7 +1145,8 @@ class MainWindow(QMainWindow):
                 return False
             if self._counted_this_episode:
                 return False
-            self._counted_this_episode = True
+            if judgement == "OK":
+                self._counted_this_episode = True
             return True
 
         cooldown = float(self._config.get(
@@ -1349,6 +1357,18 @@ class MainWindow(QMainWindow):
                 # dihitung lagi. Inilah yang membuat satu part terhitung
                 # sekali walau diperiksa berkali-kali selagi ada di gate.
                 self._counted_this_episode = False
+                # Mode continuous: part akhirnya benar-benar hilang dari gate
+                # TANPA pernah OK selama di sana — itu baru vonis akhirnya,
+                # tulis SEKARANG (bukan tiap frame NG selagi masih dicoba).
+                # Mode plc_trigger sengaja TIDAK di-flush di sini — part
+                # hilang di TENGAH siklus trigger berarti gangguan/part
+                # tercabut, bukan vonis cacat (lihat _finish_trigger_cycle,
+                # fault "part_check" membuang bukti ini, bukan menulisnya).
+                if (not self._is_trigger_mode()
+                        and self._last_ng_evidence is not None
+                        and not self._replay_test_mode):
+                    self._save_ng_evidence(**self._last_ng_evidence)
+                self._last_ng_evidence = None
                 if self._trigger_cycle_active and is_trigger_result:
                     # Trigger datang tapi part tidak terdeteksi → BERHENTI di
                     # sini: model tidak dijalankan (hemat ~1 dtk) dan tidak
@@ -1441,6 +1461,10 @@ class MainWindow(QMainWindow):
                 # Show OK immediately, increment OK counter (produksi)
                 self._run_page.update_judgement("OK", worst_score)
                 if not self._replay_test_mode and counts:
+                    # OK ketemu → bukti NG dari percobaan sebelumnya (kalau
+                    # ada, dari part yang sama di episode ini) sudah tidak
+                    # relevan — buang, jangan pernah ditulis.
+                    self._last_ng_evidence = None
                     self._inspection_ok += 1
                     self._run_page.update_counters(
                         self._inspection_ok, self._inspection_ng)
@@ -1482,10 +1506,25 @@ class MainWindow(QMainWindow):
                                 "roi_results": roi_results,
                                 "avg_latency": avg_latency,
                             }
+                        elif self._pc_active_for_overlay:
+                            # Continuous + Part Check aktif: part yang sama
+                            # masih mungkin ada di gate di frame berikutnya —
+                            # NG di sini BUKAN vonis akhir. Simpan bukti
+                            # percobaan TERAKHIR saja; baru benar-benar
+                            # ditulis kalau part akhirnya hilang dari gate
+                            # tanpa pernah OK (pc_blocked, lihat blok di
+                            # atas). Kalau nanti ketemu OK, bukti ini
+                            # dibuang tanpa pernah ditulis (lihat cabang OK).
+                            self._last_ng_evidence = {
+                                "frame": frame, "worst_score": worst_score,
+                                "roi_results": roi_results,
+                                "avg_latency": avg_latency,
+                            }
                         else:
-                            # Continuous/non-trigger: tiap frame NG memang
-                            # satu vonis independen — simpan langsung seperti
-                            # semula.
+                            # Part Check nonaktif (cooldown murni) — tidak
+                            # ada sinyal "part hilang dari gate" untuk
+                            # dijadikan titik tunda, jadi simpan langsung
+                            # seperti semula (satu frame = satu vonis).
                             self._save_ng_evidence(
                                 frame, worst_score, roi_results, avg_latency)
 

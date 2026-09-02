@@ -2488,13 +2488,24 @@ class MainWindow(QMainWindow):
             _fire()
 
     def _plc_pulse(self, name: str):
-        """Pulse coil output tanpa memblokir UI: ON → QTimer singleShot → OFF."""
+        """Pulse coil output tanpa memblokir UI: ON → QTimer singleShot → OFF.
+
+        Diagnostik (2026-09-02): tidak seperti _publish_result yang punya
+        _log_publish, fungsi ini dulu SAMA SEKALI tidak meninggalkan jejak —
+        insiden "part_ready terkirim tapi towerlamp diam" tidak bisa
+        dibuktikan dari log mana pun. Baris log di bawah murni observasi,
+        tidak mengubah perilaku pulse itu sendiri.
+        """
         if self._replay_test_mode:
             return  # safety: replay video — jangan sentuh PLC
         if not self._plc_link or not self._plc_link.is_connected:
+            logger.info("Pulse %s dilewati — PLC tidak terhubung", name)
             return
         ms = max(0, int(self._config.get("plc.pulse_ms", 300)))
-        if not self._plc_link.set_output(name, True):
+        ok = self._plc_link.set_output(name, True)
+        logger.info("Pulse %s → %s [pulse_ms=%d]",
+                    name, "tertulis" if ok else "GAGAL DITULIS", ms)
+        if not ok:
             return
         if ms > 0:
             QTimer.singleShot(ms, lambda: self._safe_plc_output_off(name))

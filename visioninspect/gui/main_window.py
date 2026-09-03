@@ -273,6 +273,14 @@ class MainWindow(QMainWindow):
         # pass rate ok/(ok+ng) tidak bermakna. Lihat _should_count_part().
         self._counted_this_episode = False  # sudah dihitung di episode gate ini
         self._last_count_ts = 0.0           # untuk cooldown (tanpa gate)
+        # Konfirmasi N frame OK berturut (inference.confirm_ok_frames) sebelum
+        # gate lolos / verdict QC = OK. NG apa pun mereset. Lihat
+        # _confirm_ok_frames_effective() & _reset_confirm_streaks().
+        self._gate_confirm_streak = 0
+        self._qc_ok_streak = 0
+        # Debounce arah turun: frame notready berturut sebelum gate yang sudah
+        # lolos dianggap benar-benar hilang (tahan tangan lewat sekejap).
+        self._gate_lost_streak = 0
 
         # Part Presence Check (cached config — read from disk only on template switch)
         self._current_part_check_cfg: dict = {}
@@ -1115,6 +1123,40 @@ class MainWindow(QMainWindow):
                 out[str(uid)] = thr
         return out
 
+    def _confirm_ok_frames_effective(self) -> int:
+        """N hasil infer OK berturut sebelum gate lolos / verdict QC = OK.
+
+        Continuous saja — mode plc_trigger & replay uji selalu 1 (timing part
+        milik ladder / dialog uji, bukan aplikasi).
+        """
+        if self._is_trigger_mode() or self._replay_test_mode:
+            return 1
+        try:
+            return max(1, int(self._settings_page.get_confirm_ok_frames()))
+        except Exception:
+            return 1
+
+    def _reset_confirm_streaks(self) -> None:
+        """Nol-kan streak konfirmasi gate & QC + budget debounce turun (part
+        lepas dari gate / ganti template / keluar sesi RUN)."""
+        self._gate_confirm_streak = 0
+        self._qc_ok_streak = 0
+        self._gate_lost_streak = 0
+
+    def _arm_cycle_delay(self) -> None:
+        """Continuous: pasang jeda antar siklus (Settings → Cycle Delay), juga
+        di antara frame konfirmasi. plc_trigger / replay: timing bukan milik
+        aplikasi → tanpa jeda."""
+        if (self._config.get("inference.mode", "continuous") == "continuous"
+                and not self._replay_test_mode):
+            cycle_delay = self._settings_page.get_cycle_delay_ms()
+            if cycle_delay > 0:
+                self._cycle_delay_timer.start(cycle_delay)
+                self._cycle_delay_active = True
+                self._run_page.set_status_message(f"Cycle delay {cycle_delay} ms...")
+                return
+        self._cycle_delay_active = False
+
     def _should_count_part(self, judgement: str) -> bool:
         """Boleh menambah counter / kirim ke PLC untuk hasil ini?
 
@@ -1184,6 +1226,7 @@ class MainWindow(QMainWindow):
         """
         self._run_session_epoch += 1
         self._last_part_ready = False
+        self._reset_confirm_streaks()
 
     def _on_frame_for_inference(self, frame):
         """Frame dari kamera → submit ke worker inference (Tugas 3).
@@ -1353,11 +1396,27 @@ class MainWindow(QMainWindow):
             # ── Step 1b: Part check — block path (fail-safe) ──
             # Worker tidak bisa set_waiting_for_part (objek Qt) → di sini.
             if result.get("pc_blocked"):
+                confirm_n = self._confirm_ok_frames_effective()
+                # Debounce arah TURUN: tangan/bayangan lewat sekejap di atas
+                # part tidak boleh menutup episode (kalau tidak → false NG +
+                # part yang sama terhitung 2x). Butuh N frame notready berturut
+                # (N yang sama dengan konfirmasi OK) sebelum part benar-benar
+                # dianggap hilang. Hanya kalau gate SUDAH pernah lolos.
+                if (self._last_part_ready
+                        and not self._is_trigger_mode()
+                        and not self._replay_test_mode
+                        and self._gate_lost_streak + 1 < confirm_n):
+                    self._gate_lost_streak += 1
+                    self._run_page.set_part_occluded(
+                        self._gate_lost_streak, confirm_n)
+                    return
                 self._last_part_ready = False
+                self._gate_lost_streak = 0
                 # Gate turun = part sudah lewat → episode berikutnya boleh
                 # dihitung lagi. Inilah yang membuat satu part terhitung
                 # sekali walau diperiksa berkali-kali selagi ada di gate.
                 self._counted_this_episode = False
+                self._reset_confirm_streaks()
                 # Mode continuous: part akhirnya benar-benar hilang dari gate
                 # TANPA pernah OK selama di sana — itu baru vonis akhirnya,
                 # tulis SEKARANG (bukan tiap frame NG selagi masih dicoba).
@@ -1383,6 +1442,19 @@ class MainWindow(QMainWindow):
                 return
             if (result.get("pc_state") == "active"
                     and result.get("pc_result") is not None):
+                # Gate "ready" — butuh N frame ready berturut sebelum lolos ke
+                # QC (Settings → Penghitungan Part). N=1 (default) = perilaku
+                # lama. Frame konfirmasi tetap kena cycle delay.
+                confirm_n = self._confirm_ok_frames_effective()
+                # Frame ready → reset budget debounce turun (occlusion beres).
+                self._gate_lost_streak = 0
+                self._gate_confirm_streak += 1
+                if self._gate_confirm_streak < confirm_n:
+                    self._qc_ok_streak = 0
+                    self._run_page.set_waiting_for_part(
+                        (self._gate_confirm_streak, confirm_n))
+                    self._arm_cycle_delay()
+                    return
                 _prev_ready = self._last_part_ready
                 self._last_part_ready = True
                 if not _prev_ready and self._get_io_mode()["part_ready_output"]:
@@ -1452,6 +1524,21 @@ class MainWindow(QMainWindow):
                     # menampilkan 8 baris; cap 64 cukup untuk daftar lokasi NG.
                     if len(self._replay_stats["ng_frames"]) < 64:
                         self._replay_stats["ng_frames"].append((idx, worst_score))
+
+            # Konfirmasi N frame OK berturut sebelum verdict OK final (Settings
+            # → Penghitungan Part). NG apa pun mereset streak (fail-safe).
+            # N=1 (default) = perilaku lama. Frame konfirmasi tetap kena cycle
+            # delay dan tidak menghitung / memulsa PLC.
+            confirm_n = self._confirm_ok_frames_effective()
+            if raw_judgement == "OK":
+                self._qc_ok_streak += 1
+            else:
+                self._qc_ok_streak = 0
+            if raw_judgement == "OK" and self._qc_ok_streak < confirm_n:
+                self._run_page.set_confirming_ok(
+                    self._qc_ok_streak, confirm_n, worst_score)
+                self._arm_cycle_delay()
+                return
 
             # Satu part = satu hitungan. Tampilan SELALU diperbarui (operator
             # perlu melihat kondisi terkini), tapi counter/PLC/history hanya
@@ -1537,23 +1624,9 @@ class MainWindow(QMainWindow):
                 self._finish_trigger_cycle()
 
             # ── Cycle delay: jeda antar siklus inspeksi ──
-            # Hanya berlaku di mode continuous (auto sequence) DAN untuk
-            # produksi nyata. Replay video (Tugas 6a): cycle_delay TIDAK
-            # berlaku — diganti kontrol "Periksa tiap N frame" di dialog
-            # supaya cakupan uji penuh (sebelumnya cuma ±3% frame dicek).
-            if (self._config.get("inference.mode", "continuous") == "continuous"
-                    and not self._replay_test_mode):
-                cycle_delay = self._settings_page.get_cycle_delay_ms()
-                if cycle_delay > 0:
-                    self._cycle_delay_timer.start(cycle_delay)
-                    self._cycle_delay_active = True
-                    self._run_page.set_status_message(
-                        f"Cycle delay {cycle_delay} ms...")
-                else:
-                    self._cycle_delay_active = False
-            else:
-                # plc_trigger: timing antar siklus dari PLC — tanpa jeda
-                self._cycle_delay_active = False
+            # Continuous + produksi nyata saja. Replay video (Tugas 6a) &
+            # plc_trigger: timing bukan milik aplikasi (lihat _arm_cycle_delay).
+            self._arm_cycle_delay()
 
             # Diagnostics latency
             self._diagnostics_page.update_performance(
@@ -3799,6 +3872,7 @@ class MainWindow(QMainWindow):
         self._run_page.clear_results()
         # Reset part check overlay state (will refresh on next frame)
         self._last_part_ready = False
+        self._reset_confirm_streaks()
         self._pc_active_for_overlay = False
         self._last_gate_roi = None
         self._last_part_check_score = 1.0

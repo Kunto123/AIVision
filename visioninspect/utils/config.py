@@ -120,6 +120,11 @@ class Config:
             # dipakai bila tidak ada trigger PLC / gate part-check (keduanya
             # lebih akurat). 0 = hitung tiap inspeksi (perilaku lama).
             "count_cooldown_ms": 1500,
+            # Verdict OK (gate part-check DAN judgement QC) baru keluar setelah
+            # N hasil infer OK berturut-turut — meredam OK "kedip" satu frame.
+            # NG apa pun mereset hitungan (fail-safe). 1 = tanpa konfirmasi
+            # (perilaku lama). Hanya mode continuous; plc_trigger selalu 1.
+            "confirm_ok_frames": 1,
             "cycle_delay_ms": 1000,  # jeda antar siklus inspeksi (ms), 0=langsung
         },
 

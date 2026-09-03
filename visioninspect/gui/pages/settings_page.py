@@ -427,6 +427,26 @@ class SettingsPage(QWidget):
         ng_delay_row.addStretch()
         ng_form.addLayout(ng_delay_row)
 
+        confirm_row = QHBoxLayout()
+        confirm_row.addWidget(QLabel("Konfirmasi OK — N frame berturut:"))
+        self._confirm_ok_frames_spin = QSpinBox()
+        self._confirm_ok_frames_spin.setRange(1, 50)
+        self._confirm_ok_frames_spin.setValue(1)
+        self._confirm_ok_frames_spin.setFixedWidth(130)
+        self._confirm_ok_frames_spin.setToolTip(
+            "Gate part-check DAN judgement QC baru mengeluarkan OK setelah "
+            "menerima N hasil infer OK berturut-turut.\n"
+            "NG apa pun langsung mereset hitungan (fail-safe).\n"
+            "Nilai yang sama juga jadi toleransi: gate yang sudah lolos butuh "
+            "N frame 'tidak terbaca' berturut sebelum part dianggap hilang — "
+            "tangan/bayangan lewat sekejap tidak memicu NG palsu.\n"
+            "1 = tanpa konfirmasi (perilaku lama).\n"
+            "Hanya mode Auto Sequence (continuous) — mode PLC Trigger selalu 1.\n"
+            "Tiap frame konfirmasi tetap kena Cycle Delay.")
+        confirm_row.addWidget(self._confirm_ok_frames_spin)
+        confirm_row.addStretch()
+        ng_form.addLayout(confirm_row)
+
         ng_help = QLabel(
             "Satu part harus terhitung SEKALI, berapa pun frame yang sempat "
             "diperiksa selagi part itu ada di depan kamera. Berlaku sama "
@@ -592,6 +612,7 @@ class SettingsPage(QWidget):
                 "infer_when_idle": self._infer_when_idle.isChecked(),
                 "trigger_timeout_ms": self._trigger_timeout_spin.value(),
                 "count_cooldown_ms": self._count_cooldown_spin.value(),
+                "confirm_ok_frames": self._confirm_ok_frames_spin.value(),
             },
             "yolo": {
                 "enabled": self._yolo_enabled.isChecked(),
@@ -638,6 +659,11 @@ class SettingsPage(QWidget):
         """Jarak minimum antar hitungan part (dipakai bila tidak ada trigger
         PLC / gate part-check sebagai sumber 'satu part')."""
         return self._config.get("inference.count_cooldown_ms", 1500)
+
+    def get_confirm_ok_frames(self) -> int:
+        """N hasil infer OK berturut sebelum verdict OK (gate + QC).
+        1 = tanpa konfirmasi (perilaku lama)."""
+        return self._config.get("inference.confirm_ok_frames", 1)
 
     def get_cycle_delay_ms(self) -> int:
         """Get cycle delay from config (ms). 0 = no delay."""
@@ -852,6 +878,8 @@ class SettingsPage(QWidget):
         # NG Timeout
         self._count_cooldown_spin.setValue(
             self._config.get("inference.count_cooldown_ms", 1500))
+        self._confirm_ok_frames_spin.setValue(
+            self._config.get("inference.confirm_ok_frames", 1))
 
         # Cycle Delay
         self._cycle_delay_spin.setValue(self._config.get("inference.cycle_delay_ms", 1000))

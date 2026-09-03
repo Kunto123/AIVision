@@ -1,6 +1,7 @@
 """
 VisionInspect - Run Page
-Layar utama operator: live view, judgement OK/NG, counter, status PLC.
+Layar utama operator: live view, judgement 2-baris (tahap + status OK/NG),
+skor, counter, status PLC, rincian per-ROI.
 """
 
 from PySide6.QtCore import Qt, Slot
@@ -23,6 +24,12 @@ from visioninspect.utils.i18n import Translator
 
 class RunPage(QWidget):
     """Halaman RUN — mode inspeksi utama untuk operator."""
+
+    # Style label tahap (row atas judgement): abu-abu = netral, kuning = perlu perhatian
+    _STAGE_STYLE_NEUTRAL = (
+        "color: #9FB3C8; font-size: 18px; font-weight: bold; letter-spacing: 2px;")
+    _STAGE_STYLE_WARN = (
+        "color: #F59E0B; font-size: 18px; font-weight: bold; letter-spacing: 2px;")
 
     def __init__(self, translator: Translator, config, parent=None):
         super().__init__(parent)
@@ -137,11 +144,16 @@ class RunPage(QWidget):
         right_layout.setContentsMargins(16, 16, 16, 16)
         right_layout.setSpacing(12)
 
-        # Judgement big display
+        # Judgement — 2 baris: atas = tahap pipeline, bawah = status OK/NG tahap itu
+        self._stage_label = QLabel("SIAP")
+        self._stage_label.setAlignment(Qt.AlignCenter)
+        self._stage_label.setStyleSheet(self._STAGE_STYLE_NEUTRAL)
+        right_layout.addWidget(self._stage_label)
+
         self._judgement_label = QLabel("—")
         self._judgement_label.setObjectName("judgementOK")
         self._judgement_label.setAlignment(Qt.AlignCenter)
-        self._judgement_label.setMinimumHeight(100)
+        self._judgement_label.setMinimumHeight(80)
         self._judgement_label.setStyleSheet("color: #9FB3C8; font-size: 48px; font-weight: bold;")
         right_layout.addWidget(self._judgement_label)
 
@@ -258,12 +270,14 @@ class RunPage(QWidget):
 
     @Slot()
     def update_judgement(self, judgement: str, score: float):
-        """Update judgement display."""
+        """Tahap 2 (QC) — keputusan akhir barang OK/NG."""
+        self._stage_label.setText("JUDGEMENT")
+        self._stage_label.setStyleSheet(self._STAGE_STYLE_NEUTRAL)
         if judgement == "OK":
-            self._judgement_label.setText("OK " + self._tr.tr("ok"))
+            self._judgement_label.setText(self._tr.tr("ok"))
             self._judgement_label.setStyleSheet("color: #22C55E; font-size: 56px; font-weight: bold;")
         else:
-            self._judgement_label.setText("NG " + self._tr.tr("ng"))
+            self._judgement_label.setText(self._tr.tr("ng"))
             self._judgement_label.setStyleSheet("color: #EF4444; font-size: 56px; font-weight: bold;")
         self._score_label.setText(f"{score:.4f}")
 
@@ -361,6 +375,8 @@ class RunPage(QWidget):
     @Slot()
     def clear_results(self):
         """Clear judgement, score, latency and ROI results when switching template."""
+        self._stage_label.setText("SIAP")
+        self._stage_label.setStyleSheet(self._STAGE_STYLE_NEUTRAL)
         self._judgement_label.setText("—")
         self._judgement_label.setStyleSheet("color: #9FB3C8; font-size: 48px; font-weight: bold;")
         self._score_label.setText("0.000")
@@ -368,18 +384,49 @@ class RunPage(QWidget):
         self._roi_results_label.setText("ROI: —")
 
     @Slot()
-    def set_waiting_for_part(self):
-        """Show 'waiting for part' neutral state — no OK/NG."""
-        self._judgement_label.setText("Menunggu Part")
-        self._judgement_label.setStyleSheet("color: #F59E0B; font-size: 48px; font-weight: bold;")
+    def set_waiting_for_part(self, confirm=None):
+        """Tahap 1 (gate) — part belum terkonfirmasi di posisi: tahap = NG.
+
+        confirm = (k, n) → sedang mengumpulkan konfirmasi gate (k dari n frame).
+        """
+        self._stage_label.setText("MENUNGGU PART")
+        self._stage_label.setStyleSheet(self._STAGE_STYLE_WARN)
+        self._judgement_label.setText(self._tr.tr("ng"))
+        self._judgement_label.setStyleSheet("color: #EF4444; font-size: 48px; font-weight: bold;")
         self._score_label.setText("—")
-        self._roi_results_label.setText("ROI: Menunggu part terdeteksi di area gate")
+        if confirm and confirm[1] > 1:
+            self._roi_results_label.setText(
+                f"ROI: Konfirmasi gate {confirm[0]}/{confirm[1]}")
+        else:
+            self._roi_results_label.setText(
+                "ROI: Menunggu part terdeteksi di area gate")
+
+    @Slot()
+    def set_part_occluded(self, streak: int, n: int):
+        """Gate sudah lolos tapi beberapa frame terakhir tidak terbaca
+        (tangan/bayangan lewat). Episode masih hidup — belum part hilang."""
+        self._stage_label.setText("PART TERHALANG")
+        self._stage_label.setStyleSheet(self._STAGE_STYLE_WARN)
+        self._status_msg.setText(f"Part terhalang {streak}/{n} — cek posisi")
+
+    @Slot()
+    def set_confirming_ok(self, streak: int, n: int, score: float):
+        """Tahap 2 — hasil OK tapi belum cukup konfirmasi (streak dari n frame)."""
+        self._stage_label.setText("JUDGEMENT")
+        self._stage_label.setStyleSheet(self._STAGE_STYLE_NEUTRAL)
+        self._judgement_label.setText(f"{self._tr.tr('ok')} {streak}/{n}")
+        self._judgement_label.setStyleSheet(
+            "color: #F59E0B; font-size: 40px; font-weight: bold;")
+        self._score_label.setText(f"{score:.4f}")
 
     @Slot()
     def set_part_check_incomplete(self, msg: str):
-        """Show 'part check not configured' warning — block QC, no false NG."""
-        self._judgement_label.setText("Part-check belum lengkap")
-        self._judgement_label.setStyleSheet("color: #F59E0B; font-size: 40px; font-weight: bold;")
+        """Part-check aktif tapi master/gate ROI belum lengkap — blok QC, tanpa NG palsu."""
+        self._stage_label.setText("PART-CHECK BELUM LENGKAP")
+        self._stage_label.setStyleSheet(
+            "color: #F59E0B; font-size: 15px; font-weight: bold; letter-spacing: 1px;")
+        self._judgement_label.setText("—")
+        self._judgement_label.setStyleSheet("color: #9FB3C8; font-size: 48px; font-weight: bold;")
         self._score_label.setText("—")
         self._roi_results_label.setText("ROI: —")
         self._status_msg.setText(msg)

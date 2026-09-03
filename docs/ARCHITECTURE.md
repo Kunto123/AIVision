@@ -25,7 +25,9 @@ Camera frame
   │      • incomplete → BLOK QC + stop timer NG  (fail-safe: cegah NG palsu)
   │      • active     → evaluate_part_presence()
   │            ready=False → "⏳ Menunggu Part", skip QC
-  │            ready=True  → lanjut
+  │            ready=True  → lanjut (butuh N frame ready berturut — lihat Konfirmasi OK)
+  │            occlusion   → gate yang sudah lolos butuh N frame notready berturut
+  │                          sebelum episode ditutup (tahan tangan lewat sekejap → cegah false NG)
   │
   ├─ 2. (opsional) YOLO class pre-filter  (core/yolo_filter.py)
   │      Kalau expected_classes diset & part kelasnya tidak terdeteksi → NG (class mismatch),
@@ -39,6 +41,13 @@ Camera frame
   │      Output per ROI: score [0..1] (1.0 = mirip OK), judgement OK/NG, heatmap (anomaly saja)
   │
   ├─ 4. Agregasi ROI → OK/NG keseluruhan
+  │
+  ├─ 4b. Konfirmasi OK (mode continuous saja — `inference.confirm_ok_frames`, default 1)
+  │      • Gate & judgement baru mengeluarkan OK setelah N hasil infer OK berturut-turut.
+  │        NG apa pun mereset hitungan (fail-safe). Tiap frame konfirmasi tetap kena cycle delay.
+  │      • Gate yang sudah lolos butuh N frame notready berturut sebelum episode ditutup
+  │        (debounce turun) — tangan/bayangan lewat sekejap tidak memicu false NG / double count.
+  │      • N=1 = tanpa konfirmasi. Mode plc_trigger: selalu 1.
   │
   └─ 5. Kirim ke PLC + update counter + simpan history
          • ke PLC: HANYA pulse coil OK. NG diputuskan PLC dari ketiadaan OK.

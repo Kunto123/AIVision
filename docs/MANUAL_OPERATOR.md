@@ -16,12 +16,14 @@ Login pertama kali (instalasi baru tanpa PostgreSQL): `admin` / `admin`, lalu wa
 ### RUN — inspeksi (operator)
 
 - **Live View** — gambar kamera + kotak ROI (hijau = area QC, biru = gate part-check).
-- **Judgement raksasa** — OK (hijau) / NG (merah), terbaca dari jarak.
+- **Judgement 2 baris** — baris atas = tahap (`MENUNGGU PART` / `JUDGEMENT`), baris bawah = status OK/NG tahap itu (besar, hijau/merah).
 - **Skor** — 0.00–1.00 (semakin tinggi = semakin mirip part OK).
 - **Counter OK / NG**.
 - **Status PLC** — hijau terhubung / merah terputus.
 - **Selektor template** — pilih jenis part yang sedang diperiksa (harus sama dengan pilihan di TEACH).
-- Pesan **"⏳ Menunggu Part"** = gate part-check belum melihat part di posisi. Pesan **"⚠️ Part-check belum lengkap"** = konfigurasi gate belum selesai, minta admin melengkapi di TEACH.
+- Tahap `MENUNGGU PART` = gate part-check belum melihat part di posisi. `PART-CHECK BELUM LENGKAP` = konfigurasi gate belum selesai, minta admin melengkapi di TEACH.
+- Kalau **Konfirmasi OK** diaktifkan (Settings, N > 1): baris bawah menampilkan progres mis. `OK 2/3` (kuning) sampai N frame OK terkumpul, baru jadi `OK` hijau.
+- Tahap `PART TERHALANG` = part sempat tidak terbaca beberapa frame (tangan/bayangan lewat). Sistem menahan verdict — kalau part muncul lagi dalam N frame, pemeriksaan lanjut tanpa mengulang.
 
 Mode trigger (diatur admin di SETTINGS): **Kontinu** (inspeksi tiap frame) atau **PLC** (inspeksi saat ada sinyal trigger).
 
@@ -46,6 +48,8 @@ Engine (YOLO / PatchCore / EfficientAd) dipilih di TEACH. **YOLO dianjurkan** un
 ### SETTINGS — konfigurasi (admin)
 
 Kamera (device, resolusi, FPS, exposure) · ROI · PLC (port, baudrate) · model & threshold · retensi history · Flask API · bahasa.
+
+**Penghitungan Part** — *Jarak minimum antar hitungan* (cooldown) dan *Konfirmasi OK — N frame berturut* (gate + judgement baru mengeluarkan OK setelah N hasil infer OK berturut; NG apa pun mereset; 1 = mati; mode Auto Sequence saja).
 
 ### DIAGNOSTICS — troubleshooting (admin)
 

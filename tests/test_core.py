@@ -27,7 +27,6 @@ class TestConfig:
             c = Config(config_path)
             assert c.get("camera.device_index") == 0
             assert c.get("model.algorithm") == "patchcore"
-            assert c.get("plc.mode") == "rs232"
             assert c.get("language") == "id"
 
     def test_set_get(self):
@@ -99,65 +98,6 @@ class TestTranslator:
         assert t.tr("nav_run") == "RUN"
         t.language = "en"
         assert t.tr("nav_run") == "RUN"
-
-
-class TestASCIIProtocol:
-    """Test ASCII protocol framing and parsing."""
-
-    def test_make_frame(self):
-        from visioninspect.plc.ascii_protocol import ASCIIProtocolManager
-        frame = ASCIIProtocolManager.make_frame("TRG")
-        assert frame.startswith(b"\x02")
-        assert b"TRG" in frame
-        assert frame.endswith(b"\x03") or len(frame) > 3
-
-    def test_parse_trg(self):
-        from visioninspect.plc.ascii_protocol import ASCIIProtocolManager
-        frame = ASCIIProtocolManager.make_frame("TRG")
-        parsed = ASCIIProtocolManager.parse_frame(frame)
-        assert parsed is not None
-        assert parsed["command"] == "TRG"
-
-    def test_parse_res(self):
-        from visioninspect.plc.ascii_protocol import ASCIIProtocolManager
-        frame = ASCIIProtocolManager.make_frame("RES", "OK,0.2345")
-        parsed = ASCIIProtocolManager.parse_frame(frame)
-        assert parsed is not None
-        assert parsed["command"] == "RES"
-        assert parsed["data"] == "OK,0.2345"
-
-    def test_checksum_validation(self):
-        from visioninspect.plc.ascii_protocol import ASCIIProtocolManager
-        frame = ASCIIProtocolManager.make_frame("STA")
-        # Corrupt the checksum byte
-        bad_frame = frame[:-1] + bytes([frame[-1] ^ 0xFF])
-        parsed = ASCIIProtocolManager.parse_frame(bad_frame)
-        assert parsed is None or "error" in parsed
-
-    def test_parse_prg(self):
-        from visioninspect.plc.ascii_protocol import ASCIIProtocolManager
-        frame = ASCIIProtocolManager.make_frame("PRG", "3")
-        parsed = ASCIIProtocolManager.parse_frame(frame)
-        assert parsed is not None
-        assert parsed["command"] == "PRG"
-        assert parsed["data"] == "3"
-
-
-class TestSerialConfig:
-    """Test serial configuration."""
-
-    def test_default_config(self):
-        from visioninspect.plc.serial_manager import SerialConfig
-        cfg = SerialConfig()
-        assert cfg.port == "COM1"
-        assert cfg.baudrate == 9600
-        assert cfg.mode == "rs232"
-
-    def test_rs485_config(self):
-        from visioninspect.plc.serial_manager import SerialConfig
-        cfg = SerialConfig(mode="rs485", rs485_direction="rts")
-        assert cfg.mode == "rs485"
-        assert cfg.rs485_direction == "rts"
 
 
 class TestInferenceResult:

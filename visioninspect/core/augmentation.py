@@ -1,10 +1,8 @@
 """
 VisionInspect - Data Augmentation
-Generate variasi tambahan dari gambar OK/NG training via transformasi
-klasik (rotasi, flip, translasi, brightness, contrast) — sengaja TIDAK
-menyediakan cutout/random-erasing/distorsi berat/blur berat, karena semua
-itu bisa menyerupai defect asli (scratch, kontaminasi) dan justru mengajari
-model bahwa tampilan mirip-cacat itu normal.
+Generate variasi gambar training via transformasi klasik (rotasi, flip,
+translasi, brightness, contrast). Sengaja TANPA cutout/random-erasing/blur
+berat: itu menyerupai defect asli dan mengajari model bahwa cacat = normal.
 """
 
 import hashlib

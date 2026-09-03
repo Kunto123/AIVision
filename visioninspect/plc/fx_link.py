@@ -1,19 +1,13 @@
 """
 VisionInspect — FX Computer Link (protokol port pemrograman Mitsubishi)
-=======================================================================
-Alternatif Modbus RTU untuk PLC FX yang TIDAK menyediakan MODBUS slave.
+Transport PLC untuk FX yang tidak punya MODBUS slave (FX3U tanpa adaptor -MB:
+D8400/D8401 tetap nol). Memakai jalur serial yang sama dengan GX Works2 —
+port yang sudah terbukti hidup.
 
-Latar belakang: MODBUS di FX3U asli menuntut adaptor khusus (-MB) dan blok
-setup `M8411`. Pada unit yang tidak mendukungnya, `D8400`/`D8401` tetap nol
-berapa kali pun di-power-cycle. Protokol ini memakai jalur yang SAMA dengan
-GX Works2, jadi ia bekerja di port yang sudah terbukti hidup.
-
-Kontraknya identik dengan `ModbusRTUManager` supaya `main_window` tidak perlu
-tahu transport mana yang dipakai. Nomor coil dipetakan langsung ke relay M
-(coil 1 → M1) — sengaja, karena io_map memang sudah memakai penomoran itu.
-
-Catatan format: `TransportSerial` milik fxplc mengunci 7E1; hanya baudrate
-yang bisa diatur. Itu memang format port pemrograman FX.
+- Antarmuka publik sama persis dengan `ModbusRTUManager` lama → `main_window`
+  tidak perlu tahu transport yang dipakai.
+- Nomor coil dipetakan langsung ke relay M (coil 1 → M1), mengikuti io_map.
+- Format serial terkunci 7E1 (fxplc `TransportSerial`); hanya baudrate yang bisa diatur.
 """
 
 import asyncio

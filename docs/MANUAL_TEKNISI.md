@@ -1,183 +1,155 @@
 # VisionInspect — Manual Teknisi
 
-## Wiring Serial
+## PLC — Mitsubishi FX Computer Link
 
-### RS232 (Point-to-Point)
+VisionInspect berkomunikasi dengan PLC FX lewat **protokol port pemrograman** (Computer Link) — jalur serial yang sama dipakai GX Works2. Library: `fxplc`.
 
-```
-PC (DB9)         PLC (DB9)
-  TX (pin 3)  ─── RX (pin 2)
-  RX (pin 2)  ─── TX (pin 3)
-  GND (pin 5) ─── GND (pin 5)
-```
+> Modbus RTU & protokol ASCII **sudah tidak dipakai**. FX3U tanpa adaptor `-MB` khusus tidak menyediakan MODBUS slave (`D8400`/`D8401` tetap nol). Computer Link bekerja di port yang sudah terbukti hidup.
 
-Umumnya menggunakan konverter **USB-to-RS232**. Setelah driver terinstall, port akan muncul sebagai `COM3` (Windows) atau `/dev/ttyUSB0` (Linux).
+### Parameter serial
 
-### RS485 (Half-Duplex)
+| Parameter | Nilai | Bisa diatur? |
+|-----------|-------|--------------|
+| Format | **7E1** (7 data bit, even parity, 1 stop) | Tidak — terkunci protokol |
+| Port | `COM1`, `COM3`, … | Ya (SETTINGS → PLC) |
+| Baudrate | 9600 (umum) | Ya |
 
-Kabel **2-wire** (A/B atau D+/D-):
+Konverter: USB-to-RS232 atau USB-to-RS485 (sesuai port PLC). Setelah driver terpasang, port muncul sebagai `COMx` di Device Manager → Ports.
 
-```
-PC (USB-RS485)    PLC (RS485)
-  A/D+ ─────────── A/D+
-  B/D- ─────────── B/D-
-  GND  ─────────── GND
-```
-
-**Penting untuk RS485:**
-1. **Terminasi**: Pasang resistor 120Ω di kedua ujung bus jika kabel > 10m
-2. **Auto-direction vs RTS**: Beberapa konverter USB-RS485 mendeteksi arah otomatis. Jika tidak, gunakan mode RTS-controlled di pengaturan
-3. **Delay**: Jika data korup, coba tambah delay before/after TX (0.1–10 ms)
-
-## Register Map Modbus RTU
-
-VisionInspect sebagai **Modbus slave** (default ID=1).
-
-| Address | Type | Name | R/W | Description |
-|---------|------|------|-----|-------------|
-| 0x0000 | Holding | System Status | R | 0=idle, 1=running, 2=training, 3=error |
-| 0x0001 | Holding | Last Result | R | 0=none, 1=OK, 2=NG |
-| 0x0002 | Holding | Last Score | R | Score × 100 (0–10000) |
-| 0x0003 | Holding | Total Counter | R | Rolling 16-bit |
-| 0x0004 | Holding | NG Counter | R | Rolling 16-bit |
-| 0x000A | Holding | Active Program | R/W | Tulis nomor program untuk switch |
-| 0x0000 | Coil | Trigger | R/W | Set 1 → inspeksi trigger → reset 0 |
-| 0x0001 | Coil | Reset Counter | R/W | Set 1 → reset semua counter → reset 0 |
-
-### Contoh Pembacaan (Python dengan pymodbus)
-
-```python
-from pymodbus.client import ModbusSerialClient
-
-client = ModbusSerialClient(port='COM3', baudrate=9600)
-client.connect()
-
-# Baca status
-rr = client.read_holding_registers(0, 5, slave=1)
-status = rr.registers[0]
-result = rr.registers[1]  # 0=none, 1=OK, 2=NG
-score = rr.registers[2] / 100.0
-
-# Trigger inspeksi
-client.write_coil(0, True, slave=1)
-client.write_coil(0, False, slave=1)
-
-client.close()
-```
-
-## Protokol ASCII (untuk PLC Lama)
-
-**Format Frame:**
-```
-STX (0x02) <CMD> [DATA] ETX (0x03) <CHECKSUM>
-```
-
-Checksum: XOR seluruh byte dari STX hingga ETX (inklusif).
-
-### Perintah
-
-| Command | Data | Deskripsi | Response |
-|---------|------|-----------|----------|
-| `TRG` | — | Trigger inspeksi | `ACK` |
-| `RES` | `OK,<score>` | Hasil OK dikirim PLC | `ACK` |
-| `RES` | `NG,<score>` | Hasil NG dikirim PLC | `ACK` |
-| `PRG` | `<n>` | Ganti program ke-n | `ACK` |
-| `STA` | — | Request status | `STA,<code>,<text>` |
-
-### Contoh Hex
+### Wiring RS232 (point-to-point)
 
 ```
-Trigger:      02 54 52 47 03 54
-Result OK:    02 52 45 53 2c 4f 4b 2c 30 2e 39 35 30 30 03 B6
-Result NG:    02 52 45 53 2c 4e 47 2c 30 2e 38 35 30 30 03 AE
+PC (DB9)          PLC (port pemrograman)
+  TX (pin 3) ───── RX
+  RX (pin 2) ───── TX
+  GND (pin 5) ──── GND
 ```
 
-## Testing dengan PLC Simulator
+### Wiring RS485 (half-duplex, kalau PLC pakai port RS485)
 
-### Setup Virtual Serial Pair (Linux/WSL)
-
-```bash
-# Install socat
-sudo apt-get install socat
-
-# Buat virtual serial pair
-socat -d -d PTY,link=/tmp/ttyV0 PTY,link=/tmp/ttyV1
-
-# Terminal 1: Jalankan simulator
-python tools/plc_simulator.py --port /tmp/ttyV0 --protocol ascii
-
-# Terminal 2: Konfigurasi VisionInspect ke port /tmp/ttyV1
-# Atau kirim test langsung:
-python -c "
-import serial
-ser = serial.Serial('/tmp/ttyV1', 9600, timeout=1)
-# Kirim trigger
-ser.write(b'\x02TRG\x03\x54')
-print('Trigger sent')
-# Baca response
-resp = ser.read(10)
-print(f'Response: {resp.hex()}')
-"
+```
+PC (USB-RS485)     PLC (RS485)
+  A / D+ ────────── A / D+
+  B / D- ────────── B / D-
+  GND ───────────── GND
 ```
 
-### Windows (com0com)
+- Pasang resistor terminasi **120 Ω** di kedua ujung bus kalau kabel > 10 m.
+- Kabel panjang: pakai shielded twisted pair.
+- Kalau data korup: turunkan baudrate, tambah delay TX.
 
-1. Install com0com dari [sourceforge](https://sourceforge.net/projects/com0com/)
-2. Setup virtual pair: `COM3` ↔ `COM4`
-3. Jalankan simulator ke `COM3`, VisionInspect ke `COM4`
+## Pemetaan I/O (coil ↔ relay M)
+
+Nomor coil dipetakan **langsung** ke relay M PLC (coil 1 → M1). Default di `visioninspect/plc/io_map.py`, bisa di-override lewat tab **I/O Settings**.
+
+### Output — sistem tulis, PLC baca
+
+| Coil | Relay | Nama | Arti |
+|------|-------|------|------|
+| 1 | M1 | `result_ok` | Part OK (pulse). **Tidak ada coil NG** — lihat catatan. |
+| 3 | M3 | `part_ready` | Part terdeteksi di gate (pulse saat transisi) |
+| 4 | M4 | `busy` | Sistem sedang inspeksi |
+| 7 | M7 | `heartbeat` | Di-toggle ±1 Hz selama sistem sehat |
+| 9 | M9 | `session_reset` | Pulse saat operator masuk RUN (opt-in) |
+
+### Input — PLC tulis, sistem baca
+
+| Coil | Relay | Nama | Arti |
+|------|-------|------|------|
+| 0 | M0 | `trigger` | Minta 1 siklus inspeksi |
+| 5 | M5 | `reset_result` | Reset counter produksi OK/NG |
+| 6 | M6 | `switch_template` | Ganti template aktif (nomor dari D10) |
+| 8 | M8 | `ng_from_plc` | PLC memvonis NG → sistem tambah counter NG + bersihkan state siklus |
+| D10 | — | `program_register` | Nomor template tujuan (1 = template pertama) |
+
+### Kontrak dengan ladder
+
+1. **Sistem hanya mengirim OK.** NG diputuskan PLC dari **ketiadaan** sinyal OK dalam jendela waktunya sendiri.
+2. **Heartbeat** memisahkan "part cacat" dari "sistem rusak". Ladder memantau *perubahan* coil heartbeat; diam > N detik = sistem rusak → nyalakan lampu fault, hentikan vonis.
+3. Mode output hasil (I/O Settings): `one_shot` (default, pulse per part) atau `latching` (level sampai hasil berikutnya).
+4. Mode `switch_template`: `cycle` (tiap sinyal maju satu template) atau `register` (pindah ke nomor di D10).
+
+## Probe / uji koneksi PLC
+
+```batch
+.vision\Scripts\python.exe tools\fx_probe.py --port COM11
+.vision\Scripts\python.exe tools\fx_probe.py --port COM11 --baud 9600
+```
+
+Membaca blok special relay M8000+ untuk memastikan PLC menjawab. Kalau `fxplc` belum terpasang: `pip install "fxplc @ git+https://github.com/KrystianD/fxplc.git"` (atau dari `vendor/`).
+
+Di tab **DIAGNOSTICS** ada juga tombol tes kirim sinyal ke PLC.
+
+## Training (PyTorch)
+
+Engine YOLO / PatchCore / EfficientAd butuh PyTorch. Di Windows, torch sering gagal load (`WinError 1114` — TLS slot exhaustion). Dua jalur:
+
+| Jalur | Cara |
+|-------|------|
+| Windows langsung | Tombol TRAIN di TEACH — jalan kalau torch Windows sehat |
+| **WSL** (disarankan untuk training) | `retrain_wsl.bat` → menjalankan `tools/train_cli.py` di `.venv` WSL, tanpa Qt. Flow: capture di Windows → tutup app → `retrain_wsl.bat <Program> <TemplateID>` → buka app lagi |
+| Tanpa torch | Engine otomatis jatuh ke `SimpleThresholdTrainer` (z-score piksel, akurasi terbatas) |
+
+Setup WSL sekali: `setup.bat --wsl` (atau manual `python3 -m venv .venv && .venv/bin/pip install -r requirements_dev.txt`).
+
+`edge_mode: true` di `data\config.json` → torch tidak dimuat saat start (PC edge inference-only, hemat RAM + waktu boot).
+
+## Deployment offline
+
+Di PC dev (ada internet):
+
+```batch
+.vision\Scripts\python.exe tools\bundling_weights.py    :: unduh backbone pretrained → cache HuggingFace
+tools\prepare_offline_bundle.bat                       :: buat offline_bundle\ (wheels + cache HF)
+```
+
+Di edge PC (tanpa internet): copy `offline_bundle\`, jalankan `tools\install_offline.bat`, lalu `run.bat` (`run.bat` sudah set `HF_HUB_OFFLINE=1`).
+
+## PostgreSQL (opsional)
+
+Untuk deployment multi-PC: akun aplikasi (`qc_user_accounts`) dan push hasil inspeksi (`qc_inspection_push`) dipusatkan di PostgreSQL. Aktifkan di config `postgresql.enabled` + isi host/db/user/password (password otomatis dienkripsi via DPAPI/Fernet, tidak plaintext di disk).
+
+- Tabel harus **sudah ada** di server — aplikasi hanya query, tidak `CREATE`.
+- Tambah/ubah user: `.vision\Scripts\python.exe tools\pg_add_user.py` (hash SHA-256 + pepper, kompatibel dengan login aplikasi).
+- Kalau server PG tidak terjangkau saat login, aplikasi fallback ke akun SQLite lokal supaya lini tidak berhenti.
 
 ## Troubleshooting
 
-### Serial Tidak Terdeteksi
-- Cek driver USB-to-Serial (FTDI, CH340, CP210x)
-- Di Linux: `ls /dev/ttyU*` atau `dmesg | grep tty`
-- Di Windows: Device Manager → Ports (COM & LPT)
+### Serial tidak terdeteksi
+- Cek driver USB-Serial (FTDI, CH340, CP210x) di Device Manager → Ports (COM & LPT).
 
-### Data Korup / CRC Error
-- Turunkan baudrate (9600 atau 19200)
-- Untuk RS485: pasang resistor terminasi 120Ω
-- Untuk kabel panjang > 10m: gunakan shielded twisted pair
-- Cek delay before/after TX (RS485)
+### PLC tidak menjawab
+- Cek wiring TX/RX (sering terbalik).
+- Pastikan format **7E1** — PLC harus di-set sama (parameter port pemrograman FX default sudah 7E1).
+- Uji dengan `tools\fx_probe.py`.
+- Pastikan PLC dalam RUN.
 
-### PLC Tidak Merespon
-- Cek wiring (TX/RX terbalik?)
-- Cek parity dan stop bits (harus match dengan PLC)
-- Uji dengan serial terminal (HTerm, RealTerm, screen)
-- Gunakan fitur "Kirim Frame Uji" di tab DIAGNOSTICS
+### Aplikasi tidak bisa start
+- Cek `data\logs\app.log`.
+- Pastikan port kamera tidak dipakai aplikasi lain.
+- Reset config: hapus `data\config.json` (akan dibuat ulang dari default).
 
-### VisionInspect Tidak Bisa Start
-- Cek `logs/app.log` untuk error detail
-- Pastikan port kamera tidak dipakai aplikasi lain
-- Hapus `~/.visioninspect/config.json` untuk reset konfigurasi
+### Training gagal di Windows
+- Kemungkinan `WinError 1114`. Pakai jalur WSL (`retrain_wsl.bat`).
 
-## Performa
-
-### Target
+## Performa — target
 
 | Metrik | Target | Catatan |
 |--------|--------|---------|
-| Inferensi Frame | < 100 ms | 256×256 ROI, PatchCore, OpenVINO INT8 |
-| Inferensi Frame | < 30 ms | 256×256 ROI, EfficientAd-S |
-| Rebuild Model | < 2 menit | 50 gambar OK, CPU 4-core |
-| RAM (idle) | < 800 MB | |
-| RAM (running) | < 1.5 GB | |
+| Inferensi | < 100 ms | ROI 256×256, PatchCore INT8 |
+| Inferensi | < 30 ms | EfficientAd-S / YOLO-cls kecil |
+| Rebuild model | < 2 menit | ~50 gambar, CPU 4-core |
+| RAM idle | < 800 MB | edge_mode |
+| RAM running | < 1.5 GB | |
 | Start-to-ready | < 15 detik | |
-| Uptime | 24/7 | Tanpa restart |
+| Uptime | 24/7 | tanpa restart |
 
-### Monitoring
+Monitor lewat tab **DIAGNOSTICS**: RAM (cek memory leak), latensi inferensi (avg + P95), FPS kamera, status thread.
 
-Gunakan tab DIAGNOSTICS untuk memonitor:
-- **RAM Usage**: Pastikan tidak ada memory leak
-- **Inference Latency**: Rolling average + P95
-- **Camera FPS**: Frame rate aktual
-- **Thread Status**: Semua thread harus RUNNING
+## Packaging
 
-## Packaging (PyInstaller)
-
-```bash
-# Build one-folder executable
-pip install pyinstaller
-pyinstaller --onefile --name VisionInspect run.py
+```batch
+.vision\Scripts\python.exe -m PyInstaller packaging\VisionInspect.spec
 ```
 
-Hasil ada di `dist/VisionInspect.exe` (Windows) atau `dist/VisionInspect` (Linux).
+Hasil one-folder di `dist\VisionInspect\`.

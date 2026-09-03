@@ -1,191 +1,123 @@
-# VisionInspect — Architecture Document
+# VisionInspect — Arsitektur
 
-## Overview
+Aplikasi **satu proses, multi-thread**. Semua komunikasi antar-thread lewat Qt signal/slot + antrean berukuran terbatas (drop-oldest). GUI tidak pernah memanggil fungsi blocking.
 
-VisionInspect is a single-process, multi-threaded desktop application for industrial visual inspection. It runs **100% locally on CPU** using Anomalib for anomaly detection and OpenVINO for inference.
+## Thread
 
-## Architecture
+| Thread | Isi | Catatan |
+|--------|-----|---------|
+| Main (GUI) | Event loop PySide6, semua halaman | `gui/main_window.py` |
+| Camera | Grab frame OpenCV, hitung FPS | `gui/camera_worker.py` → `core/camera.py` |
+| Inference | Jalankan engine per ROI, hasil dikirim via signal | `gui/inference_worker.py` → `core/inference.py` |
+| PLC poll | Baca/tulis coil FX, reconnect otomatis | `plc/fx_link.py` |
+| Watchdog | Pantau thread; restart kalau hang | `core/watchdog.py` |
+| Training | Dibuat saat tombol TRAIN ditekan, dibuang setelah selesai | `gui/training_worker.py` → `core/training.py` |
+| Video replay | Opsional — putar ulang rekaman untuk uji | `gui/video_replay_worker.py` |
+| Flask API | Opsional, bind 127.0.0.1 saja | `api/flask_app.py` |
+
+## Pipeline inspeksi (mode RUN)
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    VisionInspect (satu proses)            │
-│                                                          │
-│  ┌────────────┐   frame    ┌─────────────────┐          │
-│  │ Camera     │──queue────▶│ Inference Engine │          │
-│  │ Thread     │            │ (OpenVINO, CPU)  │          │
-│  └────────────┘            └───────┬─────────┘          │
-│                                    │ result (score,     │
-│                                    │ heatmap, OK/NG)    │
-│                     ┌──────────────┼──────────────┐     │
-│                     ▼              ▼              ▼     │
-│              ┌──────────┐   ┌──────────┐   ┌──────────┐ │
-│              │ GUI      │   │ PLC I/O  │   │ Logger & │ │
-│              │ (PySide6 │   │ Thread   │   │ History  │ │
-│              │ main     │   │ (serial) │   │ (SQLite) │ │
-│              │ thread)  │   └──────────┘   └──────────┘ │
-│              └──────────┘                               │
-│                                                         │
-│  ┌──────────────────────────────────────────────┐       │
-│  │ Training/Rebuild Worker (QThread terpisah,   │       │
-│  │ dipicu manual: teaching & redefinition)      │       │
-│  └──────────────────────────────────────────────┘       │
-└──────────────────────────────────────────────────────────┘
+Camera frame
+  │
+  ├─ 1. Part Presence Check  (core/part_check.py) — gate CV klasik sebelum QC
+  │      • disabled   → langsung ke QC (kompatibilitas lama)
+  │      • incomplete → BLOK QC + stop timer NG  (fail-safe: cegah NG palsu)
+  │      • active     → evaluate_part_presence()
+  │            ready=False → "⏳ Menunggu Part", skip QC
+  │            ready=True  → lanjut
+  │
+  ├─ 2. (opsional) YOLO class pre-filter  (core/yolo_filter.py)
+  │      Kalau expected_classes diset & part kelasnya tidak terdeteksi → NG (class mismatch),
+  │      tanpa masuk scoring. Butuh `ultralytics`; kalau tak terpasang, langkah ini dilewati.
+  │
+  ├─ 3. QC inference per ROI  (core/inference.py)
+  │      Engine dipilih otomatis dari file meta di samping model.xml:
+  │        • yolo      → klasifikasi OK/NG per crop (probabilitas kelas)   [dianjurkan]
+  │        • anomaly   → PatchCore / EfficientAd → skor anomali → similarity + heatmap
+  │        • simple    → z-score statistik piksel (fallback tanpa PyTorch)
+  │      Output per ROI: score [0..1] (1.0 = mirip OK), judgement OK/NG, heatmap (anomaly saja)
+  │
+  ├─ 4. Agregasi ROI → OK/NG keseluruhan
+  │
+  └─ 5. Kirim ke PLC + update counter + simpan history
+         • ke PLC: HANYA pulse coil OK. NG diputuskan PLC dari ketiadaan OK.
+         • history: semua NG disimpan; OK di-sampling (default 10%)
 ```
 
-## Threading Model
+**Fail-safe:** error inferensi apa pun → judgement NG. Part-check incomplete/exception → blok QC. Kamera lepas / model tak termuat → heartbeat ke PLC berhenti → PLC menyalakan lampu fault (lini berhenti memvonis).
 
-| Thread | Purpose | Priority |
-|--------|---------|----------|
-| **Main (GUI)** | PySide6 event loop | Normal |
-| **Camera** | Frame grabbing via OpenCV | High |
-| **Inference** | OpenVINO inference | High |
-| **PLC I/O** | Serial communication + reconnect | Normal |
-| **Training** | Anomalib training (spawned on demand) | Low |
-| **Watchdog** | Monitor thread health | Normal |
-| **Flask API** | (Optional) REST API | Low |
+## Engine training
 
-**Communication:**
-- Camera → Inference: `queue.Queue(maxsize=2)` with drop-oldest-frame policy
-- Inference → GUI: Qt signals (thread-safe `Qt.QueuedConnection`)
-- PLC → GUI: Qt signals + callbacks
-- Training → GUI: Progress callbacks + hot-swap model pointer
+| Engine | Butuh | Output | Kapan |
+|--------|-------|--------|-------|
+| **YOLO** (klasifikasi) | `ultralytics` (PC dev) | `model/openvino/` + `yolo_meta.json` | Default, dianjurkan |
+| PatchCore | `anomalib` + torch | OpenVINO IR + `norm.json` (kalibrasi skor) | Few-shot, ada heatmap |
+| EfficientAd | `anomalib` + torch | OpenVINO IR + `norm.json` | Lebih cepat dari PatchCore |
+| Simple | numpy/opencv saja | `mean.npy` + `std.npy` | Fallback kalau torch mati |
 
-## Data Flow
+Semua engine di-export ke **OpenVINO** untuk runtime (opsional INT8 PTQ). Model lama dipakai terus sampai model baru siap → **hot-swap atomik** (`InferenceEngine.load_model`).
 
-### Inspection Flow (RUN mode)
+Training di Windows sering gagal (`WinError 1114` saat torch load). Jalur alternatif: `retrain_wsl.bat` → `tools/train_cli.py` di WSL, tanpa Qt.
+
+## Program & Template
+
 ```
-Camera → frame → crop ROI → resize → OpenVINO infer → 
-  score + heatmap → judge (OK/NG) → update GUI → send to PLC → save history
-```
-
-### Training Flow (TEACH mode)
-```
-User captures OK/NG images → saves to programs/<name>/images/{ok,ng} →
-  Anomalib Folder datamodule → PatchCore.fit() → 
-  calibrate threshold → export OpenVINO IR → INT8 PTQ → 
-  save version → hot-swap model atomically
+data/programs/<nama-program>/
+├── config.json              program-level (kamera, PLC)
+├── metadata.json
+└── templates/<template_id>/
+    ├── config.json          roi, threshold, algorithm, part-check, yolo_pretrained
+    ├── images/{ok,ng}/       foto training
+    ├── images/corrections/{ok,ng}/   dari redefinition loop
+    ├── model/
+    │   ├── openvino/         model.xml + norm.json / yolo_meta.json / model_meta.json
+    │   └── openvino_int8/    versi INT8 (opsional)
+    └── versions/v1, v2, ...  snapshot untuk rollback
 ```
 
-### Redefinition Flow
+- **Program** = satu setup lini. **Template** = satu jenis part dalam program itu.
+- Multi-ROI (maks 4), tiap ROI bisa punya threshold sendiri + polygon mask (`core/roi_mask.py`).
+- Ganti template lewat GUI atau sinyal PLC (`switch_template`).
+
+## Redefinition loop
+
 ```
-Select history entry → mark correction → image → corrections/{ok,ng} →
-  Rebuild model (same as training, combined dataset) →
-  new version → hot-swap (old model still serving) → audit trail
-```
-
-## Module Map
-
-### `visioninspect/core/` — Business Logic
-
-| File | Responsibility |
-|------|---------------|
-| `camera.py` | Camera device abstraction, frame grabbing thread, FPS counter |
-| `inference.py` | OpenVINO inference engine, model hot-swap, heatmap overlay |
-| `training.py` | Anomalib pipeline, threshold calibration, INT8 quantization |
-| `program.py` | Program CRUD, versioning, image management, atomic writes |
-| `redefinition.py` | Correction logic, rebuild orchestrator, audit trail |
-| `watchdog.py` | Thread health monitoring, auto-restart on hang |
-
-### `visioninspect/plc/` — PLC Communication
-
-| File | Responsibility |
-|------|---------------|
-| `serial_manager.py` | RS232/RS485 serial, auto-reconnect, RTS control, RX/TX logging |
-| `modbus_rtu.py` | Modbus register map, coil operations, command polling |
-| `ascii_protocol.py` | STX/ETX framing, XOR checksum, command parsing |
-
-### `visioninspect/gui/` — User Interface
-
-| File | Responsibility |
-|------|---------------|
-| `main_window.py` | Main window with tabs, menu, status bar, theme loading |
-| `pages/run_page.py` | Operator screen: live view, big judgement, counters |
-| `pages/teach_page.py` | Teaching: capture, gallery, train, threshold, histogram |
-| `pages/history_page.py` | History table, filter, correction actions |
-| `pages/settings_page.py` | All configuration: camera, ROI, PLC, model, retention |
-| `pages/diagnostics_page.py` | Live logs, performance metrics, PLC test |
-| `theme.qss` | Dark navy Qt stylesheet |
-
-### `visioninspect/storage/` — Data Persistence
-
-| File | Responsibility |
-|------|---------------|
-| `db.py` | SQLite with WAL mode, inspection history, counters, audit |
-| `retention.py` | Auto-purge old data by age, OK image sampling |
-
-### `visioninspect/api/` — Optional REST API
-
-| File | Responsibility |
-|------|---------------|
-| `flask_app.py` | Flask on 127.0.0.1, API key auth, status/trigger/history endpoints |
-
-## Technology Stack
-
-| Component | Technology | Rationale |
-|-----------|-----------|-----------|
-| Language | Python 3.11 | Ecosystem, team skill |
-| GUI | PySide6 (Qt) | Native feel, threading, GPU rendering |
-| AI | Anomalib (PatchCore) | Few-shot anomaly detection |
-| Inference | OpenVINO | CPU optimization, INT8 quantization |
-| Camera | OpenCV | USB/GigE, wide driver support |
-| PLC | pyserial + pymodbus | RS232/RS485, Modbus RTU |
-| Database | SQLite (WAL) | Zero-config, embedded |
-| API | Flask | Lightweight, localhost only |
-| Packaging | PyInstaller | Single-folder deployment |
-
-## Configuration
-
-Configuration is stored as JSON at `~/.visioninspect/config.json` with atomic writes (write-to-temp → rename). Defaults are hardcoded and merged with user config on load.
-
-Key sections:
-- `camera`: device_index, resolution, fps, exposure
-- `roi`: region of interest coordinates
-- `model`: algorithm, backbone, threshold
-- `plc`: serial parameters, protocol selection
-- `flask_api`: enabled, port, api_key
-- `history`: retention policy
-- `logging`: level, file rotation
-
-## Data Storage
-
-### Directory Structure
-```
-~/.visioninspect/
-├── config.json
-├── logs/
-│   ├── app.log
-│   ├── plc.log
-│   ├── inference.log
-│   ├── camera.log
-│   └── training.log
-├── database.db (SQLite WAL)
-└── programs/
-    ├── <program-name>/
-    │   ├── config.json
-    │   ├── metadata.json
-    │   ├── model/
-    │   │   ├── openvino/
-    │   │   └── openvino_int8/
-    │   ├── images/
-    │   │   ├── ok/
-    │   │   ├── ng/
-    │   │   └── corrections/
-    │   │       ├── ok/
-    │   │       └── ng/
-    │   ├── versions/
-    │   │   ├── v1/
-    │   │   ├── v2/
-    │   │   └── ...
-    │   └── audit/
-    └── ...
+Pilih baris history salah → tandai koreksi (OK↔NG) → gambar masuk corrections/{ok,ng}
+  → Rebuild (dataset gabungan) → versi model baru → hot-swap → audit_log
 ```
 
-## Safety & Fail-Safe
+## Penyimpanan
 
-- **Inference error** → judgement = NG + alarm (fail-safe)
-- **Serial error** → buffer results, retry, GUI alarm
-- **Camera disconnected** → auto-retry, clear display
-- **Training error** → log full trace, restore previous model
-- **Thread hang** → watchdog auto-restart after timeout
-- **Config write** → atomic (temp file + rename)
-- **Database** → WAL mode for crash recovery
+- **SQLite (WAL)** — `storage/db.py`: `inspection_history`, `users`, `counters`, `audit_log`. Zero-config, tahan crash.
+- **PostgreSQL** — `storage/postgres_db.py`: opsional, aktif lewat config `postgresql.enabled`. Untuk akun (`qc_user_accounts`) + push hasil terpusat multi-PC.
+- **Autentikasi:** kalau PostgreSQL aktif **dan** terjangkau → login lewat PG; kalau tidak → fallback ke tabel `users` SQLite lokal (supaya lini tidak berhenti saat server DB mati).
+- **Retensi** — `storage/retention.py`: auto-purge per umur, sampling gambar OK.
+- **Config** — JSON di `data/config.json` (atau `~/.visioninspect/config.json`). Atomic write (temp + rename). Default hardcoded di `utils/config.py::Config.DEFAULTS`, di-merge dengan config user saat load.
+
+## PLC — Mitsubishi FX Computer Link
+
+Modbus RTU & ASCII **sudah dihapus**: FX3U tanpa adaptor `-MB` tidak menyediakan MODBUS slave. Transport sekarang memakai protokol port pemrograman (jalur yang sama dengan GX Works2), lewat library `fxplc`.
+
+- Format serial terkunci **7E1**; hanya port + baudrate yang bisa diatur.
+- Nomor coil dipetakan langsung ke relay M (coil 1 → M1). Peta di `plc/io_map.py`, bisa di-override lewat tab **I/O Settings**.
+- Kontrak dengan ladder: sistem hanya kirim OK + heartbeat; PLC yang pegang timing, urutan, dan vonis NG.
+
+Detail wiring, nomor coil, dan pemulihan lampu fault: [MANUAL_TEKNISI.md](MANUAL_TEKNISI.md).
+
+## REST API (opsional)
+
+Flask di `127.0.0.1:<port>`, auth API key. Aktif lewat config `flask_api.enabled`.
+
+| Endpoint | Method | Fungsi |
+|----------|--------|--------|
+| `/health` | GET | Ping |
+| `/status` | GET | Status sistem |
+| `/last_result` | GET | Hasil inspeksi terakhir |
+| `/trigger` | POST | Picu satu siklus inspeksi |
+| `/history` | GET | Riwayat inspeksi |
+| `/program/<name>/activate` | POST | Aktifkan program |
+
+## Stack
+
+Python 3.11 · PySide6 (Qt) · OpenVINO (runtime) · anomalib / ultralytics (training) · OpenCV (kamera) · fxplc (PLC) · SQLite / PostgreSQL · Flask · PyInstaller (packaging, lihat `packaging/VisionInspect.spec`).

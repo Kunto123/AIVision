@@ -2,9 +2,9 @@
 
 Fitur:
 - Output Settings: mode hasil Latching / One-Shot (+ One-Shot ON Time & Delay),
-  opsi coil BUSY / part_ready (default hanya OK/NG).
-- Assign I/O: nomor coil output (OK/NG/BUSY/part_ready) & input
-  (trigger/reset/switch_program) + program_register.
+  opsi coil BUSY / part_ready (default hanya coil OK — NG diputuskan PLC).
+- Assign I/O: nomor coil output (OK/BUSY/part_ready) & input
+  (trigger/reset/switch_template/ng_from_plc) + program_register.
 - I/O Monitor: status coil real-time (live, polling 1 detik).
 
 Perubahan di sini TIDAK menyentuh koneksi serial — itu tetap di Settings → PLC.

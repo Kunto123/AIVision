@@ -1,7 +1,9 @@
 """
-VisionInspect - Inference Engine (OpenVINO)
-Menangani inferensi model OpenVINO, hot-swap model, double-buffer.
-ROI crop → resize → infer → heatmap overlay → score/judgement.
+VisionInspect - Inference Engine
+Jalankan inferensi per ROI + hot-swap model atomik (double-buffer, thread-safe).
+Alur: ROI crop → resize → infer → score/judgement (+ heatmap untuk mode anomaly).
+Mode dipilih otomatis dari file meta di samping model.xml:
+  yolo (klasifikasi OK/NG) | anomaly (PatchCore/EfficientAd via OpenVINO) | simple (z-score, tanpa torch).
 """
 
 import gc

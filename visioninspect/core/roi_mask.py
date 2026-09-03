@@ -1,18 +1,14 @@
 """
 VisionInspect — Polygon Mask per ROI
-=====================================
-Menolkan piksel di luar polygon (kontur part) di dalam crop ROI, SEBELUM
-resize ke input_size. Dipakai identik di training (`training_worker.py`)
-dan inference (`inference.py`) — kalau cuma diterapkan di satu sisi, model
-tidak pernah punya referensi "normal" untuk piksel yang ke-mask di sisi
-lain, dan hasilnya false NG bukannya perbaikan (PatchCore memory bank
-kosong untuk area itu → jarak fitur maksimal setiap saat).
+Menolkan piksel di luar polygon (kontur part) di dalam crop ROI, sebelum resize.
 
-Koordinat polygon SELALU dalam ruang ROI-lokal (0,0 = pojok kiri-atas
-crop, dalam ukuran asli ROI sebelum resize) — bukan koordinat frame penuh
-dan bukan koordinat input_size. Ini membuat polygon tetap valid walau
-input_size di config berubah; polygon baru perlu digambar ulang hanya
-kalau ROI itu sendiri (x/y/width/height) berubah.
+Wajib diterapkan IDENTIK di training (`training_worker.py`) dan inference
+(`inference.py`) — kalau hanya satu sisi, area yang ter-mask di sisi lain tidak
+punya referensi "normal" → false NG, bukan perbaikan.
+
+Koordinat polygon selalu ruang ROI-lokal (0,0 = pojok kiri-atas crop, ukuran
+asli sebelum resize), jadi tetap valid walau input_size berubah — hanya perlu
+digambar ulang kalau kotak ROI (x/y/width/height) berubah.
 """
 
 from typing import List, Optional, Sequence, Tuple

@@ -1,6 +1,9 @@
 """
 VisionInspect - Training Pipeline
-Anomalib-based training: PatchCore / EfficientAd → export OpenVINO → INT8 PTQ.
+Melatih model dari gambar OK/NG lalu export ke OpenVINO (opsional INT8 PTQ).
+Dua jalur terpisah, dipilih dari TrainingConfig.algorithm:
+  yolo                  → ultralytics (klasifikasi OK/NG), tanpa Anomalib
+  patchcore | efficientad → Anomalib + kalibrasi threshold + norm.json
 """
 
 import json

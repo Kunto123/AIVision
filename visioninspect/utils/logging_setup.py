@@ -1,7 +1,7 @@
 """
 VisionInspect - Logging Setup
-Logging terstruktur dengan rotating file handler.
-Tiga log file terpisah: app, plc, inference.
+Logging terstruktur dengan rotating file handler, satu file per subsistem:
+app.log + plc / inference / camera / training / api.
 """
 
 import logging

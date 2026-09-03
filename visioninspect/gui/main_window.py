@@ -1,7 +1,8 @@
 """
 VisionInspect - Main Window
-Window utama dengan tab navigasi: RUN, TEACH, HISTORY, SETTINGS, DIAGNOSTICS.
-Mengelola CameraWorker, inferensi, ProgramManager, dan komponen global.
+Window utama + 7 tab (RUN, TEACH, HISTORY, SETTINGS, DIAGNOSTICS, Akun, I/O Settings),
+login role admin/operator. Orkestrator pusat: memiliki CameraThread, InferenceWorker,
+PLC link, ProgramManager, watchdog, dan menghubungkan sinyal antar-komponen.
 """
 
 import os

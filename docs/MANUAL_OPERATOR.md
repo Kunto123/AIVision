@@ -1,127 +1,92 @@
 # VisionInspect — Manual Operator
 
-## Pengenalan
+Sistem inspeksi visual otomatis. Kamera memotret part, model AI (dilatih dari contoh part OK) memutuskan **OK** atau **NG**, hasil dikirim ke PLC.
 
-VisionInspect adalah sistem inspeksi visual industri berbasis AI. Aplikasi ini membantu operator memeriksa produk secara otomatis menggunakan kamera dan model AI yang telah dilatih dengan contoh produk OK (dan opsional NG).
+## Login
 
-## Antarmuka
+Saat aplikasi dibuka, masuk dengan username/password atau tap kartu RFID.
 
-Aplikasi memiliki 5 halaman utama:
+- **Operator** — hanya bisa membuka tab **RUN**.
+- **Admin** — semua tab (TEACH, HISTORY, SETTINGS, DIAGNOSTICS, Akun, I/O Settings).
 
-### 1. RUN — Mode Inspeksi
+Login pertama kali (instalasi baru tanpa PostgreSQL): `admin` / `admin`, lalu wajib ganti password. Kalau sistem pakai PostgreSQL terpusat, akun dibuat teknisi/admin di server.
 
-**Tampilan utama operator.** Menampilkan:
-- **Live View** (besar): Gambar langsung dari kamera
-- **Judgement** (raksasa): OK (hijau) atau NG (merah) — terbaca dari jarak 2-3 meter
-- **Skor Anomali**: Angka 0.0–1.0 (semakin tinggi = semakin anomali)
-- **Counter**: Total inspeksi, jumlah OK, jumlah NG
-- **Status PLC**: Terhubung/terputus (hijau/merah)
+## Halaman
 
-**Mode Trigger:**
-- **Kontinu**: Inspeksi otomatis setiap frame
-- **PLC**: Inspeksi dipicu dari sinyal PLC
-- **Manual**: Tekan tombol "Trigger Sekarang"
+### RUN — inspeksi (operator)
 
-### 2. TEACH — Teaching & Training
+- **Live View** — gambar kamera + kotak ROI (hijau = area QC, biru = gate part-check).
+- **Judgement raksasa** — OK (hijau) / NG (merah), terbaca dari jarak.
+- **Skor** — 0.00–1.00 (semakin tinggi = semakin mirip part OK).
+- **Counter OK / NG**.
+- **Status PLC** — hijau terhubung / merah terputus.
+- **Selektor template** — pilih jenis part yang sedang diperiksa (harus sama dengan pilihan di TEACH).
+- Pesan **"⏳ Menunggu Part"** = gate part-check belum melihat part di posisi. Pesan **"⚠️ Part-check belum lengkap"** = konfigurasi gate belum selesai, minta admin melengkapi di TEACH.
 
-**Untuk membuat dan melatih model AI.**
+Mode trigger (diatur admin di SETTINGS): **Kontinu** (inspeksi tiap frame) atau **PLC** (inspeksi saat ada sinyal trigger).
 
-**Langkah-langkah:**
-1. **Capture OK**: Ambil gambar produk yang baik (minimal 1, disarankan 10-30)
-2. **Capture NG**: (Opsional) Ambil gambar produk cacat
-3. **Train**: Tekan tombol TRAIN untuk memulai training
-   - Progress bar menunjukkan status
-   - Setelah selesai, threshold otomatis dikalibrasi
-4. **Slider Threshold**: Geser untuk mengubah sensitivitas deteksi
+### TEACH — teaching & training (admin)
 
-### 3. HISTORY — Riwayat Inspeksi
+1. **Capture / Import OK** — kumpulkan foto part baik (min. beberapa, disarankan 10–30).
+2. **Capture / Import NG** — opsional, foto part cacat.
+3. Atur **ROI** (area yang diperiksa) dan opsional **Gate ROI** + Part Presence Check.
+4. Tekan **TRAIN** — tunggu progress selesai; threshold dikalibrasi otomatis.
+5. Cek **histogram** skor OK vs NG; geser **slider threshold** kalau perlu.
+6. Buka **RUN** untuk verifikasi.
 
-**Daftar semua hasil inspeksi.**
+Engine (YOLO / PatchCore / EfficientAd) dipilih di TEACH. **YOLO dianjurkan** untuk hasil paling stabil.
 
-- **Filter**: Lihat semua, OK saja, atau NG saja
-- **Koreksi**: Pilih hasil yang salah → klik "Tandai OK" atau "Tandai NG"
-- **Rebuild Model**: Setelah koreksi, rebuild untuk meningkatkan akurasi
-- **Rollback**: Kembali ke versi model sebelumnya
+### HISTORY — riwayat & koreksi (admin)
 
-### 4. SETTINGS — Pengaturan
+- Tabel semua hasil, filter OK / NG / semua.
+- **Koreksi**: pilih baris yang salah → "Tandai OK" / "Tandai NG".
+- **Rebuild Model**: setelah beberapa koreksi, rebuild → model baru otomatis dipakai (hot-swap).
+- **Rollback**: kembali ke versi model sebelumnya.
 
-**Konfigurasi sistem:**
-- **Kamera**: Device index, resolusi, FPS, exposure
-- **ROI**: Posisi dan ukuran region yang diperiksa
-- **PLC**: Mode (RS232/RS485), port, baudrate, protokol (Modbus/ASCII)
-- **Model AI**: Algoritma (PatchCore/EfficientAd), backbone
-- **Riwayat**: Retensi data (hari), sampling OK
-- **Flask API**: Aktif/nonaktif, port
-- **Bahasa**: Indonesia/English
+### SETTINGS — konfigurasi (admin)
 
-### 5. DIAGNOSTICS — Diagnostik
+Kamera (device, resolusi, FPS, exposure) · ROI · PLC (port, baudrate) · model & threshold · retensi history · Flask API · bahasa.
 
-**Untuk troubleshooting:**
-- **Live Logs**: Output log real-time
-- **Performa**: RAM, CPU, FPS kamera, latensi inferensi
-- **Thread Status**: Status camera, inference, PLC, training
-- **Tes PLC**: Kirim frame uji ke PLC
+### DIAGNOSTICS — troubleshooting (admin)
 
-## Alur Kerja Teaching
+Log live, RAM/CPU, FPS kamera, latensi inferensi, status thread, tes kirim sinyal PLC. Auto-refresh ±2 detik.
 
-```
-1. Setup kamera → atur posisi dan fokus
-2. Buka tab TEACH
-3. Capture 10-30 gambar OK
-4. (Opsional) Capture beberapa gambar NG
-5. Tekan TRAIN → tunggu selesai
-6. Cek threshold di histogram
-7. Buka tab RUN untuk verifikasi
-```
+### Akun / I/O Settings (admin)
 
-## Alur Koreksi (Redefinition)
+CRUD user + bind RFID · pemetaan coil PLC + mode output hasil (latching / one-shot) + monitor coil live.
 
-```
-1. Buka tab HISTORY
-2. Pilih hasil yang salah
-3. Klik "Tandai OK" atau "Tandai NG"
-4. Klik "Rebuild Model" → model baru dibuat dengan data koreksi
-5. Model baru otomatis digunakan (hot-swap)
-```
+## Alur kerja singkat
+
+**Teaching:** setup kamera → tab TEACH → capture 10–30 OK → (opsional NG) → TRAIN → cek histogram → verifikasi di RUN.
+
+**Koreksi:** tab HISTORY → pilih hasil salah → tandai → Rebuild Model → model baru dipakai otomatis.
 
 ## Troubleshooting
 
 | Masalah | Solusi |
 |---------|--------|
-| Kamera tidak terdeteksi | Cek device index di SETTINGS, coba 0, 1, 2 |
-| Gambar gelap/terlalu terang | Atur exposure di SETTINGS |
-| Training gagal | Pastikan ada minimal 2 gambar OK (PatchCore/EfficientAd) |
-| False positive (OK dinyatakan NG) | Turunkan threshold (geser ke kiri) |
-| False negative (NG dinyatakan OK) | Naikkan threshold (geser ke kanan) |
-| PLC tidak terhubung | Cek kabel, port COM, baudrate |
-| Aplikasi lambat | Turunkan resolusi kamera, gunakan EfficientAd |
+| Kamera tidak terdeteksi | SETTINGS → coba device index 0, 1, 2 |
+| Gambar gelap / terlalu terang | SETTINGS → atur exposure |
+| Training gagal | Pastikan ada cukup gambar OK; untuk YOLO/anomali butuh PyTorch (lihat teknisi) |
+| OK dinyatakan NG (false NG) | Turunkan threshold (slider ke kiri) atau tambah foto OK lalu retrain |
+| NG dinyatakan OK (false OK) | Naikkan threshold (slider ke kanan) atau tambah foto NG lalu retrain |
+| Selalu "⏳ Menunggu Part" | Gate ROI / Part Presence Check salah setel — minta admin cek di TEACH |
+| PLC tidak terhubung | Cek kabel, port COM, baudrate (lihat teknisi) |
+| Aplikasi lambat | Turunkan resolusi kamera; pakai engine YOLO atau EfficientAd |
 
-## Lampu Fault PLC Menyala (Y002) — Prosedur Pemulihan
+## Lampu Fault PLC menyala — prosedur pemulihan
 
-**Untuk operator.** Lampu fault di panel menyala berarti sistem pengawas PLC
-mendeteksi sistem inspeksi tidak sehat: aplikasi ditutup/mati, kamera lepas,
-model tidak termuat, atau komunikasi terputus lebih dari ±10 detik. Selama
-lampu ini menyala, **lini tidak memvonis apa pun** — ini memang disengaja,
-supaya part tidak lolos tanpa diperiksa.
+Lampu fault di panel menyala = PLC mendeteksi sistem inspeksi tidak sehat (aplikasi mati, kamera lepas, model tak termuat, atau komunikasi putus > ±10 detik). Selama lampu menyala, **lini tidak memvonis apa pun** — ini disengaja supaya part tidak lolos tanpa diperiksa.
 
-### Cara pulihkan
+**Cara pulihkan:**
 
-1. Pastikan aplikasi VisionInspect sudah jalan normal lagi (kamera aktif,
-   model termuat — status PLC hijau "OK Terhubung" di layar RUN).
-2. Tekan tombol **reset (X001)** di panel selama **1–2 detik**, lalu lepas.
-3. Lampu fault (Y002) padam — lini siap menerima part lagi.
+1. Pastikan VisionInspect jalan normal lagi (kamera aktif, model termuat, status PLC hijau di layar RUN).
+2. Tekan tombol **reset di panel** selama **1–2 detik**, lalu lepas.
+3. Lampu fault padam — lini siap menerima part lagi.
 
-### Catatan penting
+**Catatan:**
 
-- **Reset counter?** Kalau sekalian ingin mengembalikan counter OK/NG
-  di panel ke nol, tahan tombol reset **≥ 3 detik** (bukan hanya 1–2 detik).
-- Lampu fault TIDAK padam dengan sendirinya meski aplikasi sudah normal —
-  wajib tekan reset X001. Ini desain yang benar, bukan rusak.
-- Saat admin melakukan teaching/training di VisionInspect, heartbeat
-  inspeksi memang berhenti → lampu fault akan menyala setelah ±10 detik.
-  Itu normal: lini sedang memang tidak bisa menginspeksi. Pulihkan dengan
-  langkah di atas setelah training selesai.
-- Kalau lampu fault menyala berkali-kali padahal tidak ada training:
-  periksa kamera (sering lepas?) dan log aplikasi (`data/logs/app.log`),
-  lalu laporkan ke teknisi.
-
+- Untuk sekalian me-nol-kan counter OK/NG di panel: tahan tombol reset **≥ 3 detik**.
+- Lampu fault **tidak padam sendiri** meski aplikasi sudah normal — wajib tekan reset. Ini benar, bukan rusak.
+- Saat admin melakukan training, heartbeat berhenti → lampu fault menyala setelah ±10 detik. Normal. Pulihkan dengan langkah di atas setelah training selesai.
+- Kalau lampu fault menyala berulang tanpa training: periksa kamera (sering lepas?) dan `data/logs/app.log`, laporkan ke teknisi.

@@ -1,8 +1,8 @@
 """
 VisionInspect - Flask API Internal (Opsional)
-REST API lokal di 127.0.0.1 untuk integasi eksternal.
-Hanya aktif jika di-setting di config.
-Bind HANYA ke localhost.
+REST API lokal untuk integrasi eksternal — bind HANYA ke 127.0.0.1, auth API key.
+Aktif hanya jika di-set di config (flask_api.enabled). Jalan di thread terpisah.
+Endpoint: /health /status /last_result /trigger /history /program/<name>/activate
 """
 
 import json

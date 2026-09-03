@@ -83,6 +83,9 @@ temp/
 datasets/
 pre_trained/
 results/
+tests/
+packaging/
+docs
 
 # --- Offline deployment bundle (built by tools/prepare_offline_bundle.bat) ---
 offline_bundle/

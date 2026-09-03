@@ -58,7 +58,7 @@ Camera frame
 
 Semua engine di-export ke **OpenVINO** untuk runtime (opsional INT8 PTQ). Model lama dipakai terus sampai model baru siap → **hot-swap atomik** (`InferenceEngine.load_model`).
 
-Training di Windows sering gagal (`WinError 1114` saat torch load). Jalur alternatif: `retrain_wsl.bat` → `tools/train_cli.py` di WSL, tanpa Qt.
+Training di Windows sering gagal (`WinError 1114` saat torch load). Jalur alternatif: jalankan `tools/train_cli.py` di venv WSL, tanpa Qt (lihat [MANUAL_TEKNISI.md](MANUAL_TEKNISI.md#training-pytorch)).
 
 ## Program & Template
 
@@ -120,4 +120,4 @@ Flask di `127.0.0.1:<port>`, auth API key. Aktif lewat config `flask_api.enabled
 
 ## Stack
 
-Python 3.11 · PySide6 (Qt) · OpenVINO (runtime) · anomalib / ultralytics (training) · OpenCV (kamera) · fxplc (PLC) · SQLite / PostgreSQL · Flask · PyInstaller (packaging, lihat `packaging/VisionInspect.spec`).
+Python 3.11 · PySide6 (Qt) · OpenVINO (runtime) · anomalib / ultralytics (training) · OpenCV (kamera) · fxplc (PLC) · SQLite / PostgreSQL · Flask · PyInstaller (packaging one-folder, spec dikelola per-mesin).

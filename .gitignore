@@ -86,3 +86,10 @@ results/
 
 # --- Offline deployment bundle (built by tools/prepare_offline_bundle.bat) ---
 offline_bundle/
+
+docs/KNOWN_ISSUES.md
+docs/PROGRESS.md
+
+retrain_wsl.bat
+run.sh
+setup.bat

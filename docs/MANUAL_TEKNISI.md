@@ -87,10 +87,29 @@ Engine YOLO / PatchCore / EfficientAd butuh PyTorch. Di Windows, torch sering ga
 | Jalur | Cara |
 |-------|------|
 | Windows langsung | Tombol TRAIN di TEACH — jalan kalau torch Windows sehat |
-| **WSL** (disarankan untuk training) | `retrain_wsl.bat` → menjalankan `tools/train_cli.py` di `.venv` WSL, tanpa Qt. Flow: capture di Windows → tutup app → `retrain_wsl.bat <Program> <TemplateID>` → buka app lagi |
+| **WSL** (disarankan untuk training) | Jalankan `tools/train_cli.py` di venv WSL, tanpa Qt (lihat langkah di bawah) |
 | Tanpa torch | Engine otomatis jatuh ke `SimpleThresholdTrainer` (z-score piksel, akurasi terbatas) |
 
-Setup WSL sekali: `setup.bat --wsl` (atau manual `python3 -m venv .venv && .venv/bin/pip install -r requirements_dev.txt`).
+### Training via WSL
+
+Setup venv WSL sekali (dari root proyek di dalam WSL):
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements_dev.txt
+```
+
+Tiap kali retrain:
+
+```bash
+# 1. Capture OK/NG lewat GUI di Windows, lalu TUTUP aplikasi
+# 2. Di WSL, dari root proyek:
+source .venv/bin/activate
+python tools/train_cli.py --program <Program> --template <TemplateID>
+# 3. Buka lagi aplikasi di Windows — model baru otomatis dipakai
+```
+
+Nama template ada di `data/programs/<Program>/templates/`.
 
 `edge_mode: true` di `data\config.json` → torch tidak dimuat saat start (PC edge inference-only, hemat RAM + waktu boot).
 
@@ -130,7 +149,7 @@ Untuk deployment multi-PC: akun aplikasi (`qc_user_accounts`) dan push hasil ins
 - Reset config: hapus `data\config.json` (akan dibuat ulang dari default).
 
 ### Training gagal di Windows
-- Kemungkinan `WinError 1114`. Pakai jalur WSL (`retrain_wsl.bat`).
+- Kemungkinan `WinError 1114`. Pakai jalur WSL (lihat *Training via WSL* di atas).
 
 ## Performa — target
 
@@ -148,8 +167,10 @@ Monitor lewat tab **DIAGNOSTICS**: RAM (cek memory leak), latensi inferensi (avg
 
 ## Packaging
 
+Build one-folder pakai PyInstaller. File `.spec` dikelola per-mesin build (tidak ikut repo karena berisi path lokal):
+
 ```batch
-.vision\Scripts\python.exe -m PyInstaller packaging\VisionInspect.spec
+.vision\Scripts\python.exe -m PyInstaller <VisionInspect.spec>
 ```
 
-Hasil one-folder di `dist\VisionInspect\`.
+Hasil di `dist\VisionInspect\`.

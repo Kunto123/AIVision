@@ -17,12 +17,17 @@ Aplikasi desktop untuk **inspeksi visual industri berbasis AI**, berjalan **100%
 ```batch
 git clone <repo-url> VisionInspect
 cd VisionInspect
-
-setup.bat            :: buat venv .vision\ + install requirements.txt
-run.bat             :: jalankan aplikasi
+run.bat
 ```
 
-`run.bat` otomatis membuat venv kalau belum ada, meng-set `HF_HUB_OFFLINE=1`, dan mengarahkan folder data ke `data\` di dalam proyek.
+Saat pertama dijalankan, `run.bat` otomatis membuat venv `.vision\`, meng-install `requirements.txt`, meng-set `HF_HUB_OFFLINE=1`, dan mengarahkan folder data ke `data\` di dalam proyek — lalu menjalankan aplikasi.
+
+Setup manual (kalau perlu):
+
+```batch
+python -m venv .vision
+.vision\Scripts\python.exe -m pip install -r requirements.txt
+```
 
 > ⚠️ Jangan pakai launcher `py`. Selalu `.vision\Scripts\python.exe` atau aktifkan venv dulu (`.vision\Scripts\activate`).
 
@@ -69,9 +74,11 @@ Training memerlukan PyTorch. Di Windows PyTorch sering bermasalah (WinError 1114
 | Jalur | Kapan | Cara |
 |-------|-------|------|
 | **Dalam aplikasi** (tab TEACH) | PyTorch Windows jalan, atau pakai engine *Simple* (tanpa torch) | Tombol **TRAIN** di tab TEACH |
-| **CLI via WSL** | PyTorch Windows tidak jalan | `retrain_wsl.bat` (interaktif) atau `retrain_wsl.bat <Program> <TemplateID>` — memanggil `tools/train_cli.py` di dalam `.venv` WSL |
+| **CLI via WSL** | PyTorch Windows tidak jalan | Di WSL (venv terpisah): `python tools/train_cli.py --program <Program> --template <TemplateID>` — tanpa Qt |
 
 Kalau PyTorch tidak tersedia sama sekali, engine otomatis jatuh ke `SimpleThresholdTrainer` (statistik piksel, akurasi terbatas).
+
+Detail jalur WSL: [docs/MANUAL_TEKNISI.md](docs/MANUAL_TEKNISI.md#training-pytorch).
 
 ## Deployment offline (edge PC tanpa internet)
 
@@ -103,11 +110,13 @@ visioninspect/
 ├── storage/           SQLite (WAL) + PostgreSQL opsional + retensi
 └── utils/             config, i18n, logging
 
-tools/                 train_cli, bundling_weights, fx_probe, pg_add_user
+tools/                 train_cli, bundling_weights, fx_probe, pg_add_user, offline bundle
 tests/                 pytest (core, part_check, soak)
-docs/                  ARCHITECTURE + manual operator/teknisi + progress + known issues
+docs/                  ARCHITECTURE + manual operator + manual teknisi
 data/                  config.json, logs/, programs/, database (dibuat saat runtime)
 ```
+
+> Beberapa file bantu (`setup.bat`, `retrain_wsl.bat`, `run.sh`, spec PyInstaller, catatan progres internal) bersifat lokal per-mesin dan tidak ikut di repo — lihat `.gitignore`.
 
 ## Lisensi
 

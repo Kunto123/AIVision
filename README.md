@@ -1,18 +1,17 @@
 # VisionInspect
 
-Aplikasi desktop untuk **inspeksi visual industri berbasis AI**, berjalan **100% lokal di satu PC tanpa GPU** (CPU-only, offline total). Mirip sensor Keyence IV3, tapi model dilatih sendiri dari foto part.
+Aplikasi desktop untuk **inspeksi visual industri berbasis AI**, berjalan secara lokal. Model dilatih sendiri dari foto part.
 
-- **Teaching few-shot** — latih model dari belasan foto part OK (NG opsional).
-- **3 engine inferensi** — YOLO klasifikasi (dianjurkan), PatchCore, atau EfficientAd. Runtime produksi memakai **OpenVINO** (CPU, INT8).
-- **Redefinition loop** — operator koreksi hasil salah → rebuild → hot-swap model tanpa menghentikan lini.
-- **Komunikasi PLC** — Mitsubishi FX lewat *Computer Link* (jalur yang sama dengan GX Works2).
-- **GUI PySide6** — 7 halaman, login admin/operator, Bahasa Indonesia + English.
+- **Teaching** — latih model dari data foto part OK NG.
+- **3 engine inferensi** — YOLO klasifikasi (dianjurkan), PatchCore, atau EfficientAd. Runtime produksi memakai **OpenVINO**.
+- **Redefinition loop** — admin koreksi hasil salah → rebuild.
+- **Komunikasi PLC** — Mitsubishi FX lewat *Computer Link*.
 
 > Detail teknis: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · Panduan operator: [docs/MANUAL_OPERATOR.md](docs/MANUAL_OPERATOR.md) · Wiring & PLC: [docs/MANUAL_TEKNISI.md](docs/MANUAL_TEKNISI.md)
 
 ---
 
-## Quick Start (Windows, ada internet)
+## Quick Start
 
 ```batch
 git clone <repo-url> VisionInspect
@@ -54,8 +53,6 @@ WSL hanya dipakai untuk training (lihat *Training*). Aplikasi utama berjalan di 
 | `requirements_edge.txt` | PC edge (inference-only) | Praktis sama dengan `requirements.txt`. Training YOLO tetap di PC dev. |
 | `requirements_dev.txt` | PC dev / training | Tambahan `ultralytics` (YOLO), `lightning`, `nncf` (INT8) + tooling test. |
 
-Kombinasi versi yang sudah diuji E2E tercatat di komentar bagian atas tiap file `requirements*.txt`.
-
 ## Menjalankan
 
 ```batch
@@ -65,7 +62,7 @@ run.bat                                    :: cara normal
 
 Opsi CLI (`run.py` / `visioninspect/main.py`): `--config <path>`, `--data-dir <path>`, `--log-level DEBUG|INFO|WARNING|ERROR`, `--version`.
 
-**edge_mode** — set `"edge_mode": true` di `data\config.json` supaya `torch` tidak ikut dimuat saat start (hemat ±250 MB RAM / ±5 detik). PC edge inference-only wajib pakai ini.
+**edge_mode** — set `"edge_mode": true` di `data\config.json` supaya `torch` tidak ikut dimuat saat start. PC edge inference-only wajib pakai ini.
 
 ## Training
 
@@ -79,24 +76,6 @@ Training memerlukan PyTorch. Di Windows PyTorch sering bermasalah (WinError 1114
 Kalau PyTorch tidak tersedia sama sekali, engine otomatis jatuh ke `SimpleThresholdTrainer` (statistik piksel, akurasi terbatas).
 
 Detail jalur WSL: [docs/MANUAL_TEKNISI.md](docs/MANUAL_TEKNISI.md#training-pytorch).
-
-## Deployment offline (edge PC tanpa internet)
-
-Di PC dev (ada internet):
-
-```batch
-.vision\Scripts\python.exe tools\bundling_weights.py    :: unduh backbone pretrained ke cache HuggingFace
-tools\prepare_offline_bundle.bat                       :: buat offline_bundle\ (wheels + cache)
-```
-
-Di edge PC, dari folder bundle: `install_offline.bat` (lihat `tools/`), lalu `run.bat`.
-
-## Testing
-
-```batch
-.vision\Scripts\python.exe -m pytest tests\ -v
-.vision\Scripts\python.exe tests\test_soak.py          :: soak test (simulasi banyak frame)
-```
 
 ## Struktur proyek
 
@@ -115,9 +94,3 @@ tests/                 pytest (core, part_check, soak)
 docs/                  ARCHITECTURE + manual operator + manual teknisi
 data/                  config.json, logs/, programs/, database (dibuat saat runtime)
 ```
-
-> Beberapa file bantu (`setup.bat`, `retrain_wsl.bat`, `run.sh`, spec PyInstaller, catatan progres internal) bersifat lokal per-mesin dan tidak ikut di repo — lihat `.gitignore`.
-
-## Lisensi
-
-Proprietary — pemakaian internal.

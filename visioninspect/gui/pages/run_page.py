@@ -1,6 +1,7 @@
 """
 VisionInspect - Run Page
-Layar utama operator: live view, judgement OK/NG, counter, status PLC.
+Layar utama operator: live view, judgement 2-baris (tahap + status OK/NG),
+skor, counter, status PLC, rincian per-ROI.
 """
 
 from PySide6.QtCore import Qt, Slot
@@ -23,6 +24,12 @@ from visioninspect.utils.i18n import Translator
 
 class RunPage(QWidget):
     """Halaman RUN — mode inspeksi utama untuk operator."""
+
+    # Style label tahap (row atas judgement): abu-abu = netral, kuning = perlu perhatian
+    _STAGE_STYLE_NEUTRAL = (
+        "color: #9FB3C8; font-size: 18px; font-weight: bold; letter-spacing: 2px;")
+    _STAGE_STYLE_WARN = (
+        "color: #F59E0B; font-size: 18px; font-weight: bold; letter-spacing: 2px;")
 
     def __init__(self, translator: Translator, config, parent=None):
         super().__init__(parent)
@@ -85,11 +92,25 @@ class RunPage(QWidget):
         self._trigger_mode_label.setObjectName("secondaryText")
         ctrl_layout.addWidget(self._trigger_mode_label)
 
-        self._trigger_btn = QPushButton(self._tr.tr("run_trigger_now"))
+        self._trigger_btn = QPushButton("Start Cycle")
         self._trigger_btn.setObjectName("primaryButton")
+        self._trigger_btn.setToolTip(
+            "Mode PLC Trigger: jalankan 1 siklus inspeksi — setara dengan "
+            "tombol trigger eksternal lewat PLC.\n"
+            "Mode Auto Sequence: memotong cycle delay supaya part berikutnya "
+            "langsung diperiksa.\n"
+            "Ditolak selama siklus sebelumnya belum selesai.")
         ctrl_layout.addWidget(self._trigger_btn)
-
         layout.addWidget(cam_ctrl)
+
+        # === Active Template: besar di tengah (mudah terbaca operator) ===
+        self._template_title = QLabel("Template: —")
+        self._template_title.setAlignment(Qt.AlignCenter)
+        self._template_title.setStyleSheet(
+            "color: #E2E8F0; font-size: 34px; font-weight: bold;"
+            " letter-spacing: 1px;")
+        layout.addWidget(self._template_title)
+        layout.addSpacing(4)
 
         # === Main: Live View + Right Panel ===
         main_layout = QHBoxLayout()
@@ -123,11 +144,16 @@ class RunPage(QWidget):
         right_layout.setContentsMargins(16, 16, 16, 16)
         right_layout.setSpacing(12)
 
-        # Judgement big display
+        # Judgement — 2 baris: atas = tahap pipeline, bawah = status OK/NG tahap itu
+        self._stage_label = QLabel("SIAP")
+        self._stage_label.setAlignment(Qt.AlignCenter)
+        self._stage_label.setStyleSheet(self._STAGE_STYLE_NEUTRAL)
+        right_layout.addWidget(self._stage_label)
+
         self._judgement_label = QLabel("—")
         self._judgement_label.setObjectName("judgementOK")
         self._judgement_label.setAlignment(Qt.AlignCenter)
-        self._judgement_label.setMinimumHeight(100)
+        self._judgement_label.setMinimumHeight(80)
         self._judgement_label.setStyleSheet("color: #9FB3C8; font-size: 48px; font-weight: bold;")
         right_layout.addWidget(self._judgement_label)
 
@@ -244,12 +270,14 @@ class RunPage(QWidget):
 
     @Slot()
     def update_judgement(self, judgement: str, score: float):
-        """Update judgement display."""
+        """Tahap 2 (QC) — keputusan akhir barang OK/NG."""
+        self._stage_label.setText("JUDGEMENT")
+        self._stage_label.setStyleSheet(self._STAGE_STYLE_NEUTRAL)
         if judgement == "OK":
-            self._judgement_label.setText("OK " + self._tr.tr("ok"))
+            self._judgement_label.setText(self._tr.tr("ok"))
             self._judgement_label.setStyleSheet("color: #22C55E; font-size: 56px; font-weight: bold;")
         else:
-            self._judgement_label.setText("NG " + self._tr.tr("ng"))
+            self._judgement_label.setText(self._tr.tr("ng"))
             self._judgement_label.setStyleSheet("color: #EF4444; font-size: 56px; font-weight: bold;")
         self._score_label.setText(f"{score:.4f}")
 
@@ -267,13 +295,28 @@ class RunPage(QWidget):
         self._ng_counter.setText(str(ng_count))
 
     @Slot()
-    def set_plc_status(self, connected: bool):
+    def set_plc_status(self, connected: bool, port_open: bool = True):
+        """Badge status PLC di layar operator — TIGA keadaan, bukan dua.
+
+        "Port terbuka" (serial berhasil dibuka) dan "PLC menjawab" adalah
+        dua hal berbeda dengan tindakan perbaikan yang berbeda: kabel lepas
+        → cek kabel/konektor; PLC diam → cek daya PLC / rebutan port
+        (GX Works2). Dulu keduanya dilebur jadi hijau/merah dan badge bisa
+        hijau padahal PLC tidak menjawab sama sekali.
+        """
         if connected:
             self._plc_status_label.setText("OK " + self._tr.tr("connected"))
-            self._plc_status_label.setStyleSheet("color: #22C55E; font-weight: bold;")
+            self._plc_status_label.setStyleSheet(
+                "color: #22C55E; font-weight: bold;")
+        elif port_open:
+            self._plc_status_label.setText(
+                self._tr.tr("plc_no_response"))
+            self._plc_status_label.setStyleSheet(
+                "color: #F59E0B; font-weight: bold;")
         else:
             self._plc_status_label.setText(self._tr.tr("disconnected"))
-            self._plc_status_label.setStyleSheet("color: #EF4444; font-weight: bold;")
+            self._plc_status_label.setStyleSheet(
+                "color: #EF4444; font-weight: bold;")
 
     @Slot()
     def set_model_info(self, template_name: str, model_loaded: bool, threshold: float = 0.5):
@@ -289,15 +332,21 @@ class RunPage(QWidget):
     @Slot()
     def set_frame(self, pixmap: QPixmap):
         """Set live view pixmap (dari kamera)."""
+        # Tugas 2: FastTransformation (≈2,9 ms) vs Smooth (≈5,9 ms) — live
+        # view tidak perlu interpolasi halus; ROI overlay tetap jelas.
         self._live_view.setPixmap(pixmap.scaled(
             self._live_view.size(),
             Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
+            Qt.FastTransformation,
         ))
 
     @Slot()
     def set_status_message(self, msg: str):
         self._status_msg.setText(msg)
+
+    def set_active_template(self, name: str) -> None:
+        """Tampilkan nama template aktif — besar di tengah view operator."""
+        self._template_title.setText(name if name else "—")
 
     @Slot()
     def update_roi_results(self, results: list):
@@ -306,19 +355,28 @@ class RunPage(QWidget):
         colors = ["#FFFFFF", "#FFD700", "#00BFFF", "#FF69B4", "#7B68EE"]
         for i, r in enumerate(results):
             roi = r["roi"]
-            label = f"ROI{i+1}"
+            # Label custom dari config template (r["label"] dikirim
+            # main_window) — fallback ROI{i+1} hanya template lama.
+            label = r.get("label") or f"ROI{i+1}"
             judge = r["judgement"]
             icon = "OK" if judge == "OK" else "NG"
             color = colors[i % len(colors)]
+            # Threshold ikut ditampilkan karena tiap ROI bisa punya ambang
+            # sendiri — tanpa itu, skor 0,55 di satu baris dan 0,40 di baris
+            # lain tidak bisa dibandingkan operator.
+            thr = r.get("threshold")
+            thr_txt = f" / {thr:.3f}" if isinstance(thr, (int, float)) else ""
             lines.append(
                 f'<span style="color:{color}">{icon} {label}:'
-                f' score={r["score"]:.3f} ({judge})</span>'
+                f' score={r["score"]:.3f}{thr_txt} ({judge})</span>'
             )
         self._roi_results_label.setText("<br>".join(lines))
 
     @Slot()
     def clear_results(self):
         """Clear judgement, score, latency and ROI results when switching template."""
+        self._stage_label.setText("SIAP")
+        self._stage_label.setStyleSheet(self._STAGE_STYLE_NEUTRAL)
         self._judgement_label.setText("—")
         self._judgement_label.setStyleSheet("color: #9FB3C8; font-size: 48px; font-weight: bold;")
         self._score_label.setText("0.000")
@@ -326,18 +384,49 @@ class RunPage(QWidget):
         self._roi_results_label.setText("ROI: —")
 
     @Slot()
-    def set_waiting_for_part(self):
-        """Show 'waiting for part' neutral state — no OK/NG."""
-        self._judgement_label.setText("Menunggu Part")
-        self._judgement_label.setStyleSheet("color: #F59E0B; font-size: 48px; font-weight: bold;")
+    def set_waiting_for_part(self, confirm=None):
+        """Tahap 1 (gate) — part belum terkonfirmasi di posisi: tahap = NG.
+
+        confirm = (k, n) → sedang mengumpulkan konfirmasi gate (k dari n frame).
+        """
+        self._stage_label.setText("MENUNGGU PART")
+        self._stage_label.setStyleSheet(self._STAGE_STYLE_WARN)
+        self._judgement_label.setText(self._tr.tr("ng"))
+        self._judgement_label.setStyleSheet("color: #EF4444; font-size: 48px; font-weight: bold;")
         self._score_label.setText("—")
-        self._roi_results_label.setText("ROI: Menunggu part terdeteksi di area gate")
+        if confirm and confirm[1] > 1:
+            self._roi_results_label.setText(
+                f"ROI: Konfirmasi gate {confirm[0]}/{confirm[1]}")
+        else:
+            self._roi_results_label.setText(
+                "ROI: Menunggu part terdeteksi di area gate")
+
+    @Slot()
+    def set_part_occluded(self, streak: int, n: int):
+        """Gate sudah lolos tapi beberapa frame terakhir tidak terbaca
+        (tangan/bayangan lewat). Episode masih hidup — belum part hilang."""
+        self._stage_label.setText("PART TERHALANG")
+        self._stage_label.setStyleSheet(self._STAGE_STYLE_WARN)
+        self._status_msg.setText(f"Part terhalang {streak}/{n} — cek posisi")
+
+    @Slot()
+    def set_confirming_ok(self, streak: int, n: int, score: float):
+        """Tahap 2 — hasil OK tapi belum cukup konfirmasi (streak dari n frame)."""
+        self._stage_label.setText("JUDGEMENT")
+        self._stage_label.setStyleSheet(self._STAGE_STYLE_NEUTRAL)
+        self._judgement_label.setText(f"{self._tr.tr('ok')} {streak}/{n}")
+        self._judgement_label.setStyleSheet(
+            "color: #F59E0B; font-size: 40px; font-weight: bold;")
+        self._score_label.setText(f"{score:.4f}")
 
     @Slot()
     def set_part_check_incomplete(self, msg: str):
-        """Show 'part check not configured' warning — block QC, no false NG."""
-        self._judgement_label.setText("Part-check belum lengkap")
-        self._judgement_label.setStyleSheet("color: #F59E0B; font-size: 40px; font-weight: bold;")
+        """Part-check aktif tapi master/gate ROI belum lengkap — blok QC, tanpa NG palsu."""
+        self._stage_label.setText("PART-CHECK BELUM LENGKAP")
+        self._stage_label.setStyleSheet(
+            "color: #F59E0B; font-size: 15px; font-weight: bold; letter-spacing: 1px;")
+        self._judgement_label.setText("—")
+        self._judgement_label.setStyleSheet("color: #9FB3C8; font-size: 48px; font-weight: bold;")
         self._score_label.setText("—")
         self._roi_results_label.setText("ROI: —")
         self._status_msg.setText(msg)
@@ -364,6 +453,18 @@ class RunPage(QWidget):
 
     def get_trigger_button(self) -> QPushButton:
         return self._trigger_btn
+
+    def set_trigger_mode(self, mode: str) -> None:
+        """Update label Start Cycle sesuai mode (continuous/plc_trigger)."""
+        labels = {
+            "continuous": "Auto Sequence (jalan terus)",
+            "plc_trigger": "PLC Trigger",
+            # Config lama yang lolos migrasi — jangan tampil sebagai
+            # "Auto Sequence", itu mode yang perilakunya berbeda jauh.
+            "manual": "PLC Trigger",
+        }
+        self._trigger_mode_label.setText(
+            labels.get(mode, "Auto Sequence (jalan terus)"))
 
     def get_heatmap_button(self) -> QPushButton:
         return self._heatmap_btn

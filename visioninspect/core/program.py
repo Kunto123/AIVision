@@ -122,6 +122,31 @@ class ProgramManager:
         shutil.rmtree(prog_dir)
         logger.info("Program deleted: %s", name)
 
+    # ------------------------------------------------------------------
+    # Helpers — rename dengan retry (Windows file-lock: antivirus/Explorer
+    # bisa menahan handle folder sesaat → WinError 5 Access is denied)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _rename_dir_with_retry(old_dir: Path, new_dir: Path,
+                               attempts: int = 4) -> None:
+        """Rename folder dengan retry singkat + backoff.
+
+        Windows menolak rename folder yang berisi file di-lock proses lain
+        (mis. model.bin yang di-mmap OpenVINO, atau sedang dipindai antivirus).
+        Retry singkat biasanya cukup; error terakhir tetap di-raise.
+        """
+        last_err: Optional[Exception] = None
+        for i in range(attempts):
+            try:
+                old_dir.rename(new_dir)
+                return
+            except OSError as e:
+                last_err = e
+                if i < attempts - 1:
+                    time.sleep(0.3 * (i + 1))
+        if last_err is not None:
+            raise last_err
+
     def rename_program(self, old_name: str, new_name: str) -> None:
         """Rename a program."""
         old_dir = self._get_program_dir(old_name)
@@ -130,7 +155,7 @@ class ProgramManager:
             raise ProgramError(f"Program '{old_name}' tidak ditemukan")
         if new_dir.exists():
             raise ProgramError(f"Program '{new_name}' sudah ada")
-        old_dir.rename(new_dir)
+        self._rename_dir_with_retry(old_dir, new_dir)
         config = self._load_json(self._get_config_path(new_name), {})
         config["name"] = new_name
         self._atomic_write(self._get_config_path(new_name), config)
@@ -239,8 +264,8 @@ class ProgramManager:
             new_dir = tmpl_dir_base / new_id
             counter += 1
 
-        # Rename folder
-        old_dir.rename(new_dir)
+        # Rename folder (retry untuk Windows file-lock: WinError 5)
+        self._rename_dir_with_retry(old_dir, new_dir)
 
         # Update config
         cfg_path = new_dir / "config.json"
@@ -261,10 +286,31 @@ class ProgramManager:
         logger.info("Template '%s' deleted from program '%s'", template_id, program)
 
     def get_template_config(self, program: str, template_id: str) -> dict:
-        """Get template configuration."""
-        return self._load_json(
-            self._get_template_dir(program) / template_id / "config.json", {}
-        )
+        """Get template configuration.
+
+        Perbaikan-diri: `id` di config WAJIB sama dengan nama folder. Import
+        versi lama menimpa `id` dengan nilai dari template sumber (mis. folder
+        `t` berisi id `Yolov11L`), sehingga identitas template tidak bisa
+        dipercaya dan nama yang salah ikut terekam ke history. Di sini
+        diluruskan sekali, saat config pertama kali dibaca.
+        """
+        cfg_path = self._get_template_dir(program) / template_id / "config.json"
+        cfg = self._load_json(cfg_path, {})
+        if cfg and str(cfg.get("id", "")) != template_id:
+            stale = cfg.get("id", "")
+            cfg["id"] = template_id
+            if not str(cfg.get("name", "")).strip():
+                cfg["name"] = template_id
+            try:
+                self._atomic_write(cfg_path, cfg)
+                logger.warning(
+                    "Template '%s': config id salah ('%s') — diluruskan ke "
+                    "nama folder. Penyebab: import versi lama menimpa id.",
+                    template_id, stale)
+            except Exception as e:
+                logger.warning("Gagal meluruskan id template %s: %s",
+                               template_id, e)
+        return cfg
 
     def update_template_config(self, program: str, template_id: str,
                                 updates: dict) -> None:
@@ -291,17 +337,27 @@ class ProgramManager:
 
     def save_template_image(self, program: str, template_id: str,
                              image: Any, label: str,
-                             update_count: bool = True) -> Path:
+                             update_count: bool = True,
+                             roi_uid: Optional[str] = None) -> Path:
         """
         Save an image to the template's image directory.
         label = "ok" or "ng"
+
+        `roi_uid` (opsional): disisipkan ke nama file (`roi-<uid>`) untuk
+        crop per-ROI (`label` berakhiran `_per_roi`) — tanpa ini, file
+        _per_roi tidak menyimpan info ROI mana asalnya sama sekali, dan
+        template dengan banyak ROI (mis. 10 ROI) tidak bisa membedakan
+        crop mana milik ROI mana setelah tersimpan. Backward-compatible:
+        file lama tanpa segmen ini tetap kebaca normal, cuma dianggap
+        "ROI tidak diketahui" oleh kode yang membacanya balik.
         """
         base = (self._get_template_dir(program) / template_id
                 / "images" / label)
         base.mkdir(parents=True, exist_ok=True)
 
         ts = time.strftime("%Y%m%d_%H%M%S")
-        filename = f"{ts}_{uuid.uuid4().hex[:8]}.png"
+        roi_part = f"_roi-{roi_uid}" if roi_uid else ""
+        filename = f"{ts}{roi_part}_{uuid.uuid4().hex[:8]}.png"
         dest = base / filename
 
         cv2.imwrite(str(dest), image)
@@ -522,7 +578,7 @@ class ProgramManager:
             if model_dir.exists():
                 for fpath in model_dir.rglob("*"):
                     if fpath.is_file():
-                        arcname = f"model/{fpath.relative_to(model_dir)}"
+                        arcname = f"model/{fpath.relative_to(model_dir).as_posix()}"
                         zf.write(str(fpath), arcname)
 
             # Template config (tanpa gambar)
@@ -548,13 +604,19 @@ class ProgramManager:
         return str(output_path)
 
     def import_model_from_zip(self, zip_path: Path, program: str,
-                                  template_id: str) -> dict:
-            """Import model dari file .zip ke template.
+                                  template_id: Optional[str] = None,
+                                  as_new_template: bool = True) -> dict:
+            """Import model dari file .zip.
 
             Args:
                 zip_path: Path file .zip hasil export.
                 program: Nama program tujuan.
-                template_id: ID template tujuan (bisa berbeda dari asalnya).
+                template_id: Template tujuan bila menimpa (as_new_template=False).
+                as_new_template: True (default) → BUAT TEMPLATE BARU, tidak
+                    menimpa apa pun. Karena tujuannya folder kosong, seluruh
+                    isi config dari PC training boleh dipulihkan apa adanya
+                    (ROI, part-check, threshold, dst) tanpa merusak template
+                    yang sudah dikalibrasi di mesin ini.
 
             Returns:
                 dict: Metadata hasil import.
@@ -565,23 +627,50 @@ class ProgramManager:
             if not zip_path.exists():
                 raise ProgramError(f"File tidak ditemukan: {zip_path}")
 
+            if as_new_template:
+                # Nama dari zip (kalau ada), difallback ke nama file .zip.
+                # create_template() sendiri yang menjamin folder id unik.
+                src_name = ""
+                try:
+                    with zipfile.ZipFile(str(zip_path), "r") as _zf:
+                        _nm = {n.replace("\\", "/"): n for n in _zf.namelist()}
+                        if "template_config.json" in _nm:
+                            src_name = str(json.loads(
+                                _zf.read(_nm["template_config.json"])
+                            ).get("name", "") or "")
+                except Exception:
+                    src_name = ""
+                created = self.create_template(
+                    program, src_name or zip_path.stem)
+                template_id = created["id"]
+            elif not template_id:
+                raise ProgramError(
+                    "template_id wajib diisi bila as_new_template=False")
+
             tmpl_dir = self._get_template_dir(program) / template_id
             model_dir = tmpl_dir / "model"
+            # Pastikan folder template ada sebelum temp dir dibuat di dalamnya
+            tmpl_dir.mkdir(parents=True, exist_ok=True)
 
             import_meta = {}
             restored_config = {}
 
             with zipfile.ZipFile(str(zip_path), "r") as zf:
+                # Normalisasi nama entry zip: export di Windows menyimpan arcname
+                # dengan backslash (model\\openvino\\model.bin), di WSL dengan slash.
+                # Map nama-asli -> nama-ternormalisasi biar zip lintas-OS terbaca.
+                norm_map = {n.replace("\\", "/"): n for n in zf.namelist()}
+
                 # Baca metadata
-                if "export_metadata.json" in zf.namelist():
-                    import_meta = json.loads(zf.read("export_metadata.json"))
+                if "export_metadata.json" in norm_map:
+                    import_meta = json.loads(zf.read(norm_map["export_metadata.json"]))
 
                 # Baca template config
-                if "template_config.json" in zf.namelist():
-                    restored_config = json.loads(zf.read("template_config.json"))
+                if "template_config.json" in norm_map:
+                    restored_config = json.loads(zf.read(norm_map["template_config.json"]))
 
-                # Extract model files
-                model_files = [n for n in zf.namelist() if n.startswith("model/")]
+                # Extract model files (filter pakai nama ternormalisasi)
+                model_files = [n for n in norm_map if n.startswith("model/")]
                 if not model_files:
                     raise ProgramError(
                         "File .zip tidak berisi model (folder 'model/' tidak ditemukan).")
@@ -601,8 +690,11 @@ class ProgramManager:
                             gc.collect()
                             time.sleep(0.5)
 
-                # Extract to temp dir first, then move atomically — avoids partial writes / locking
-                with tempfile.TemporaryDirectory(prefix="vi_import_") as tmpdir:
+                # Extract to temp dir first, then move — avoids partial writes / locking.
+                # Temp dibuat DI DRIVE YANG SAMA dengan target (tmpl_dir): os.rename
+                # tidak bisa lintas drive (WinError 17: C: temp → D: data).
+                with tempfile.TemporaryDirectory(
+                        prefix="vi_import_", dir=str(tmpl_dir)) as tmpdir:
                     tmp_model_dir = Path(tmpdir) / "model"
                     tmp_model_dir.mkdir(parents=True)
 
@@ -613,7 +705,7 @@ class ProgramManager:
                         rel_path = name[len("model/"):]
                         dest = tmp_model_dir / rel_path
                         dest.parent.mkdir(parents=True, exist_ok=True)
-                        with zf.open(name) as src, open(str(dest), "wb") as dst:
+                        with zf.open(norm_map[name]) as src, open(str(dest), "wb") as dst:
                             dst.write(src.read())
 
                     # Ensure target model dir exists
@@ -633,8 +725,10 @@ class ProgramManager:
                                 # Remove existing first (if any)
                                 if dest.exists():
                                     dest.unlink()
-                                # Atomic replace on same volume
-                                src.replace(dest)
+                                # Atomic replace kalau satu volume; shutil.move otomatis
+                                # fallback ke copy+unlink kalau beda volume/fs (EXDEV,
+                                # WinError 17) — mis. WSL /tmp (ext4) → /mnt/d (drvfs).
+                                shutil.move(str(src), str(dest))
                                 break
                             except (PermissionError, OSError) as e:
                                 winerr = getattr(e, "winerror", None)
@@ -653,6 +747,25 @@ class ProgramManager:
                     existing_cfg = self.get_template_config(program, template_id)
                     restored_config["images"] = existing_cfg.get("images", {})
                     restored_config["image_count"] = existing_cfg.get("image_count", 0)
+                    # `id` TIDAK BOLEH diambil dari zip. Sebelum ini, config
+                    # sumber menimpa id sehingga folder `t` berisi
+                    # id=`Yolov11L` — dan nama itu ikut terekam ke history,
+                    # membuat entry tidak bisa ditelusuri ke templatenya.
+                    # id SELALU = nama folder.
+                    restored_config["id"] = template_id
+                    # Nama tampilan boleh ikut dari sumber, TAPI jangan sampai
+                    # dua template punya nama sama (folder id yang membedakan,
+                    # dan itu tidak terlihat operator).
+                    src_display = str(restored_config.get("name", "") or "")
+                    if src_display:
+                        clash = any(
+                            t["id"] != template_id
+                            and str(t.get("name", "")) == src_display
+                            for t in self.list_templates(program))
+                        restored_config["name"] = (
+                            template_id if clash else src_display)
+                    else:
+                        restored_config["name"] = template_id
                     # Tandai sebagai trained
                     restored_config["trained"] = True
                     restored_config["model_version"] = (

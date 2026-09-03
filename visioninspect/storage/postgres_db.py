@@ -17,13 +17,17 @@ Tabel skema:
     last_login_at   TIMESTAMPTZ
     rfid_uid_hash   TEXT (hashed RFID)
 
-  qc_inspection_push:
+  qc_inspection_push  (SKEMA ASLI — lima kolom, jangan ditambah):
     id              BIGINT PK
-    partname        TEXT
-    datecheckmc     TIMESTAMPTZ
-    mpcheck         TEXT (OK/NG)
-    data1           DOUBLE PRECISION (part ready confidence)
-    data2           DOUBLE PRECISION (anomaly score)
+    partname        TEXT (nama part = nama template aktif)
+    datecheckmc     TIMESTAMPTZ (waktu INSPEKSI, bukan waktu insert)
+    mpcheck         TEXT (MP/ManPower = nama akun operator yang login)
+    data1           DOUBLE PRECISION (skor part-check; 0 bila tidak aktif)
+    data2           DOUBLE PRECISION (skor ROI penentu)
+
+  Isi tabel ini HANYA hasil inspeksi OK dari operator view. NG tidak pernah
+  dikirim — bukti cacat, gambar, threshold, latensi, dan koreksi operator
+  semuanya tersimpan di SQLite lokal.
 """
 
 import hashlib
@@ -31,6 +35,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from visioninspect.storage import secret_store
 from visioninspect.utils.logging_setup import get_logger
 
 logger = get_logger("app")
@@ -102,6 +107,9 @@ class PostgresDB:
         """
         self._cfg = config
         self._enabled = config.get("enabled", False) and HAS_PSYCOPG2
+        # C4: password non-plaintext — decrypt token "enc:v1:" (DPAPI/Fernet).
+        # Token plaintext lama di-pass-through (migrasi saat save settings).
+        self._password = secret_store.decrypt(config.get("password", ""))
 
         if self._enabled:
             logger.info(
@@ -120,8 +128,12 @@ class PostgresDB:
 
     # ── Connection ───────────────────────────────────────────────────
 
-    def _connect(self):
-        """Create a new connection. Raises PostgresConnectionError on failure."""
+    def _connect(self, timeout: Optional[float] = None):
+        """Create a new connection. Raises PostgresConnectionError on failure.
+
+        Args:
+            timeout: connect_timeout override (detik). None = pakai config.
+        """
         if not self._enabled:
             raise PostgresConnectionError("PostgreSQL not enabled")
         try:
@@ -130,9 +142,10 @@ class PostgresDB:
                 port=self._cfg.get("port", 5432),
                 dbname=self._cfg.get("dbname", "visioninspect"),
                 user=self._cfg.get("user", "postgres"),
-                password=self._cfg.get("password", ""),
+                password=self._password,
                 sslmode=self._cfg.get("sslmode", "prefer"),
-                connect_timeout=self._cfg.get("connect_timeout", 10),
+                connect_timeout=(timeout if timeout is not None
+                                 else self._cfg.get("connect_timeout", 10)),
             )
             conn.autocommit = False
             return conn
@@ -225,6 +238,10 @@ class PostgresDB:
                     rfid_uid_last4 TEXT,
                     rfid_bound_at TIMESTAMPTZ
                 )""")
+            # Skema ASLI tabel produksi — lima kolom, tidak lebih. Aplikasi
+            # ini pernah menambahkan 9 kolom lain (line/operator/image_path/
+            # threshold/latency_ms/local_id/corrected*); semuanya dicabut
+            # kembali, lihat _drop_legacy_push_columns().
             self._execute("""
                 CREATE TABLE IF NOT EXISTS qc_inspection_push (
                     id BIGSERIAL PRIMARY KEY,
@@ -232,9 +249,21 @@ class PostgresDB:
                     datecheckmc TIMESTAMPTZ,
                     mpcheck TEXT,
                     data1 DOUBLE PRECISION,
-                    data2 DOUBLE PRECISION,
-                    line TEXT
+                    data2 DOUBLE PRECISION
                 )""")
+
+            # C4: kolom must_change_password untuk akun seed (paksa ganti).
+            # Dijalankan SEBELUM pembersihan kolom lama: tanpa kolom ini login
+            # gagal total, jadi ia tidak boleh bergantung pada langkah lain
+            # yang sifatnya hanya kebersihan skema.
+            try:
+                self._execute(
+                    "ALTER TABLE qc_user_accounts ADD COLUMN IF NOT EXISTS "
+                    "must_change_password BOOLEAN NOT NULL DEFAULT FALSE")
+            except PostgresError as e:
+                logger.warning("Migrasi kolom must_change_password gagal: %s", e)
+
+            self._drop_legacy_push_columns()
 
             # 2) Verifikasi tabel benar-benar ada
             missing = []
@@ -254,10 +283,12 @@ class PostgresDB:
                 now = _now()
                 self._execute(
                     """INSERT INTO qc_user_accounts
-                       (username, password_hash, role, is_active, created_at, updated_at)
-                       VALUES (%s, %s, 'admin', TRUE, %s, %s)""",
+                       (username, password_hash, role, is_active,
+                        must_change_password, created_at, updated_at)
+                       VALUES (%s, %s, 'admin', TRUE, TRUE, %s, %s)""",
                     ("admin", _hash_password("admin"), now, now))
-                logger.info("Seed admin default (admin/admin) ke qc_user_accounts")
+                logger.info("Seed admin default ke qc_user_accounts "
+                            "(admin/admin — WAJIB ganti password saat login pertama)")
 
             logger.info("PostgreSQL SIAP: tabel qc_user_accounts & "
                         "qc_inspection_push OK")
@@ -267,6 +298,64 @@ class PostgresDB:
             return False
 
     # ── Authentication ──────────────────────────────────────────────
+
+    def sync_users_from_sqlite(self, sqlite_db) -> int:
+        """[DEPRECATED — 2026-08-07] Sinkronkan user SQLite → PG (upsert one-way).
+
+        TIDAK DIPANGGIL LAGI sejak PG dijadikan satu-satunya sumber akun
+        (main_window.py). Method ini menimpa role/password qc_user_accounts
+        dengan isi SQLite tiap startup, sehingga akun yang dibuat/diedit di
+        pgAdmin4 selalu dikembalikan ke state SQLite. Dipertahankan hanya
+        sebagai utilitas migrasi manual bila suatu saat diperlukan.
+
+        C2: SQLite & PG adalah dua auth source terpisah. User (dengan
+        password custom) hidup di SQLite; PG hanya punya seed admin/admin.
+        Begitu PG "hidup" (lihat fix is_alive 2026-08-07), login beralih ke
+        PG dan user SQLite tak ada di sana → login gagal. Pepper hash sama
+        (``visioninspect_2024_``) sehingga password_hash bisa disalin
+        langsung. Dipanggil sekali saat startup setelah ``ensure_ready``.
+
+        Returns jumlah user yang di-upsert (0 bila disabled/gagal).
+        """
+        if not self._enabled:
+            return 0
+        try:
+            users = sqlite_db.list_users_full()
+            if not users:
+                return 0
+            now = _now()
+            n = 0
+            for u in users:
+                # ON CONFLICT (username) butuh UNIQUE constraint — tabel lama
+                # hasil CREATE IF NOT EXISTS bisa tidak punya → pakai
+                # SELECT→INSERT/UPDATE manual (robust terhadap skema apa pun).
+                exists = self._execute(
+                    "SELECT id FROM qc_user_accounts WHERE username = %s",
+                    (u["username"],), fetch_one=True)
+                if exists:
+                    self._execute(
+                        """UPDATE qc_user_accounts
+                           SET password_hash = %s, role = %s,
+                               must_change_password = %s, updated_at = %s
+                           WHERE username = %s""",
+                        (u["password_hash"], u["role"],
+                         bool(u.get("must_change_password", False)),
+                         now, u["username"]))
+                else:
+                    self._execute(
+                        """INSERT INTO qc_user_accounts
+                           (username, password_hash, role, is_active,
+                            must_change_password, created_at, updated_at)
+                           VALUES (%s, %s, %s, TRUE, %s, %s, %s)""",
+                        (u["username"], u["password_hash"], u["role"],
+                         bool(u.get("must_change_password", False)),
+                         now, now))
+                n += 1
+            logger.info("Sinkronisasi user SQLite → PG: %d user", n)
+            return n
+        except Exception as e:
+            logger.warning("Sinkronisasi user ke PG gagal: %s", e)
+            return 0
 
     def authenticate(self, username: str, password: str) -> Optional[dict]:
         """
@@ -283,7 +372,7 @@ class PostgresDB:
         pw_hash = _hash_password(password)
         try:
             user = self._execute(
-                """SELECT id, username, role, is_active, created_at
+                """SELECT id, username, role, is_active, must_change_password, created_at
                    FROM qc_user_accounts
                    WHERE username = %s AND password_hash = %s""",
                 (username, pw_hash),
@@ -436,6 +525,8 @@ class PostgresDB:
         if password is not None:
             fields.append("password_hash = %s")
             values.append(_hash_password(password))
+            # C4: password baru di-set → flag paksa-ganti dimatikan
+            fields.append("must_change_password = FALSE")
         if role is not None:
             fields.append("role = %s")
             values.append(role.lower())
@@ -537,45 +628,136 @@ class PostgresDB:
             logger.error("Unbind RFID error: %s", e)
             return False
 
+    #: Kolom yang DULU ditambahkan aplikasi ini ke tabel produksi milik
+    #: perusahaan. Dicabut agar tabel kembali ke bentuk aslinya.
+    _LEGACY_PUSH_COLUMNS = (
+        "line", "operator", "image_path", "threshold", "latency_ms",
+        "local_id", "corrected", "correct_judgement", "corrected_at",
+    )
+
+    def _drop_legacy_push_columns(self) -> None:
+        """Hapus permanen kolom yang dulu ditambahkan aplikasi ini.
+
+        PERMANEN: data di kolom-kolom itu ikut hilang dan tidak bisa
+        dikembalikan tanpa backup. Dijalankan sekali — `DROP COLUMN IF EXISTS`
+        bersifat idempoten, jadi startup berikutnya tidak melakukan apa-apa.
+
+        Semua informasi itu TETAP ADA di SQLite lokal (image_path, threshold,
+        latency_ms, verdict, koreksi, skor per ROI), jadi yang hilang hanya
+        salinannya di PostgreSQL.
+        """
+        # Except LEBAR (bukan hanya PostgresError): langkah ini semata-mata
+        # kebersihan skema. Kalau ia gagal karena sebab apa pun, sisa
+        # ensure_ready() — termasuk migrasi kolom yang dibutuhkan LOGIN —
+        # tetap harus jalan. (Pernah terjadi: TypeError di sini membuat
+        # `must_change_password` tidak pernah dibuat dan login mati total.)
+        try:
+            existing = self._execute(
+                """SELECT column_name FROM information_schema.columns
+                   WHERE table_name = 'qc_inspection_push'""",
+                fetch=True) or []
+            have = {r.get("column_name") for r in existing}
+
+            to_drop = [c for c in self._LEGACY_PUSH_COLUMNS if c in have]
+            if not to_drop:
+                return
+            logger.warning(
+                "Menghapus PERMANEN %d kolom tambahan dari qc_inspection_push: "
+                "%s — data di kolom ini hilang. Tabel kembali ke skema asli "
+                "(partname, datecheckmc, mpcheck, data1, data2).",
+                len(to_drop), ", ".join(to_drop))
+            for col in to_drop:
+                try:
+                    self._execute(
+                        "ALTER TABLE qc_inspection_push "
+                        f"DROP COLUMN IF EXISTS {col}")
+                except Exception as e:
+                    logger.error("Gagal menghapus kolom %s: %s", col, e)
+        except Exception as e:
+            logger.warning(
+                "Pembersihan kolom lama qc_inspection_push dilewati: %s", e)
+
     # ── Inspection Push ─────────────────────────────────────────────
 
     def push_inspection(self, partname: str, mpcheck: str,
-                        data1: float = 0.0, data2: float = 0.0) -> Optional[int]:
-        """
-        Push inspection result to qc_inspection_push.
+                        data1: float = 0.0, data2: float = 0.0,
+                        datecheckmc: Optional[str] = None) -> Optional[int]:
+        """Push hasil inspeksi OK ke qc_inspection_push (skema asli, 5 kolom).
 
         Args:
-            partname: Nama part/program/template
-            mpcheck: "OK" or "NG"
-            data1: Part ready confidence (0.0 = not ready, 1.0 = ready)
-                   — dari conf part ready / part check
-            data2: Similarity score — 1.0 = mirip OK, 0.0 = anomali total
+            partname: Nama part (dari nama template aktif)
+            mpcheck: MP (ManPower) yang memeriksa — NAMA AKUN OPERATOR yang
+                login di operator view. Bukan verdict OK/NG: tabel ini hanya
+                menerima hasil OK, jadi verdict-nya tersirat.
+            data1: Skor part-check (0 bila part-check tidak aktif)
+            data2: Skor inspeksi ROI penentu
+            datecheckmc: Waktu INSPEKSI (bukan waktu insert). Wajib diisi
+                pemanggil — kalau outbox tertahan karena PG mati, memakai
+                jam insert akan menggeser seluruh baris tertunda ke waktu
+                koneksi pulih. None hanya sebagai jaring pengaman.
 
         Returns:
-            Inserted row ID, or None on failure.
+            Inserted row ID, atau None on failure.
         """
         if not self._enabled:
             return None
 
-        now = _now()
+        when = datecheckmc or _now()
         try:
             row = self._execute(
                 """INSERT INTO qc_inspection_push
                    (partname, datecheckmc, mpcheck, data1, data2)
                    VALUES (%s, %s, %s, %s, %s)
                    RETURNING id""",
-                (partname, now, mpcheck, float(data1), float(data2)),
+                (partname, when, mpcheck, float(data1), float(data2)),
                 fetch_one=True,
             )
             if row:
                 rid = row.get("id") or row.get("id", 0)
-                logger.debug("Inspection pushed: id=%s part=%s mpcheck=%s data1=%.3f data2=%.3f",
+                logger.debug("Inspection pushed: id=%s part=%s mp=%s "
+                             "data1=%.3f data2=%.3f",
                              rid, partname, mpcheck, data1, data2)
                 return int(rid)
             return None
         except PostgresError as e:
             logger.warning("Push inspection error: %s", e)
             return None
+
+    # CATATAN: propagasi koreksi ke PostgreSQL (mark_correction_pg /
+    # rollback_correction_pg) DIHAPUS. Kolom penopangnya (local_id, corrected,
+    # correct_judgement, corrected_at) sudah tidak ada, dan tabel ini hanya
+    # menerima hasil OK — sementara koreksi hampir selalu menyangkut NG.
+    # Koreksi operator tetap tercatat lengkap di SQLite lokal.
+
+    # ── Liveness (C2) ──────────────────────────────────────────────
+
+    def is_alive(self, timeout: Optional[float] = None) -> bool:
+        """Cek apakah PostgreSQL benar-benar terjangkau (C2).
+
+        ``is_enabled`` hanya membaca flag config — server bisa saja mati.
+        Query ringan SELECT 1 dengan connect_timeout singkat; dipakai untuk
+        login fallback ke SQLite lokal dan indikator sink di DIAGNOSTICS.
+
+        Catatan (fix 2026-08-07): JANGAN panggil dengan timeout kecil
+        (mis. 2.0) di host ``localhost``/Windows — resolve IPv6 ``::1``
+        dulu bisa makan budget, lalu libpq fallback ke 127.0.0.1; kalau
+        timeout habis, is_alive false-negative padahal PG hidup (inisialisasi
+        yang pakai connect_timeout config = 10s tetap sukses). None = pakai
+        config ``connect_timeout`` supaya konsisten dengan jalur init.
+        """
+        if not self._enabled:
+            return False
+        try:
+            conn = self._connect(timeout=timeout)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+                return True
+            finally:
+                conn.close()
+        except Exception:
+            return False
 
     def get_history(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """

@@ -82,10 +82,11 @@ class HistoryPage(QWidget):
 
         # Table
         self._table = QTableWidget()
-        self._table.setColumnCount(7)
+        self._table.setColumnCount(8)
         self._table.setHorizontalHeaderLabels([
             "ID", self._tr.tr("history_date"), self._tr.tr("history_program"),
             self._tr.tr("history_score"), self._tr.tr("history_judgement"),
+            "Per-ROI",
             self._tr.tr("history_image"), self._tr.tr("history_correct")
         ])
         self._table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -110,7 +111,7 @@ class HistoryPage(QWidget):
     @Slot()
     def add_entry(self, entry_id: int, timestamp: str, program: str,
                   score: float, judgement: str, image_path: str,
-                  corrected: bool = False):
+                  corrected: bool = False, roi_detail: str = ""):
         """Add a row to the history table."""
         row = self._table.rowCount()
         self._table.insertRow(row)
@@ -127,8 +128,15 @@ class HistoryPage(QWidget):
             judgement_item.setForeground(Qt.red)
         self._table.setItem(row, 4, judgement_item)
 
-        self._table.setItem(row, 5, QTableWidgetItem(image_path))
-        self._table.setItem(row, 6, QTableWidgetItem(
+        # Per-ROI breakdown: "1:OK · 2:NG" — tooltip = detail score per ROI
+        roi_item = QTableWidgetItem(roi_detail or "")
+        if roi_detail:
+            roi_item.setToolTip(roi_detail)
+            roi_item.setForeground(Qt.darkYellow)
+        self._table.setItem(row, 5, roi_item)
+
+        self._table.setItem(row, 6, QTableWidgetItem(image_path))
+        self._table.setItem(row, 7, QTableWidgetItem(
             "✓" if corrected else ""
         ))
 
@@ -154,8 +162,8 @@ class HistoryPage(QWidget):
         return {
             "id": int(self._table.item(row, 0).text()),
             "judgement": self._table.item(row, 4).text(),
-            "image_path": self._table.item(row, 5).text() if self._table.item(row, 5) else "",
-            "corrected": self._table.item(row, 6).text() == "✓",
+            "image_path": self._table.item(row, 6).text() if self._table.item(row, 6) else "",
+            "corrected": self._table.item(row, 7).text() == "✓",
         }
 
     def _on_tuning(self):

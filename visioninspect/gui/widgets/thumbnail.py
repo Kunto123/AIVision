@@ -13,6 +13,7 @@ class ThumbnailWidget(QWidget):
 
     clicked = Signal(str)    # path
     deleted = Signal(str)    # path
+    mask_requested = Signal(str)  # path — adjust polygon mask KHUSUS foto ini
 
     def __init__(self, pixmap: QPixmap, path: str = "",
                  border_color: str = "#22C55E", parent=None):
@@ -59,6 +60,27 @@ class ThumbnailWidget(QWidget):
             QPushButton:hover { background: #DC2626; }
         """)
         self._del_btn.clicked.connect(lambda: self.deleted.emit(self._path))
+
+        # Tombol mask — pojok kiri-atas (beda sudut dari ✕ di kanan-atas).
+        # BUKAN double-click: klik tunggal di badan thumbnail sudah membuka
+        # ROIAdjustDialog secara MODAL (lihat main_window._on_thumbnail_
+        # clicked) — double-click tidak akan pernah terdeteksi benar kalau
+        # klik pertamanya sendiri sudah memblokir lewat dialog modal.
+        self._mask_btn = QPushButton("⬠", img_container)
+        self._mask_btn.setGeometry(2, 2, 20, 20)
+        self._mask_btn.setToolTip(
+            "Adjust mask polygon khusus foto ini (outlier)")
+        self._mask_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(251, 191, 36, 200); color: #111827;
+                border: 1px solid rgba(255,255,255,180);
+                border-radius: 10px;
+                font-size: 11px; font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton:hover { background: #F59E0B; }
+        """)
+        self._mask_btn.clicked.connect(lambda: self.mask_requested.emit(self._path))
 
         layout.addWidget(img_container, alignment=Qt.AlignCenter)
 

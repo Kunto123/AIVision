@@ -197,6 +197,10 @@ class LoginDialog(QDialog):
         user = self._db.authenticate(u, p)
         if user:
             self._user = user
+            # C4: akun seed wajib ganti password saat login pertama
+            if user.get("must_change_password"):
+                if not self._force_change_password(user, u):
+                    return
             self.accept()
         else:
             # Bedakan koneksi DB gagal vs kredensial salah. Backend PostgreSQL
@@ -214,6 +218,49 @@ class LoginDialog(QDialog):
             QMessageBox.warning(self, "Login Gagal", msg)
             self._password_input.clear()
             self._password_input.setFocus()
+
+    def _force_change_password(self, user: dict, username: str) -> bool:
+        """C4: paksa ganti password akun seed (admin/admin) sebelum masuk.
+
+        Returns True bila password berhasil diganti; False bila dibatalkan
+        (login tidak dilanjutkan).
+        """
+        from PySide6.QtWidgets import QInputDialog, QLineEdit
+
+        while True:
+            ok1, new_pw = QInputDialog.getText(
+                self, "Ganti Password Wajib",
+                f"Akun seed '{username}' WAJIB mengganti password sebelum dipakai.\n\n"
+                "Masukkan password baru (min. 8 karakter):",
+                QLineEdit.Password)
+            if not ok1:
+                return False
+            if len(new_pw) < 8:
+                QMessageBox.warning(self, "Ganti Password",
+                                    "Password minimal 8 karakter!")
+                continue
+            ok2, confirm = QInputDialog.getText(
+                self, "Ganti Password Wajib",
+                "Ulangi password baru (konfirmasi):", QLineEdit.Password)
+            if not ok2:
+                return False
+            if new_pw != confirm:
+                QMessageBox.warning(self, "Ganti Password",
+                                    "Konfirmasi tidak cocok — coba lagi.")
+                continue
+            break
+        try:
+            uid = user.get("id") or user.get("user_id")
+            self._db.update_user(uid, password=new_pw)
+        except Exception as e:
+            from visioninspect.utils.logging_setup import get_logger
+            get_logger("app").warning("Gagal ganti password seed: %s", e)
+            QMessageBox.critical(self, "Ganti Password",
+                                 "Gagal menyimpan password baru.")
+            return False
+        QMessageBox.information(self, "Ganti Password",
+                                "Password berhasil diganti. Silakan login.")
+        return True
 
     @property
     def user(self): return self._user

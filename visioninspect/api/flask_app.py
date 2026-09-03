@@ -1,8 +1,8 @@
 """
 VisionInspect - Flask API Internal (Opsional)
-REST API lokal di 127.0.0.1 untuk integasi eksternal.
-Hanya aktif jika di-setting di config.
-Bind HANYA ke localhost.
+REST API lokal untuk integrasi eksternal — bind HANYA ke 127.0.0.1, auth API key.
+Aktif hanya jika di-set di config (flask_api.enabled). Jalan di thread terpisah.
+Endpoint: /health /status /last_result /trigger /history /program/<name>/activate
 """
 
 import json
@@ -140,25 +140,35 @@ class FlaskAPI:
 
     def _run(self):
         try:
-            self._app.run(
-                host="127.0.0.1",
-                port=self._port,
-                debug=False,
-                use_reloader=False,
-            )
+            from werkzeug.serving import make_server
+            self._server = make_server(
+                "127.0.0.1", self._port, self._app, threaded=True)
+            self._server.serve_forever()
         except Exception as e:
             logger.error("Flask API error: %s", e)
+        finally:
+            self._server = None
 
     def stop(self) -> None:
-        """Stop Flask API."""
-        # Flask's built-in server doesn't support clean shutdown easily.
-        # In production, use a proper WSGI server.
-        logger.info("Flask API stop requested")
+        """Stop Flask API (shutdown server + join thread)."""
+        server, self._server = getattr(self, "_server", None), None
+        if server is not None:
+            try:
+                server.shutdown()
+            except Exception as e:
+                logger.warning("Flask shutdown error: %s", e)
+        if self._thread and self._thread.is_alive():
+            try:
+                self._thread.join(timeout=3.0)
+            except Exception:
+                pass
+        self._thread = None
+        logger.info("Flask API stopped")
+
+    @property
+    def is_running(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
 
     @property
     def api_key(self) -> str:
         return self._api_key
-
-    @property
-    def is_running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()

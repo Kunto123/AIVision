@@ -4,6 +4,7 @@ Sistem Inspeksi Visual Industri Berbasis AI (CPU-only, full local).
 """
 
 import argparse
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -13,13 +14,47 @@ _pkg_root = Path(__file__).resolve().parent
 if str(_pkg_root) not in sys.path:
     sys.path.insert(0, str(_pkg_root))
 
-# Early import torch (sebelum PySide6/cv2/openvino) untuk menghindari konflik
-# TLS-slot exhaustion di Windows (WinError 1114). Lihat debug:
-# https://github.com/pytorch/pytorch/issues/110488
-try:
-    import torch  # noqa: F401
-except Exception:
-    pass
+
+def _is_edge_mode() -> bool:
+    """Baca flag `edge_mode` dari config SEBELUM import apa pun (Tugas 4).
+
+    PC edge (i3-1315U, inference-only) tidak pernah perlu memuat torch
+    (±250 MB RSS / ±5 s startup). Torch hanya boleh dimuat kalau memang
+    dibutuhkan training, dan hanya di PC dev.
+    """
+    try:
+        data_dir = os.environ.get("VISIONINSPECT_DATA", "")
+        candidates = []
+        if data_dir:
+            candidates.append(Path(data_dir) / "config.json")
+        candidates.append(Path.home() / ".visioninspect" / "config.json")
+        candidates.append(Path(__file__).resolve().parent / "data" / "config.json")
+        for cand in candidates:
+            if cand and cand.exists():
+                with open(cand, encoding="utf-8") as f:
+                    import json
+                    return bool(json.load(f).get("edge_mode", False))
+    except Exception:
+        pass
+    return False
+
+
+_EDGE_MODE = _is_edge_mode()
+
+if not _EDGE_MODE:
+    # Early import torch (sebelum PySide6/cv2/openvino) untuk menghindari
+    # konflik TLS-slot exhaustion di Windows (WinError 1114). Lihat debug:
+    # https://github.com/pytorch/pytorch/issues/110488
+    try:
+        import torch  # noqa: F401
+    except Exception as _e:
+        # Kegagalan 1114 TIDAK boleh senyap — efeknya training diam-diam
+        # jatuh ke WSL/simple mode tanpa user tahu.
+        print(f"WARN: Gagal import torch di startup ({_e}) — training akan "
+              "menggunakan mode fallback", file=sys.stderr)
+else:
+    print("INFO: edge_mode=true — torch tidak dimuat "
+          "(PC edge inference-only)", file=sys.stderr)
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication

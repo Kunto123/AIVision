@@ -34,6 +34,7 @@ class Translator:
         "stopped": "Berhenti",
         "connected": "Terhubung",
         "disconnected": "Terputus",
+        "plc_no_response": "PLC tidak menjawab",
 
         # Navigation
         "nav_run": "RUN",
@@ -97,7 +98,9 @@ class Translator:
         "history_correct": "Koreksi",
         "history_mark_ok": "Tandai OK",
         "history_mark_ng": "Tandai NG",
-        "history_rebuild": "Rebuild Model",
+        # "Rebuild" menyesatkan: ini melatih ulang model DARI NOL memakai
+        # seluruh gambar template + gambar koreksi, bukan penyesuaian ringan.
+        "history_rebuild": "Latih Ulang Model",
         "history_rollback": "Rollback ke v{version}",
         "history_no_data": "Belum ada riwayat",
 
@@ -129,10 +132,6 @@ class Translator:
         "diagnostics_plc_test_sent": "Frame terkirim: {frame}",
 
         # PLC
-        "plc_rs232": "RS232",
-        "plc_rs485": "RS485",
-        "plc_modbus": "Modbus RTU",
-        "plc_ascii": "ASCII Sederhana",
         "plc_auto_direction": "Auto Direction",
         "plc_rts_controlled": "RTS-Controlled",
 
@@ -163,6 +162,7 @@ class Translator:
         "stopped": "Stopped",
         "connected": "Connected",
         "disconnected": "Disconnected",
+        "plc_no_response": "PLC not responding",
         "nav_run": "RUN",
         "nav_teach": "TEACH",
         "nav_history": "HISTORY",
@@ -218,7 +218,7 @@ class Translator:
         "history_correct": "Correction",
         "history_mark_ok": "Mark as OK",
         "history_mark_ng": "Mark as NG",
-        "history_rebuild": "Rebuild Model",
+        "history_rebuild": "Retrain Model",
         "history_rollback": "Rollback to v{version}",
         "history_no_data": "No history yet",
         "settings_title": "Settings",
@@ -244,10 +244,6 @@ class Translator:
         "diagnostics_plc_test": "PLC Test",
         "diagnostics_plc_send_test": "Send Test Frame",
         "diagnostics_plc_test_sent": "Frame sent: {frame}",
-        "plc_rs232": "RS232",
-        "plc_rs485": "RS485",
-        "plc_modbus": "Modbus RTU",
-        "plc_ascii": "Simple ASCII",
         "plc_auto_direction": "Auto Direction",
         "plc_rts_controlled": "RTS-Controlled",
         "error_camera_open": "Failed to open camera: {error}",

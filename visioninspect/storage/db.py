@@ -86,6 +86,22 @@ class Database:
             ON inspection_history(judgement)
         """)
 
+        # ── Migrasi: kolom `template` ──────────────────────────────────────
+        # Sebelumnya identitas template hanya tersimpan di dalam blob JSON
+        # `metadata`, sehingga history TIDAK BISA disaring per template —
+        # semua template dalam satu program tercampur, dan rebuild menarik
+        # gambar koreksi milik template lain. Kolom ini memakai FOLDER ID
+        # (bukan nama tampilan), karena nama terbukti bisa tertukar akibat
+        # import yang menimpa config.
+        self._migrate_template_column(cursor)
+
+        # ── Migrasi: kolom `operator` ──────────────────────────────────────
+        # Nama operator dulu hanya ditulis ke file .json pendamping gambar,
+        # jadi history lokal tidak bisa menjawab "siapa yang memeriksa part
+        # ini". Sekarang PostgreSQL hanya menerima hasil OK, sehingga jejak
+        # operator untuk part NG SEPENUHNYA bergantung pada database lokal.
+        self._migrate_simple_column(cursor, "operator", "TEXT")
+
         # Program counters (cached for fast access)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS program_counters (
@@ -108,6 +124,16 @@ class Database:
             )
         """)
 
+        # Push outbox (C3 — antrian tahan-restart untuk sink PostgreSQL)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS push_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+
         # Users (authentication, roles, RFID)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -126,6 +152,14 @@ class Database:
 
         self.conn.commit()
 
+        # C4: migrasi kolom must_change_password (SQLite ADD COLUMN sekali)
+        try:
+            self.conn.execute(
+                "ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # kolom sudah ada
+
         # Seed default admin if no users exist
         cursor.execute("SELECT COUNT(*) FROM users")
         if cursor.fetchone()[0] == 0:
@@ -133,13 +167,77 @@ class Database:
 
     # ---- Inspection History ----
 
+    @staticmethod
+    def _json_or_str(value):
+        """Normalisasi kolom JSON: str diteruskan apa adanya (hindari double-
+        encode), dict/list di-dump, None/empty → None."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value if value.strip() else None
+        try:
+            return json.dumps(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _migrate_simple_column(self, cursor, name: str, coltype: str) -> None:
+        """Tambah kolom bila belum ada. Idempoten, aman tiap startup."""
+        cols = [r[1] for r in cursor.execute(
+            "PRAGMA table_info(inspection_history)").fetchall()]
+        if name not in cols:
+            cursor.execute(
+                f"ALTER TABLE inspection_history ADD COLUMN {name} {coltype}")
+            logger.info("Migrasi history: kolom `%s` ditambahkan", name)
+
+    def _migrate_template_column(self, cursor) -> None:
+        """Tambah kolom `template` + index, lalu backfill dari metadata lama.
+
+        Idempotent: aman dipanggil tiap startup. Baris lama yang metadata-nya
+        tidak berisi template dibiarkan NULL — bukan ditebak.
+        """
+        cols = [r[1] for r in cursor.execute(
+            "PRAGMA table_info(inspection_history)").fetchall()]
+        if "template" not in cols:
+            cursor.execute(
+                "ALTER TABLE inspection_history ADD COLUMN template TEXT")
+            # Backfill: ambil folder id dari metadata JSON baris lama
+            rows = cursor.execute(
+                "SELECT id, metadata FROM inspection_history "
+                "WHERE metadata IS NOT NULL AND metadata != ''").fetchall()
+            filled = 0
+            for row in rows:
+                try:
+                    meta = json.loads(row[1])
+                    tid = str((meta or {}).get("template", "") or "")
+                except Exception:
+                    tid = ""
+                if tid:
+                    cursor.execute(
+                        "UPDATE inspection_history SET template = ? WHERE id = ?",
+                        (tid, row[0]))
+                    filled += 1
+            logger.info("Migrasi history: kolom `template` ditambahkan, "
+                        "%d/%d baris ter-backfill", filled, len(rows))
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_history_template
+            ON inspection_history(template)
+        """)
+
     def add_inspection(self, entry: dict) -> int:
         """Add an inspection result. Returns entry ID."""
+        # `template` = FOLDER ID template (bukan nama tampilan). Diambil dari
+        # entry, fallback ke metadata supaya pemanggil lama tetap benar.
+        template_id = str(entry.get("template", "") or "")
+        if not template_id:
+            meta = entry.get("metadata")
+            if isinstance(meta, dict):
+                template_id = str(meta.get("template", "") or "")
         self.conn.execute("""
             INSERT INTO inspection_history
                 (timestamp, program, score, judgement, threshold,
-                 latency_ms, image_path, thumbnail_path, roi_region, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 latency_ms, image_path, thumbnail_path, roi_region, metadata,
+                 template, operator)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             entry.get("timestamp", time.strftime("%Y-%m-%d %H:%M:%S")),
             entry.get("program", ""),
@@ -149,8 +247,10 @@ class Database:
             entry.get("latency_ms"),
             entry.get("image_path"),
             entry.get("thumbnail_path"),
-            json.dumps(entry.get("roi_region")) if entry.get("roi_region") else None,
-            json.dumps(entry.get("metadata")) if entry.get("metadata") else None,
+            self._json_or_str(entry.get("roi_region")),
+            self._json_or_str(entry.get("metadata")),
+            template_id or None,
+            str(entry.get("operator", "") or "") or None,
         ))
         self.conn.commit()
 
@@ -175,16 +275,31 @@ class Database:
         judgement: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        template: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Get inspection history with optional filters."""
+        """Get inspection history with optional filters.
+
+        `template` = FOLDER ID template. Tanpa filter ini, semua template
+        dalam satu program tercampur — dan rebuild akan menarik gambar
+        koreksi milik template lain.
+        """
         query = "SELECT * FROM inspection_history WHERE 1=1"
         params = []
 
         if program:
             query += " AND program = ?"
             params.append(program)
+        if template:
+            # Baris lama (sebelum migrasi) bisa punya template NULL sementara
+            # metadata-nya berisi id — cocokkan keduanya supaya history lama
+            # tidak hilang dari tampilan.
+            query += (" AND (template = ? OR (template IS NULL"
+                      " AND metadata LIKE ?))")
+            params.append(template)
+            params.append(f'%"template": "{template}"%')
         if judgement:
-            query += " AND judgement = ?"
+            # Filter mengikuti hasil TERKOREKSI (kolom tampilan)
+            query += " AND COALESCE(correct_judgement, judgement) = ?"
             params.append(judgement)
 
         query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
@@ -210,7 +325,12 @@ class Database:
         return self.conn.execute(query, params).fetchone()[0]
 
     def mark_correction(self, entry_id: int, correct_judgement: str) -> None:
-        """Mark a history entry as corrected."""
+        """Mark a history entry as corrected.
+
+        Catatan: kolom `judgement` (hasil asli inspeksi) TIDAK ditimpa —
+        nilai koreksi disimpan di `correct_judgement`. Tampilan tabel
+        memakai COALESCE(correct_judgement, judgement).
+        """
         self.conn.execute("""
             UPDATE inspection_history
             SET corrected = 1,
@@ -218,6 +338,14 @@ class Database:
                 corrected_at = ?
             WHERE id = ?
         """, (correct_judgement, time.strftime("%Y-%m-%d %H:%M:%S"), entry_id))
+        self.conn.commit()
+
+    def update_roi_region(self, entry_id: int, roi_region) -> None:
+        """Update per-ROI breakdown (kolom roi_region) — dipakai setelah
+        koreksi tuning agar kolom Per-ROI menampilkan hasil terkoreksi."""
+        self.conn.execute(
+            "UPDATE inspection_history SET roi_region = ? WHERE id = ?",
+            (self._json_or_str(roi_region), entry_id))
         self.conn.commit()
 
     def rollback_correction(self, entry_id: int) -> None:
@@ -304,14 +432,15 @@ class Database:
         return hashlib.sha256(f"visioninspect_2024_{password}".encode()).hexdigest()
 
     def _seed_default_admin(self):
-        """Create default admin account on first run."""
+        """Create default admin account on first run (C4: wajib ganti password)."""
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         self.conn.execute("""
-            INSERT INTO users (username, password_hash, display_name, role, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO users (username, password_hash, display_name, role,
+                               must_change_password, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 1, ?, ?)
         """, ("admin", self._hash_password("admin"), "Administrator", "admin", now, now))
         self.conn.commit()
-        logger.info("Default admin account created (admin/admin)")
+        logger.info("Default admin account created (admin/admin — WAJIB ganti password saat login pertama)")
 
     def authenticate(self, username: str, password: str) -> Optional[dict]:
         """Verify credentials. Returns user dict or None."""
@@ -336,6 +465,18 @@ class Database:
             "created_at, updated_at FROM users ORDER BY id")
         return [dict(row) for row in cursor.fetchall()]
 
+    def list_users_full(self) -> List[Dict[str, Any]]:
+        """List all users INCL. password_hash & must_change_password.
+
+        Dipakai khusus migrasi/sinkronisasi (mis. PostgresDB.sync_users_from
+        _sqlite) — jangan dipakai untuk tampilan UI.
+        """
+        cursor = self.conn.execute(
+            "SELECT id, username, password_hash, display_name, role, "
+            "COALESCE(must_change_password, 0) AS must_change_password "
+            "FROM users ORDER BY id")
+        return [dict(row) for row in cursor.fetchall()]
+
     def add_user(self, username: str, password: str, display_name: str = "",
                  role: str = "operator") -> int:
         """Add a new user. Returns user ID."""
@@ -349,7 +490,8 @@ class Database:
         return cursor.lastrowid
 
     def update_user(self, user_id: int, display_name: str = None,
-                    password: str = None, role: str = None) -> bool:
+                    password: str = None, role: str = None,
+                    must_change_password: bool = None) -> bool:
         """Update user fields. Returns True if changed."""
         fields = []
         values = []
@@ -359,9 +501,14 @@ class Database:
         if password is not None:
             fields.append("password_hash = ?")
             values.append(self._hash_password(password))
+            # Password baru di-set → flag paksa-ganti dimatikan (C4)
+            fields.append("must_change_password = 0")
         if role is not None:
             fields.append("role = ?")
             values.append(role)
+        if must_change_password is not None:
+            fields.append("must_change_password = ?")
+            values.append(1 if must_change_password else 0)
         if not fields:
             return False
         fields.append("updated_at = ?")
@@ -410,6 +557,80 @@ class Database:
         self.conn.commit()
         logger.info("User deleted: id=%d", user_id)
         return True
+
+    # ---- Push Outbox (C3 — antrian tahan-restart) ----
+
+    def add_outbox(self, entry: dict) -> int:
+        """Simpan satu entry push ke antrian outbox SQLite.
+
+        Entry adalah dict kwargs untuk ``PostgresDB.push_inspection``.
+        Tahan-restart: bila aplikasi mati sebelum sink selesai, entry tetap
+        ada dan di-flush saat startup berikutnya.
+        """
+        self.conn.execute("""
+            INSERT INTO push_outbox (entry_json, created_at)
+            VALUES (?, ?)
+        """, (json.dumps(entry), time.strftime("%Y-%m-%d %H:%M:%S")))
+        self.conn.commit()
+        return self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def get_outbox(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Ambil batch outbox (tertua dulu). Returns [{id, entry, attempts}, ...]."""
+        rows = self.conn.execute("""
+            SELECT id, entry_json, attempts FROM push_outbox
+            ORDER BY id LIMIT ?
+        """, (limit,)).fetchall()
+        result = []
+        for r in rows:
+            try:
+                entry = json.loads(r["entry_json"])
+            except (json.JSONDecodeError, TypeError, ValueError):
+                entry = {}
+            result.append({"id": r["id"], "entry": entry, "attempts": r["attempts"]})
+        return result
+
+    def delete_outbox(self, ids: List[int]) -> None:
+        """Hapus entry outbox yang sudah berhasil di-push (C3: nol duplikat)."""
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        self.conn.execute(
+            f"DELETE FROM push_outbox WHERE id IN ({placeholders})", ids)
+        self.conn.commit()
+
+    def bump_outbox_attempts(self, ids: List[int]) -> None:
+        """Naikkan hitungan percobaan entry yang gagal (retry tick berikutnya)."""
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        self.conn.execute(
+            f"UPDATE push_outbox SET attempts = attempts + 1 "
+            f"WHERE id IN ({placeholders})", ids)
+        self.conn.commit()
+
+    def count_outbox(self) -> int:
+        """Jumlah entry outbox yang belum ter-sink."""
+        return self.conn.execute(
+            "SELECT COUNT(*) AS c FROM push_outbox").fetchone()["c"]
+
+    def drop_oldest_outbox(self, n: int) -> None:
+        """Buang n entry tertua dari outbox (antrian bounded, C3).
+
+        Dilakukan hanya bila antrian membengkak (mis. PG mati berhari-hari);
+        entry terbaru dipertahankan. Baris yang dibuang dicatat ke audit log.
+        """
+        if n <= 0:
+            return
+        rows = self.conn.execute(
+            "SELECT id FROM push_outbox ORDER BY id LIMIT ?", (n,)).fetchall()
+        ids = [r["id"] for r in rows]
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        self.conn.execute(
+            f"DELETE FROM push_outbox WHERE id IN ({placeholders})", ids)
+        self.conn.commit()
+        logger.warning("Outbox bounded: %d entry tertua dibuang (antrian penuh)", n)
 
     # ---- Maintenance ----
 

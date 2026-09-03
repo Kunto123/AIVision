@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from visioninspect.gui.widgets.histogram_widget import HistogramWidget
 from visioninspect.gui.widgets.roi_editor import ROIEditor, ROIData
 from visioninspect.gui.widgets.roi_list_panel import ROIListPanel
+from visioninspect.gui.widgets.flow_gallery import FlowGallery
 from visioninspect.gui.widgets.thumbnail import ThumbnailWidget
 from visioninspect.utils.i18n import Translator
 
@@ -41,15 +42,16 @@ class TeachPage(QWidget):
     # Mode Lanjutan.
     TRAINING_PROFILES = {
         "fast": {"label": "Cepat", "backbone": "resnet18",
-                 "coreset_sampling_ratio": 0.1},
+                 "coreset_sampling_ratio": 0.1, "input_size": 128},
         "balanced": {"label": "Seimbang", "backbone": "resnet18",
-                     "coreset_sampling_ratio": 0.25},
+                     "coreset_sampling_ratio": 0.25, "input_size": 192},
         "accurate": {"label": "Detail Tinggi", "backbone": "wide_resnet50_2",
-                     "coreset_sampling_ratio": 0.25},
+                     "coreset_sampling_ratio": 0.25, "input_size": 256},
     }
 
     image_deleted = Signal(str)
     thumbnail_clicked = Signal(str)
+    thumbnail_mask_requested = Signal(str)  # path — adjust mask khusus foto ini
     import_cancelled = Signal()
     training_config_changed = Signal()
     augmentation_config_changed = Signal()
@@ -147,6 +149,14 @@ class TeachPage(QWidget):
             "Uji model terhadap batch foto statis dari disk — sanity check "
             "tanpa kamera live, hasil tidak disimpan ke riwayat inspeksi.")
         capture_row.addWidget(self._test_model_btn)
+
+        self._test_video_btn = QPushButton("Uji Video")
+        self._test_video_btn.setMinimumHeight(38)
+        self._test_video_btn.setToolTip(
+            "Uji model via file video — replay lewat jalur live (part-check, "
+            "ROI, debounce persis seperti kamera). Mode uji: PLC/counter/"
+            "history nonaktif; frame OK/NG diexport untuk koreksi dataset.")
+        capture_row.addWidget(self._test_video_btn)
         left_layout.addLayout(capture_row)
 
         # Import status — baris dengan progress + cancel
@@ -236,42 +246,38 @@ class TeachPage(QWidget):
         gallery_layout = QHBoxLayout()
         gallery_layout.setSpacing(8)
 
+        # Judul group box sebelumnya "OK " + "Galeri OK" → tampil ganda
+        # ("OK Galeri OK"). Cukup teks terjemahannya saja.
+        _GAL_QSS = ("background: #111D30; border: 1px solid #233A57; "
+                    "border-radius: 4px;")
+
         # OK
-        ok_group = QGroupBox("OK " + self._tr.tr("teach_gallery_ok"))
+        ok_group = QGroupBox(self._tr.tr("teach_gallery_ok"))
         ok_g = QVBoxLayout(ok_group)
         ok_g.setContentsMargins(6, 6, 6, 6)
         self._ok_count_label = QLabel(self._tr.tr("teach_count_ok", count=0))
         self._ok_count_label.setStyleSheet("color: #22C55E; font-weight: bold;")
         ok_g.addWidget(self._ok_count_label)
-        ok_scroll = QScrollArea()
-        ok_scroll.setWidgetResizable(True)
-        ok_scroll.setMinimumHeight(80)
-        ok_scroll.setStyleSheet("background: #111D30; border: 1px solid #233A57; border-radius: 4px;")
-        self._ok_gallery_widget = QWidget()
-        self._ok_gallery_layout = QHBoxLayout(self._ok_gallery_widget)
-        self._ok_gallery_layout.setContentsMargins(4, 4, 4, 4)
-        self._ok_gallery_layout.addStretch()
-        ok_scroll.setWidget(self._ok_gallery_widget)
-        ok_g.addWidget(ok_scroll)
+        # FlowGallery: thumbnail mengalir ke bawah, scroll vertikal saja.
+        # Tinggi ±2 baris supaya scroll ke bawah benar-benar berguna; ukuran
+        # tiap thumbnail tidak berubah (tetap seragam 78x82).
+        self._ok_gallery = FlowGallery()
+        self._ok_gallery.setMinimumHeight(180)
+        self._ok_gallery.setStyleSheet(_GAL_QSS)
+        ok_g.addWidget(self._ok_gallery)
         gallery_layout.addWidget(ok_group)
 
         # NG
-        ng_group = QGroupBox("NG " + self._tr.tr("teach_gallery_ng"))
+        ng_group = QGroupBox(self._tr.tr("teach_gallery_ng"))
         ng_g = QVBoxLayout(ng_group)
         ng_g.setContentsMargins(6, 6, 6, 6)
         self._ng_count_label = QLabel(self._tr.tr("teach_count_ng", count=0))
         self._ng_count_label.setStyleSheet("color: #EF4444; font-weight: bold;")
         ng_g.addWidget(self._ng_count_label)
-        ng_scroll = QScrollArea()
-        ng_scroll.setWidgetResizable(True)
-        ng_scroll.setMinimumHeight(80)
-        ng_scroll.setStyleSheet("background: #111D30; border: 1px solid #233A57; border-radius: 4px;")
-        self._ng_gallery_widget = QWidget()
-        self._ng_gallery_layout = QHBoxLayout(self._ng_gallery_widget)
-        self._ng_gallery_layout.setContentsMargins(4, 4, 4, 4)
-        self._ng_gallery_layout.addStretch()
-        ng_scroll.setWidget(self._ng_gallery_widget)
-        ng_g.addWidget(ng_scroll)
+        self._ng_gallery = FlowGallery()
+        self._ng_gallery.setMinimumHeight(180)
+        self._ng_gallery.setStyleSheet(_GAL_QSS)
+        ng_g.addWidget(self._ng_gallery)
         gallery_layout.addWidget(ng_group)
 
         left_layout.addLayout(gallery_layout)
@@ -338,6 +344,7 @@ class TeachPage(QWidget):
         self._algo_combo = QComboBox()
         self._algo_combo.addItem("PatchCore", "patchcore")
         self._algo_combo.addItem("EfficientAd", "efficientad")
+        self._algo_combo.addItem("YOLO (Klasifikasi)", "yolo")
         self._algo_combo.currentIndexChanged.connect(self._on_advanced_field_changed)
         self._algo_combo.currentIndexChanged.connect(self._update_algorithm_field_visibility)
         self._adv_form.addRow("Algorithm:", self._algo_combo)
@@ -349,6 +356,23 @@ class TeachPage(QWidget):
         # training). Disembunyikan untuk EfficientAd lewat setRowVisible,
         # sama seperti Epochs disembunyikan untuk PatchCore, biar tidak
         # menyesatkan seolah-olah field itu berlaku untuk kedua algorithm.
+        # Ukuran input model — dipakai PatchCore, EfficientAd, dan YOLO
+        # (yolo_imgsz default 0 = ikut input_size, lihat core/training.py:115).
+        # Semua ROI di-resize ke ukuran ini sebelum masuk model.
+        self._input_size_combo = QComboBox()
+        self._input_size_combo.addItems(["256", "192", "128"])
+        self._input_size_combo.setCurrentIndex(0)
+        self._input_size_combo.setToolTip(
+            "Ukuran gambar yang masuk ke model. Semua ROI di-resize ke ukuran ini.\n"
+            "256 = paling teliti, paling lambat (7 ROI ≈ 960 ms di CPU 2-core)\n"
+            "192 = jalan tengah (≈ 430 ms)\n"
+            "128 = paling ringan (≈ 165 ms), deteksi 2x lebih kasar\n"
+            "ROI terbesar template ini menentukan batas aman. Ganti nilai ini\n"
+            "WAJIB training ulang — model lama tidak cocok."
+        )
+        self._input_size_combo.currentIndexChanged.connect(self._on_advanced_field_changed)
+        self._adv_form.addRow("Input Size:", self._input_size_combo)
+
         self._backbone_combo = QComboBox()
         self._backbone_combo.addItems(["resnet18", "wide_resnet50_2"])
         self._backbone_combo.currentIndexChanged.connect(self._on_advanced_field_changed)
@@ -385,11 +409,22 @@ class TeachPage(QWidget):
         self._patience_spin.setValue(0)
         self._patience_spin.setToolTip(
             "Early Stopping: stop training lebih awal jika tidak ada "
-            "perbaikan selama N epoch. 0 = nonaktif. "
-            "Hanya berlaku untuk EfficientAd."
+            "perbaikan selama N epoch. 0 = otomatis (EfficientAd nonaktif; "
+            "YOLO memakai ±20% epochs). Berlaku untuk EfficientAd & YOLO."
         )
         self._patience_spin.valueChanged.connect(self._on_advanced_field_changed)
         self._adv_form.addRow("Patience:", self._patience_spin)
+
+        # Pretrained YOLO — cuma untuk algorithm="yolo". Classification model
+        # (bukan detection) karena YOLO di sini menilai tiap crop OK/NG,
+        # persis peran Folder anomalib (normal/abnormal). v11 large/x-large
+        # cocok di-train di PC kuat; v8n opsi ringan untuk uji cepat.
+        self._yolo_pretrained_combo = QComboBox()
+        self._yolo_pretrained_combo.addItem("YOLOv11 Large (cls)", "yolov11l-cls.pt")
+        self._yolo_pretrained_combo.addItem("YOLOv11 X-Large (cls)", "yolov11x-cls.pt")
+        self._yolo_pretrained_combo.addItem("YOLOv8 Nano (cls) — uji cepat", "yolov8n-cls.pt")
+        self._yolo_pretrained_combo.currentIndexChanged.connect(self._on_advanced_field_changed)
+        self._adv_form.addRow("YOLO Model:", self._yolo_pretrained_combo)
 
         self._advanced_widget.setVisible(False)
         profile_outer.addWidget(self._advanced_widget)
@@ -439,12 +474,6 @@ class TeachPage(QWidget):
         self._aug_contrast_cb, self._aug_contrast_spin, self._aug_contrast_random_cb = \
             self._build_augmentation_range_row(
                 aug_outer, "Contrast", "%", 1, 100, 20)
-
-        self._aug_regenerate_btn = QPushButton("Regenerate")
-        self._aug_regenerate_btn.setToolTip(
-            "Paksa generate ulang augmentasi walau setting tidak berubah "
-            "(misal cuma ingin nilai Acak yang baru).")
-        aug_outer.addWidget(self._aug_regenerate_btn)
 
         right_layout.addWidget(aug_group)
 
@@ -582,10 +611,19 @@ class TeachPage(QWidget):
 
         tv = QHBoxLayout()
         tv.addWidget(QLabel("0.0"))
-        self._threshold_value_label = QLabel("0.500")
-        self._threshold_value_label.setAlignment(Qt.AlignCenter)
-        self._threshold_value_label.setObjectName("bigCounter")
-        tv.addWidget(self._threshold_value_label)
+        # Bisa diketik ATAU di-slide: spin sinkron dua arah dengan slider.
+        # keyboardTracking(False) → valueChanged hanya saat Enter/panah/focus-out,
+        # jadi mengetik angka tidak melompat-lompat tiap karakter.
+        self._threshold_spin = QDoubleSpinBox()
+        self._threshold_spin.setRange(0.0, 1.0)
+        self._threshold_spin.setDecimals(3)
+        self._threshold_spin.setSingleStep(0.005)
+        self._threshold_spin.setKeyboardTracking(False)
+        self._threshold_spin.setValue(0.500)
+        self._threshold_spin.setAlignment(Qt.AlignCenter)
+        self._threshold_spin.setObjectName("bigCounter")
+        self._threshold_spin.valueChanged.connect(self._on_threshold_spin_changed)
+        tv.addWidget(self._threshold_spin)
         tv.addWidget(QLabel("1.0"))
         th_layout.addLayout(tv)
         right_layout.addWidget(threshold_group)
@@ -645,13 +683,15 @@ class TeachPage(QWidget):
         t = ThumbnailWidget(pixmap, path, "#22C55E")
         t.deleted.connect(lambda p: self._on_delete_image(p, "ok"))
         t.clicked.connect(self.thumbnail_clicked.emit)
-        self._ok_gallery_layout.insertWidget(self._ok_gallery_layout.count() - 1, t)
+        t.mask_requested.connect(self.thumbnail_mask_requested.emit)
+        self._ok_gallery.add_widget(t)
 
     def add_ng_thumbnail(self, pixmap, path=""):
         t = ThumbnailWidget(pixmap, path, "#EF4444")
         t.deleted.connect(lambda p: self._on_delete_image(p, "ng"))
         t.clicked.connect(self.thumbnail_clicked.emit)
-        self._ng_gallery_layout.insertWidget(self._ng_gallery_layout.count() - 1, t)
+        t.mask_requested.connect(self.thumbnail_mask_requested.emit)
+        self._ng_gallery.add_widget(t)
 
     def _on_delete_image(self, path, label):
         import os
@@ -663,11 +703,8 @@ class TeachPage(QWidget):
         self.image_deleted.emit(label)
 
     def clear_galleries(self):
-        for layout in [self._ok_gallery_layout, self._ng_gallery_layout]:
-            while layout.count() > 1:
-                item = layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
+        self._ok_gallery.clear()
+        self._ng_gallery.clear()
 
     # ---- Slots ----
 
@@ -714,13 +751,29 @@ class TeachPage(QWidget):
 
     @Slot()
     def set_threshold(self, value: float):
-        self._threshold_value_label.setText(f"{value:.3f}")
+        """Set threshold dari config (load template) — sinkron slider + spin,
+        sinyal diblok agar tidak memicu handler saat inisialisasi."""
         self._threshold_slider.blockSignals(True)
         self._threshold_slider.setValue(int(value * 1000))
         self._threshold_slider.blockSignals(False)
+        self._threshold_spin.blockSignals(True)
+        self._threshold_spin.setValue(round(value, 3))
+        self._threshold_spin.blockSignals(False)
+        # Panel ROI menampilkan nilai global ini saat sebuah ROI "ikut global",
+        # supaya jelas angka mana yang sebenarnya berlaku untuk ROI itu.
+        self._roi_panel.set_global_threshold(float(value))
 
     def _on_threshold_changed(self, value: int):
-        self._threshold_value_label.setText(f"{value / 1000.0:.3f}")
+        """Slider digeser → update spin (diblok anti-loop) + label besar."""
+        self._threshold_spin.blockSignals(True)
+        self._threshold_spin.setValue(value / 1000.0)
+        self._threshold_spin.blockSignals(False)
+
+    def _on_threshold_spin_changed(self, value: float):
+        """Spin diketik/diubah → geser slider. Tanpa blockSignals: valueChanged
+        slider memicu _on_threshold_changed (yang mem-block spin → anti-loop),
+        plus main_window._on_threshold_slider untuk update engine live."""
+        self._threshold_slider.setValue(int(round(value * 1000)))
 
     @Slot()
     def set_warning(self, message: str):
@@ -823,6 +876,7 @@ class TeachPage(QWidget):
             "algorithm": self._algo_combo.currentData(),
             "backbone": self._backbone_combo.currentText(),
             "coreset_sampling_ratio": round(self._coreset_spin.value(), 2),
+            "input_size": int(self._input_size_combo.currentText()),
             "training_profile": self._profile_combo.currentData(),
         }
         # Cuma simpan override eksplisit untuk EfficientAd — PatchCore biar
@@ -830,6 +884,11 @@ class TeachPage(QWidget):
         # kebetulan tersisa di spinbox yang sedang disembunyikan.
         if self._algo_combo.currentData() == "efficientad":
             cfg["max_epochs"] = self._epochs_spin.value()
+        # YOLO juga memakai epochs (ultralytics train) — simpan eksplisit
+        # ke yolo_epochs (bukan max_epochs; itu milik EfficientAd).
+        if self._algo_combo.currentData() == "yolo":
+            cfg["yolo_epochs"] = self._epochs_spin.value()
+            cfg["yolo_pretrained"] = self._yolo_pretrained_combo.currentData()
         # Patience juga cuma untuk EfficientAd
         cfg["patience"] = self._patience_spin.value()
         return cfg
@@ -840,24 +899,32 @@ class TeachPage(QWidget):
         # sebelum semua field selesai di-load).
         _widgets = [self._profile_combo, self._algo_combo,
                     self._backbone_combo, self._coreset_spin, self._epochs_spin,
-                    self._patience_spin]
+                    self._patience_spin, self._yolo_pretrained_combo,
+                    self._input_size_combo]
         for w in _widgets:
             w.blockSignals(True)
         try:
             algorithm = cfg.get("algorithm", "patchcore")
             backbone = cfg.get("backbone", "resnet18")
             coreset = cfg.get("coreset_sampling_ratio", 0.1)
+            input_size = int(cfg.get("input_size", 256))
 
             idx = self._algo_combo.findData(algorithm)
             self._algo_combo.setCurrentIndex(idx if idx >= 0 else 0)
             idx = self._backbone_combo.findText(backbone)
             self._backbone_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self._coreset_spin.setValue(coreset)
-            self._epochs_spin.setValue(cfg.get("max_epochs", 100))
+            idx = self._input_size_combo.findText(str(input_size))
+            self._input_size_combo.setCurrentIndex(idx if idx >= 0 else 0)  # fallback 256
+            self._epochs_spin.setValue(cfg.get("yolo_epochs",
+                                               cfg.get("max_epochs", 100)))
             self._patience_spin.setValue(cfg.get("patience", 0))
+            idx = self._yolo_pretrained_combo.findData(
+                cfg.get("yolo_pretrained", "yolov11l-cls.pt"))
+            self._yolo_pretrained_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
             profile = cfg.get("training_profile") or self._infer_profile(
-                algorithm, backbone, coreset)
+                algorithm, backbone, coreset, input_size)
             idx = self._profile_combo.findData(profile)
             self._profile_combo.setCurrentIndex(
                 idx if idx >= 0 else self._profile_combo.findData("custom"))
@@ -866,13 +933,15 @@ class TeachPage(QWidget):
                 w.blockSignals(False)
         self._update_algorithm_field_visibility()
 
-    def _infer_profile(self, algorithm: str, backbone: str, coreset_ratio: float) -> str:
+    def _infer_profile(self, algorithm: str, backbone: str,
+                       coreset_ratio: float, input_size: int) -> str:
         """Guess which preset (if any) matches values loaded from an older
         template config that predates the training_profile field."""
         if algorithm == "patchcore":
             for key, prof in self.TRAINING_PROFILES.items():
                 if (prof["backbone"] == backbone
-                        and abs(prof["coreset_sampling_ratio"] - coreset_ratio) < 1e-6):
+                        and abs(prof["coreset_sampling_ratio"] - coreset_ratio) < 1e-6
+                        and prof["input_size"] == input_size):
                     return key
         return "custom"
 
@@ -881,7 +950,8 @@ class TeachPage(QWidget):
         prof = self.TRAINING_PROFILES.get(key)
         if not prof:
             return  # "custom" selected — leave advanced fields as-is
-        _widgets = [self._algo_combo, self._backbone_combo, self._coreset_spin]
+        _widgets = [self._algo_combo, self._backbone_combo, self._coreset_spin,
+                    self._input_size_combo]
         for w in _widgets:
             w.blockSignals(True)
         try:
@@ -890,6 +960,9 @@ class TeachPage(QWidget):
             if idx >= 0:
                 self._backbone_combo.setCurrentIndex(idx)
             self._coreset_spin.setValue(prof["coreset_sampling_ratio"])
+            idx = self._input_size_combo.findText(str(prof["input_size"]))
+            if idx >= 0:
+                self._input_size_combo.setCurrentIndex(idx)
         finally:
             for w in _widgets:
                 w.blockSignals(False)
@@ -911,12 +984,17 @@ class TeachPage(QWidget):
 
     def _update_algorithm_field_visibility(self, *_):
         """Tampilkan cuma field yang benar-benar dipakai algorithm terpilih:
-        Backbone & Coreset Ratio khusus PatchCore, Epochs & Patience khusus EfficientAd."""
-        is_efficientad = self._algo_combo.currentData() == "efficientad"
-        self._adv_form.setRowVisible(self._epochs_spin, is_efficientad)
-        self._adv_form.setRowVisible(self._patience_spin, is_efficientad)
-        self._adv_form.setRowVisible(self._backbone_combo, not is_efficientad)
-        self._adv_form.setRowVisible(self._coreset_spin, not is_efficientad)
+        Backbone & Coreset Ratio khusus PatchCore; Epochs khusus EfficientAd
+        & YOLO; YOLO Model khusus YOLO; Patience khusus EfficientAd & YOLO
+        (YOLO memakai patience untuk early stopping di model.train())."""
+        algo = self._algo_combo.currentData()
+        is_efficientad = algo == "efficientad"
+        is_yolo = algo == "yolo"
+        self._adv_form.setRowVisible(self._epochs_spin, is_efficientad or is_yolo)
+        self._adv_form.setRowVisible(self._patience_spin, is_efficientad or is_yolo)
+        self._adv_form.setRowVisible(self._backbone_combo, not (is_efficientad or is_yolo))
+        self._adv_form.setRowVisible(self._coreset_spin, not (is_efficientad or is_yolo))
+        self._adv_form.setRowVisible(self._yolo_pretrained_combo, is_yolo)
 
     # ---- Augmentasi Data ----
 
@@ -983,9 +1061,6 @@ class TeachPage(QWidget):
     def _on_augmentation_field_changed(self, *_):
         self.augmentation_config_changed.emit()
 
-    def get_augmentation_regenerate_button(self) -> QPushButton:
-        return self._aug_regenerate_btn
-
     def _update_pc_field_visibility(self, *_):
         """Show only the threshold/canny rows relevant to the selected method."""
         method = self._pc_method_combo.currentData()
@@ -1001,8 +1076,11 @@ class TeachPage(QWidget):
     def get_capture_ng_button(self): return self._capture_ng_btn
     def get_import_button(self): return self._import_btn
     def get_test_model_button(self): return self._test_model_btn
+    def get_test_video_button(self): return self._test_video_btn
     def get_train_button(self): return self._train_btn
     def get_threshold_slider(self): return self._threshold_slider
+
+    def get_threshold_spin(self): return self._threshold_spin
     def get_progress_bar(self): return self._progress_bar
     def get_template_combo(self): return self._template_combo
     def get_add_template_button(self): return self._add_template_btn

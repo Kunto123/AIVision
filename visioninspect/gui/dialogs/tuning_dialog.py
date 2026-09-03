@@ -101,8 +101,12 @@ class TuningDialog(QDialog):
         self._build_pixmap()
         self._setup_ui()
 
-    def _init_rois(self, rois_data: List[dict]):
+    def _init_rois(self, rois_data):
+        if not isinstance(rois_data, (list, tuple)):
+            return
         for i, r in enumerate(rois_data):
+            if not isinstance(r, dict):
+                continue
             rect = (r.get("x", 0), r.get("y", 0),
                     r.get("width", 64), r.get("height", 64))
             self._rois.append(TuningROI(
@@ -267,7 +271,12 @@ class TuningDialog(QDialog):
                 f"background: {'#1A2A44' if i != self._selected_idx else '#233A57'}; "
                 f"color: #E2E8F0;"
             )
-            btn.clicked.connect(lambda checked, idx=i: self._select_roi(idx))
+            # NOTE: PySide6 QPushButton.clicked punya 2 overload — `clicked()` dan
+            # `clicked(bool checked)`. Lambda HARUS menerima `checked=False` opsional:
+            #   - lambda `checked, idx=i` (2 wajib) → crash "missing 'checked'" saat emit `clicked()`
+            #   - lambda `idx=i` (1 wajib) → tersambung ke overload `clicked(bool)` → idx tertimpa False → SELALU pilih ROI pertama
+            btn.clicked.connect(
+                lambda checked=False, idx=i: self._select_roi(idx))
             self._roi_list_layout.addWidget(btn)
 
     def _select_roi(self, idx: int):

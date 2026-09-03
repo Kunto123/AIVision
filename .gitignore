@@ -9,6 +9,12 @@ build/
 *.whl
 *.spec
 
+# Kecuali wheel yang SENGAJA di-vendor. fxplc tidak ada di PyPI (hanya di
+# GitHub), jadi instalasi offline PC edge bergantung pada file ini ikut
+# ter-commit. Tanpa pengecualian ini, *.whl di atas membuangnya diam-diam
+# dan PLC tidak akan berfungsi di mesin hasil clone.
+!vendor/*.whl
+
 # --- Virtual Environment ---
 .vision/
 venv/
@@ -19,6 +25,7 @@ env/
 # --- Project Data (training images, models, DB) ---
 data/
 !data/.gitkeep
+none/
 
 # Generated history/NG images
 history/
@@ -59,6 +66,7 @@ rcc_*.py
 # --- Logs ---
 *.log
 logs/
+kernel.errors.txt
 
 # --- Temp ---
 tmp/
@@ -75,6 +83,16 @@ temp/
 datasets/
 pre_trained/
 results/
+tests/
+packaging/
+docs
 
 # --- Offline deployment bundle (built by tools/prepare_offline_bundle.bat) ---
 offline_bundle/
+
+docs/KNOWN_ISSUES.md
+docs/PROGRESS.md
+
+retrain_wsl.bat
+run.sh
+setup.bat

@@ -110,9 +110,10 @@ def train(program: str, template_id: str):
         torch_ok = False
 
     if torch_ok:
-        print("🧠 PyTorch tersedia → Anomalib training")
+        algo = tmpl_cfg.get("algorithm", "patchcore")
+        print(f"🧠 PyTorch tersedia → training ({algo})")
         train_cfg = TrainingConfig(
-            algorithm=tmpl_cfg.get("algorithm", "patchcore"),
+            algorithm=algo,
             backbone=tmpl_cfg.get("backbone", "resnet18"),
             input_size=input_size,
             coreset_sampling_ratio=tmpl_cfg.get("coreset_sampling_ratio", 0.1),
@@ -120,6 +121,17 @@ def train(program: str, template_id: str):
             manual_threshold=tmpl_cfg.get("manual_threshold", 0.5),
             enable_int8=tmpl_cfg.get("enable_int8", True),
             max_epochs=tmpl_cfg.get("max_epochs"),
+            # === Resource-aware (sama dengan GUI) ===
+            device=tmpl_cfg.get("device", "auto"),
+            batch_size=tmpl_cfg.get("batch_size", 0),
+            num_workers=tmpl_cfg.get("num_workers", 0),
+            precision=tmpl_cfg.get("precision", "32"),
+            enable_mixed_precision=tmpl_cfg.get("enable_mixed_precision", False),
+            patience=tmpl_cfg.get("patience", 0),
+            # === YOLO ===
+            yolo_pretrained=tmpl_cfg.get("yolo_pretrained", "yolov11l-cls.pt"),
+            yolo_epochs=tmpl_cfg.get("yolo_epochs", 100),
+            yolo_imgsz=tmpl_cfg.get("yolo_imgsz", 0),
         )
         pipeline = TrainingPipeline(train_cfg)
 

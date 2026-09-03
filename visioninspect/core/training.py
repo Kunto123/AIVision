@@ -1,6 +1,9 @@
 """
 VisionInspect - Training Pipeline
-Anomalib-based training: PatchCore / EfficientAd → export OpenVINO → INT8 PTQ.
+Melatih model dari gambar OK/NG lalu export ke OpenVINO (opsional INT8 PTQ).
+Dua jalur terpisah, dipilih dari TrainingConfig.algorithm:
+  yolo                  → ultralytics (klasifikasi OK/NG), tanpa Anomalib
+  patchcore | efficientad → Anomalib + kalibrasi threshold + norm.json
 """
 
 import json
@@ -12,9 +15,18 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from lightning.pytorch.callbacks import EarlyStopping
+# CATATAN: `lightning` (dan lewat itu, torch) SENGAJA TIDAK diimport di
+# level modul. Rantainya: main_window → training_worker → training →
+# lightning → torch. Import di sini membuat:
+#   1) edge_mode=true GAGAL TOTAL — torch jadi termuat SESUDAH PySide6/cv2,
+#      persis urutan yang memicu WinError 1114 (lihat main.py:44-56);
+#   2) PC edge tanpa `lightning` (tidak ada di requirements_edge.txt) tidak
+#      bisa start sama sekali — ModuleNotFoundError saat import MainWindow.
+# EarlyStopping hanya dipakai di jalur training Anomalib, jadi diimport
+# secara lazy di titik pemakaian.
 
 from visioninspect.utils.logging_setup import get_logger
+from visioninspect.utils.config import DEFAULT_DATA_DIR
 from visioninspect.core.resource_detector import detect_resource, check_training_safety
 
 logger = get_logger("training")
@@ -24,12 +36,56 @@ class TrainingError(Exception):
     pass
 
 
+# Tag release GitHub ultralytics/assets — dicoba berurutan sampai sukses.
+_ASSET_TAGS = ("v8.3.0", "v0.0.0")
+
+
+def _download_yolo_asset(name: str, dest: Path, timeout: float = 180.0) -> None:
+    """Unduh weight pretrained ultralytics dari GitHub releases ke ``dest``.
+
+    - Mencoba beberapa tag release (HTTP 404 → coba tag berikutnya).
+    - File ditulis ke ``<dest>.part`` dulu lalu di-rename (anti file rusak
+      saat proses terputus).
+    - Gagal semua → TrainingError dengan instruksi taruh file manual.
+    """
+    import urllib.error
+    import urllib.request
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    errors: list[str] = []
+    for tag in _ASSET_TAGS:
+        url = ("https://github.com/ultralytics/assets/releases/download/"
+               f"{tag}/{name}")
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "VisionInspect-Trainer/1.0 (ultralytics asset)"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp, \
+                    open(tmp, "wb") as fh:
+                shutil.copyfileobj(resp, fh, length=256 * 1024)
+            if tmp.stat().st_size > 0:
+                tmp.replace(dest)
+                return
+            tmp.unlink(missing_ok=True)
+            errors.append(f"{url} → file kosong")
+        except urllib.error.HTTPError as e:
+            errors.append(f"{url} → HTTP {e.code}")
+            tmp.unlink(missing_ok=True)
+        except Exception as e:  # network / timeout / dll
+            errors.append(f"{url} → {e}")
+            tmp.unlink(missing_ok=True)
+    raise TrainingError(
+        "Gagal mengunduh pretrained YOLO otomatis:\n  " + "\n  ".join(errors)
+        + f"\nPeriksa koneksi internet, atau taruh file '{name}' secara "
+          f"manual di:\n  {dest}")
+
+
 class TrainingConfig:
     """Configuration for training pipeline."""
 
     def __init__(
         self,
-        algorithm: str = "patchcore",       # patchcore | efficientad
+        algorithm: str = "patchcore",       # patchcore | efficientad | yolo
         backbone: str = "resnet18",          # resnet18 | wide_resnet50_2
         input_size: int = 256,
         coreset_sampling_ratio: float = 0.1,
@@ -46,6 +102,10 @@ class TrainingConfig:
         enable_mixed_precision: bool = False,
         # === Early Stopping ===
         patience: int = 0,                  # 0 = nonaktif, >0 = stop setelah N epoch tanpa improvement
+        # === YOLO (hanya untuk algorithm="yolo") ===
+        yolo_pretrained: str = "yolov11l-cls.pt",  # ultralytics weight: v11 large (classification)
+        yolo_epochs: int = 100,
+        yolo_imgsz: int = 0,                # 0 = pakai input_size
     ):
         self.algorithm = algorithm
         self.backbone = backbone
@@ -61,6 +121,9 @@ class TrainingConfig:
         self.precision = precision
         self.enable_mixed_precision = enable_mixed_precision
         self.patience = patience
+        self.yolo_pretrained = yolo_pretrained
+        self.yolo_epochs = yolo_epochs
+        self.yolo_imgsz = yolo_imgsz or input_size
         # PatchCore is one-shot (memory-bank, no backprop) — 1 epoch is correct.
         # EfficientAd trains an actual network via backprop and needs many more
         # epochs to converge; None picks a sensible per-algorithm default.
@@ -146,6 +209,32 @@ class TrainingPipeline:
             logger.debug("Memory guard check skipped: %s", _e)
         # ── Akhir Memory Guard ──────────────────────────────────────────────
 
+        # ── YOLO (ultralytics) — jalur terpisah, tanpa Anomalib ─────────────
+        # YOLO berperan sebagai klasifikasi OK/NG per crop (bukan deteksi box):
+        # tiap gambar/crop dinilai "OK" atau "NG" persis seperti Folder
+        # anomalib (normal_dir=ok, abnormal_dir=ng). Basic-nya PyTorch, jadi
+        # training lanjutan (fine-tune) bisa dilakukan. Hasil tetap di-export
+        # ke OpenVINO (model.xml) + yolo_meta.json agar InferenceEngine
+        # otomatis memakai jalur klasifikasi probabilitas saat load.
+        if self._config.algorithm == "yolo":
+            return self._train_yolo(ok_images, ng_images, ok_dir, ng_dir,
+                                    output_dir)
+
+        # Anomalib (PatchCore/EfficientAd) butuh minimal 2 gambar OK, bukan 1.
+        # Alasannya BUKAN sembarang aturan — dengan tepat 1 gambar OK, langkah
+        # internal Folder.setup() yang mencoba menyisihkan sebagian gambar OK
+        # untuk test-set (test_split_ratio) membagi 1 gambar dengan rasio
+        # [0.8, 0.2]: floor(0.8)=0 dan floor(0.2)=0, sehingga totalnya nol dan
+        # anomalib membagi sisa gambar dengan "i % 0" → ZeroDivisionError
+        # ("integer modulo by zero"). Diverifikasi: OK=1 selalu gagal dengan
+        # abnormal_dir apa pun; OK≥2 aman untuk langkah ini (lihat juga
+        # val_split_mode=SAME_AS_TEST di bawah untuk kasus OK 5-9 dst.).
+        if len(ok_images) < 2:
+            raise TrainingError(
+                "Minimal 2 gambar OK diperlukan untuk PatchCore/EfficientAd "
+                "(dataset internal anomalib butuh cukup gambar untuk membagi "
+                "train/test-set tanpa error)")
+
         # Try Anomalib import
         try:
             import torch  # noqa: F401 — check torch is loadable first
@@ -170,6 +259,7 @@ class TrainingPipeline:
             # Sekarang import Engine — dia akan mengambil create_versioned_dir
             # yang sudah di-patch dari namespace anomalib.utils.path
             from anomalib.data import Folder
+            from anomalib.data.utils import ValSplitMode
             from anomalib.models import Patchcore, EfficientAd
             from anomalib.engine import Engine
             from anomalib.deploy import ExportType
@@ -220,35 +310,54 @@ class TrainingPipeline:
                 batch_size = 1  # EfficientAd Wajib batch_size=1
                 num_workers = 0
             else:
-                # PatchCore — pakai rekomendasi dari config atau auto-detect
+                # PatchCore — pakai rekomendasi dari config atau auto-detect.
+                # detect_resource() SELALU dipanggil (murah) supaya num_workers
+                # tetap terisi walau batch_size sudah ditentukan config — versi
+                # lama meninggalkan num_workers tak terdefinisi pada kombinasi
+                # itu (UnboundLocalError laten, belum pernah kena karena UI
+                # belum ada yang mengisi batch_size > 0).
+                res = detect_resource()
                 if self._config.batch_size > 0:
                     batch_size = self._config.batch_size
                 else:
-                    res = detect_resource()
                     batch_size = res.batch_size
-                    num_workers = res.num_workers
                     logger.info(
                         "ResourceDetector: mode=%s, batch_size=%d, num_workers=%d, device=%s",
-                        res.mode, batch_size, num_workers, res.device)
+                        res.mode, batch_size, res.num_workers, res.device)
                     if res.warnings:
                         for w in res.warnings:
                             logger.warning("Resource: %s", w)
                 # Pastikan batch_size minimal 1
                 batch_size = max(1, batch_size)
-                if self._config.num_workers > 0:
-                    num_workers = self._config.num_workers
-                else:
-                    num_workers = num_workers  # dari detect_resource
+                num_workers = (self._config.num_workers
+                               if self._config.num_workers > 0
+                               else res.num_workers)
+            # abnormal_dir HANYA diisi kalau benar-benar ada gambar NG —
+            # sebelumnya dicek dari `ng_dir` (objek Path, selalu truthy walau
+            # foldernya kosong), sehingga folder NG kosong membuat anomalib
+            # gagal dengan "Found 0 DirType.ABNORMAL images" alih-alih
+            # dianggap "tidak ada NG" (mode train-only, yang memang didukung).
             datamodule = Folder(
                 name="visioninspect",
                 task=TaskType.CLASSIFICATION,
                 root=ok_dir.parent,
                 normal_dir=ok_dir.name,
-                abnormal_dir=ng_dir.name if ng_dir else None,
+                abnormal_dir=ng_dir.name if ng_images else None,
                 image_size=(self._config.input_size, self._config.input_size),
                 train_batch_size=batch_size,
                 eval_batch_size=batch_size,
                 num_workers=num_workers,
+                # SAME_AS_TEST menghindari random_split kedua (val dari test)
+                # yang jadi sumber crash "integer modulo by zero": default
+                # anomalib (FROM_TEST, label_aware=True, ratio 0.5) memecah
+                # test-set per label, dan kalau salah satu label (mis. gambar
+                # normal yang disisihkan test_split_ratio) berjumlah tepat 1,
+                # pembagian 50/50-nya menghasilkan pembagi nol. Diverifikasi
+                # empiris: OK 5-9 (dengan NG=8) crash dengan default, aman
+                # dengan SAME_AS_TEST — begitu juga rentang lebih besar.
+                # Val==test bukan masalah untuk PatchCore (1 epoch, tidak ada
+                # early-stopping antar-epoch yang berarti).
+                val_split_mode=ValSplitMode.SAME_AS_TEST,
             )
             datamodule.setup()
         except Exception as e:
@@ -303,6 +412,9 @@ class TrainingPipeline:
         # ======================================================
         engine_callbacks: list = []
         if self._config.patience > 0:
+            # Lazy import — lihat catatan di header modul (jangan dinaikkan
+            # ke level modul: merusak edge_mode & startup PC edge).
+            from lightning.pytorch.callbacks import EarlyStopping
             # image_AUROC dari validation metrics Anomalib
             monitor_metric = "image_AUROC"
             es = EarlyStopping(
@@ -365,6 +477,12 @@ class TrainingPipeline:
         self._report(70, "Export ke OpenVINO...")
         export_dir = output_dir / "openvino"
         export_dir.mkdir(parents=True, exist_ok=True)
+        # Tugas 8: model_meta.json = catatan INDEPENDEN tentang model yang
+        # benar-benar diexport. Sebelumnya satu-satunya sumber adalah
+        # config.json template — yang bisa diubah user SETELAH training,
+        # sehingga UI bisa menampilkan backbone/ukuran yang tidak sesuai
+        # dengan model yang sedang jalan (terbukti pada template_2:
+        # config tertulis wide_resnet50_2, IR terpasang resnet18).
 
         ov_export_ok = False
         try:
@@ -384,6 +502,7 @@ class TrainingPipeline:
             ov_xml = export_dir / "model.xml"
             ov.save_model(ov_model, str(ov_xml))
             logger.info("OpenVINO export selesai (direct): %s", ov_xml)
+            self._write_model_meta(export_dir)
             ov_export_ok = True
         except Exception as e:
             logger.warning("OpenVINO export gagal: %s", e)
@@ -483,6 +602,363 @@ class TrainingPipeline:
             "ng_scores": ng_scores,
             "metadata": metadata,
         }
+
+    def _write_model_meta(self, export_dir: Path, **extra) -> None:
+        """Tulis model_meta.json di samping model.xml (Tugas 8).
+
+        Ini catatan INDEPENDEN dari config.json template: apa pun yang
+        nanti diubah user di UI, file ini tetap menyatakan model yang
+        benar-benar ada di disk. Dipakai InferenceEngine saat load untuk
+        mendeteksi config yang sudah menyimpang (WARNING, bukan blokir).
+        """
+        payload = {
+            "algorithm": self._config.algorithm,
+            "backbone": self._config.backbone,
+            "input_size": self._config.input_size,
+            "coreset_sampling_ratio": self._config.coreset_sampling_ratio,
+            "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        payload.update(extra)
+        try:
+            with open(export_dir / "model_meta.json", "w",
+                      encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            logger.warning("Gagal menulis model_meta.json: %s", e)
+
+    # ---- YOLO Training (ultralytics, classification OK/NG) ----
+
+    def _resolve_yolo_pretrained(self, pretrained: str) -> Path:
+        """Lokasikan pretrained YOLO; kalau tidak ada → unduh otomatis.
+
+        Aturan:
+        1. ``pretrained`` berisi path (memiliki direktori / absolut) →
+           hanya cek lokasi itu; kalau tidak ada, unduh ke lokasi itu.
+        2. ``pretrained`` berupa nama file saja (mis. ``yolov11l-cls.pt``) →
+           cek (a) working directory, (b) ``<DATA>/pretrained/``. Kalau
+           tidak ada di mana pun → unduh ke ``<DATA>/pretrained/`` (folder
+           dibuat otomatis, dipakai ulang untuk training berikutnya).
+        3. Unduhan gagal → TrainingError berisi instruksi taruh manual.
+        """
+        name = Path(pretrained).name
+        p = Path(pretrained)
+        explicit = p.parent != Path(".") or p.is_absolute()
+        if explicit:
+            candidates = [p]
+            target = p
+        else:
+            pretrained_dir = Path(DEFAULT_DATA_DIR) / "pretrained"
+            candidates = [Path.cwd() / name, pretrained_dir / name]
+            target = pretrained_dir / name
+
+        for c in candidates:
+            try:
+                if c.is_file() and c.stat().st_size > 0:
+                    logger.info("Pretrained YOLO ditemukan: %s", c)
+                    return c
+            except OSError:
+                continue
+
+        logger.info("Pretrained YOLO '%s' tidak ditemukan di %s → "
+                    "mengunduh otomatis ke %s",
+                    name, ", ".join(str(c) for c in candidates), target)
+        self._report(25, f"Pretrained {name} tidak ada → mengunduh...")
+        _download_yolo_asset(name, target)
+        logger.info("Pretrained YOLO siap: %s (%.1f MB)",
+                    target, target.stat().st_size / 1e6)
+        return target
+
+    def _train_yolo(self, ok_images: list, ng_images: list,
+                    ok_dir: Path, ng_dir: Optional[Path],
+                    output_dir: Path) -> dict:
+        """Training YOLO classification (OK/NG) → export OpenVINO.
+
+        Berbeda dari Anomalib: YOLO di sini adalah *classifier* per gambar/
+        crop (bukan deteksi box) — kelas "OK" dan "NG" persis seperti folder
+        normal/abnormal anomalib. NG wajib ada (tanpa NG model tak bisa
+        membedakan kelas). Hasil: output_dir/openvino/model.xml + .bin +
+        yolo_meta.json (penanda mode YOLO untuk InferenceEngine).
+        """
+        # ── Validasi data ──
+        if len(ok_images) < 1:
+            raise TrainingError("Minimal 1 gambar OK diperlukan untuk YOLO")
+        if len(ng_images) < 1:
+            raise TrainingError(
+                "YOLO wajib punya gambar NG (minimal 1) agar bisa membedakan "
+                "kelas OK vs NG. Tambahkan gambar NG di panel training.")
+
+        # ── Import ultralytics ──
+        try:
+            from ultralytics import YOLO
+        except ImportError as e:
+            raise TrainingError(
+                "ultralytics tidak terinstall. Jalankan: "
+                "pip install ultralytics "
+                f"(detail: {e})") from e
+
+        self._report(15, "Menyiapkan dataset YOLO (OK/NG)...")
+
+        # ── Bangun dataset klasifikasi: train/val split per kelas ──
+        # Struktur yang diminta ultralytics (classification) — data = folder
+        # root yang berisi train/ & val/; nama subfolder = nama kelas.
+        # (data.yaml TIDAK dipakai utk classification, hanya utk detection.)
+        #   <ds>/train/OK/*.jpg, <ds>/train/NG/*.jpg
+        #   <ds>/val/OK/*.jpg,   <ds>/val/NG/*.jpg
+        import random
+        ds_root = output_dir / "dataset_yolo"
+        train_dir = ds_root / "train"
+        val_dir = ds_root / "val"
+        for cls_name, images in (("OK", ok_images), ("NG", ng_images)):
+            random.shuffle(images)
+            n_val = max(1, int(len(images) * 0.1))
+            val_imgs = images[:n_val]
+            train_imgs = images[n_val:]
+            for img in train_imgs:
+                dst = train_dir / cls_name / img.name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(img), str(dst))
+            for img in val_imgs:
+                dst = val_dir / cls_name / img.name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(img), str(dst))
+
+        # ── Device & batch ──
+        device = "cpu"
+        if self._config.device == "cuda":
+            device = "0"
+        elif self._config.device == "auto":
+            try:
+                import torch
+                device = "0" if torch.cuda.is_available() else "cpu"
+            except Exception:
+                device = "cpu"
+        if self._config.batch_size > 0:
+            batch = self._config.batch_size
+        else:
+            batch = 16 if device == "0" else 8
+
+        imgsz = self._config.yolo_imgsz
+        # Sumber kebenaran epochs YOLO = yolo_epochs (ditulis UI teach_page,
+        # fallback default 100). Bukan max_epochs — itu milik EfficientAd,
+        # dan TrainingConfig mengubah None→100 untuk non-PatchCore sehingga
+        # tidak bisa dipakai sebagai "belum di-set".
+        epochs = self._config.yolo_epochs
+        # Patience YOLO (early stopping): nilai UI (patience>0) dipakai apa
+        # adanya. 0 = nonaktif di UI → fallback pintar ±20% epochs (min 10,
+        # max 100) supaya early stopping TETAP bekerja — ultralytics default
+        # 100 praktis tidak pernah trigger di training singkat dataset kecil.
+        patience = self._config.patience
+        if patience <= 0:
+            patience = max(10, min(100, epochs // 5))
+        logger.info("YOLO train: pretrained=%s, imgsz=%d, epochs=%d, "
+                    "batch=%d, device=%s, patience=%d, data=%s",
+                    self._config.yolo_pretrained, imgsz, epochs,
+                    batch, device, patience, ds_root)
+
+        # Cek & unduh pretrained (ada → pakai; tidak ada → auto-download)
+        pretrained_path = self._resolve_yolo_pretrained(
+            self._config.yolo_pretrained)
+        self._report(25, f"Memuat pretrained {pretrained_path.name}...")
+        try:
+            model = YOLO(str(pretrained_path))
+        except Exception as e:
+            raise TrainingError(
+                f"Gagal memuat pretrained YOLO "
+                f"'{pretrained_path}': {e}") from e
+
+        # ── Training ──
+        run_dir = output_dir / "runs_yolo"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        self._report(30, f"Training YOLO ({epochs} epochs, {imgsz}px)...")
+        try:
+            model.train(
+                data=str(ds_root),
+                epochs=epochs,
+                imgsz=imgsz,
+                batch=batch,
+                device=device,
+                workers=0,
+                verbose=False,
+                project=str(run_dir),
+                name="train",
+                exist_ok=True,
+                patience=patience,
+            )
+        except Exception as e:
+            raise TrainingError(f"Training YOLO gagal: {e}") from e
+
+        if self._cancelled:
+            raise TrainingError("Training dibatalkan")
+
+        # ── Export ke OpenVINO ──
+        self._report(80, "Export YOLO ke OpenVINO...")
+        try:
+            # best.pt → OpenVINO IR (model.xml + model.bin)
+            best_pt = run_dir / "train" / "weights" / "best.pt"
+            if not best_pt.exists():
+                best_pt = run_dir / "train" / "weights" / "last.pt"
+            if not best_pt.exists():
+                raise TrainingError("Hasil training YOLO tidak ditemukan "
+                                    f"di {run_dir}")
+            best_model = YOLO(str(best_pt))
+            ov_export_path = best_model.export(
+                format="openvino", imgsz=imgsz, dynamic=False)
+            ov_export_path = Path(ov_export_path)
+        except TrainingError:
+            raise
+        except Exception as e:
+            raise TrainingError(f"Export YOLO ke OpenVINO gagal: {e}") from e
+
+        # ── Salin hasil ke output_dir/openvino/ ──
+        export_dir = output_dir / "openvino"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        # Ultralytics export openvino mengembalikan path FOLDER
+        # <name>_openvino_model/ yang berisi model.xml + model.bin (bukan
+        # path file). Kalau ternyata file, ambil parent-nya.
+        ov_src = ov_export_path if ov_export_path.is_dir() else ov_export_path.parent
+        copied = False
+        for f in ov_src.iterdir():
+            if f.suffix.lower() == ".xml":
+                shutil.copy2(str(f), str(export_dir / "model.xml"))
+                copied = True
+            elif f.suffix.lower() == ".bin":
+                shutil.copy2(str(f), str(export_dir / "model.bin"))
+        if not copied:
+            raise TrainingError(
+                f"Export YOLO tidak menghasilkan model.xml: {ov_src}")
+
+        # yolo_meta.json — penanda mode YOLO untuk InferenceEngine (wajib
+        # berada di folder openvino/ agar ikut tercopy ke template).
+        # PENTING: urutan classes DIAMBIL dari model hasil training
+        # (best_model.names), bukan hardcode. Ultralytics mengurutkan nama
+        # folder dataset secara alfabetis (NG sebelum OK → index 0 = NG,
+        # index 1 = OK). Hardcode ["OK","NG"] di sini dulu membuat
+        # klasifikasi terbalik: gambar NG dapat prob[0] tinggi → dijudge OK.
+        yolo_names = [str(best_model.names[i])
+                      for i in sorted(best_model.names)]
+        with open(export_dir / "yolo_meta.json", "w") as f:
+            json.dump({
+                "names": yolo_names,
+                "task": "classify",
+                "imgsz": imgsz,
+            }, f, indent=2)
+
+        # Tugas 8: catatan independen — untuk YOLO, "backbone" = bobot
+        # pretrained yang dipakai dan input_size = imgsz efektif.
+        # `yolo_pretrained` ditulis EKSPLISIT (bukan hanya menumpang field
+        # `backbone`) supaya pemeriksa kecocokan membandingkan field yang
+        # sejenis: config TEACH menyimpan yolo_pretrained untuk YOLO, dan
+        # `backbone` di sana adalah sisa milik PatchCore yang tidak berlaku.
+        self._write_model_meta(
+            export_dir, backbone=str(self._config.yolo_pretrained),
+            yolo_pretrained=str(self._config.yolo_pretrained),
+            input_size=int(imgsz), algorithm="yolo", classes=yolo_names)
+
+        # ── Histogram: prob OK dari model OpenVINO hasil export ──
+        self._report(90, "Mengumpulkan skor histogram...")
+        ok_scores, ng_scores = self._collect_yolo_scores(
+            export_dir / "model.xml", ok_images, ng_images)
+
+        # Threshold: prob OK >= 0.5 → OK (netral; user bisa tune slider).
+        threshold = 0.5
+        self._report(95, f"Threshold YOLO: {threshold:.2f}")
+
+        # ── Metadata (struktur sama dgn jalur Anomalib) ──
+        metadata = {
+            "algorithm": "yolo",
+            "backbone": self._config.yolo_pretrained,
+            "input_size": imgsz,
+            "threshold": threshold,
+            "threshold_mode": self._config.threshold_mode,
+            "score_ref": None,
+            "num_ok": len(ok_images),
+            "num_ng": len(ng_images),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "export_path": str(export_dir),
+            "int8_path": "",
+        }
+        with open(output_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        self._report(100, "Training YOLO selesai!")
+        return {
+            "threshold": threshold,
+            "score_ref": None,
+            "model_path": str(export_dir),
+            "export_path": str(output_dir),
+            "int8_path": "",
+            "ok_scores": ok_scores,
+            "ng_scores": ng_scores,
+            "metadata": metadata,
+        }
+
+    def _collect_yolo_scores(self, xml_path: Path, ok_images: list,
+                             ng_images: list):
+        """Probabilitas kelas OK dari model OpenVINO YOLO → [0,1].
+
+        Sama peranannya dgn _collect_scores (histogram), tapi untuk mode
+        YOLO: similarity = prob kelas "OK". Gagal → list kosong (aman).
+        """
+        try:
+            import cv2
+            import numpy as np
+            import openvino as ov
+
+            core = ov.Core()
+            cm = core.compile_model(core.read_model(str(xml_path)), "CPU")
+            size = self._config.yolo_imgsz
+
+            # Urutan kelas dibaca dari yolo_meta.json di samping model.xml
+            # (sama seperti runtime InferenceEngine). Index kelas "OK" TIDAK
+            # selalu 0 — ultralytics mengurutkan nama folder alfabetis
+            # (NG sebelum OK → index 0 = NG). Hardcode out[0] di sini dulu
+            # membuat histogram OK↔NG tertukar.
+            names = ["NG", "OK"]
+            try:
+                meta = json.loads(
+                    (xml_path.parent / "yolo_meta.json").read_text(
+                        encoding="utf-8"))
+                names = [str(n) for n in (meta.get("names") or names)]
+            except Exception:
+                pass
+            ok_idx = names.index("OK") if "OK" in names else 0
+
+            def _predict(image_paths):
+                scores = []
+                for p in image_paths:
+                    img = cv2.imread(str(p))
+                    if img is None:
+                        continue
+                    img = cv2.resize(img, (size, size))
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    t = (img.astype(np.float32) / 255.0).transpose(2, 0, 1)[None]
+                    res = cm({0: t})
+                    out = None
+                    for val in res.values():
+                        arr = np.asarray(val)
+                        if arr.ndim == 2 and arr.shape[0] == 1:
+                            out = arr[0]
+                            break
+                    if out is None:
+                        out = np.asarray(list(res.values())[0]).reshape(-1)
+                    if out.shape[0] >= 2:
+                        # softmax bila logits
+                        if float(out.min()) < 0 or not np.isclose(
+                                float(out.sum()), 1.0, atol=1e-2):
+                            e = np.exp(out - out.max())
+                            out = e / e.sum()
+                        # prob kelas "OK" sesuai urutan yolo_meta.json
+                        scores.append(max(0.0, min(1.0, float(out[ok_idx]))))
+                    else:
+                        scores.append(max(0.0, min(1.0, float(out[0]))))
+                return scores
+
+            ok_scores = _predict(ok_images) if ok_images else []
+            ng_scores = _predict(ng_images) if ng_images else []
+            return ok_scores, ng_scores
+        except Exception as e:
+            logger.warning("Koleksi skor YOLO gagal: %s", e)
+            return [], []
 
     # ---- Score Normalization / Calibration ----
 

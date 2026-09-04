@@ -14,12 +14,8 @@ logger = get_logger("app")
 
 
 class RetentionManager:
-    """
-    Mengelola retensi data:
-    - Hapus history entries yang lebih lama dari X hari
-    - Hapus gambar yang lebih lama dari X hari (kecuali NG jika save_all_ng=True)
-    - Sampling OK images (simpan N% saja)
-    """
+    """Retensi data: purge history & gambar lebih tua dari X hari (NG dikecualikan
+    bila save_all_ng), plus sampling gambar OK (simpan N% saja)."""
 
     def __init__(self, db: Database):
         self._db = db

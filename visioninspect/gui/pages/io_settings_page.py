@@ -95,10 +95,8 @@ class IOSettingsPage(QWidget):
         body = QWidget()
         layout = QVBoxLayout(body)
 
-        # ---- Status Koneksi ----
-        # Ditaruh PALING ATAS karena ini pertanyaan pertama saat sesuatu tidak
-        # jalan. Tanpa panel ini, monitor di bawah hanya bisa bilang "unknown"
-        # untuk tiga sebab yang tindakannya berbeda-beda.
+        # ---- Status Koneksi (paling atas: pertanyaan pertama saat error) ----
+        # Tanpa ini monitor di bawah cuma bisa bilang "unknown".
         grp_conn = QGroupBox("Status Koneksi PLC")
         gc = QVBoxLayout(grp_conn)
 
@@ -207,9 +205,8 @@ class IOSettingsPage(QWidget):
             spin.setToolTip(f"Nomor coil untuk {key} — dipakai langsung sebagai nomor relay M di PLC (coil 1 = M1)")
             gi.addWidget(spin, i, 1)
             self._in_spins[key] = spin
-        # Baris DIHITUNG dari jumlah input, jangan ditulis keras: dulu angka
-        # 4 benar saat input masih 3 baris, lalu ng_from_plc ditambahkan dan
-        # baris ini menimpanya.
+        # Baris DIHITUNG dari jumlah input, jangan hardcode — angka tetap
+        # jadi salah begitu ada input baru ditambahkan.
         _row_prog = len(INPUT_ROWS) + 1
         gi.addWidget(QLabel("Program Register # (D)"), _row_prog, 0)
         self._spin_prog_reg = QSpinBox()
@@ -262,9 +259,8 @@ class IOSettingsPage(QWidget):
             gmon.addWidget(st, i, 2)
             self._monitor_labels[key] = st
 
-            # Tombol uji HANYA untuk output. Input ditulis oleh ladder PLC —
-            # menulisnya dari sini berarti melawan ladder, dan hasilnya akan
-            # tertimpa di scan berikutnya sehingga terlihat "tidak berfungsi".
+            # Tombol uji HANYA untuk output — input ditulis ladder PLC dan akan
+            # tertimpa di scan berikutnya ("terlihat tidak berfungsi").
             if direction == "output":
                 cell = QWidget()
                 row = QHBoxLayout(cell)
@@ -406,19 +402,15 @@ class IOSettingsPage(QWidget):
         "Tekan “Test Koneksi” di atas dulu.")
 
     def _on_allow_test_toggled(self, on: bool) -> None:
-        """Aktifkan tombol uji, tapi hanya kalau PLC memang terhubung.
-
-        Tanpa syarat kedua, tombol akan tampak siap padahal setiap penekanan
-        gagal diam-diam — dan operator akan mengira ladder-nya yang salah.
-        """
+        """Aktifkan tombol uji HANYA kalau PLC terhubung — kalau tidak, tombol
+        tampak siap tapi tiap penekanan gagal diam-diam."""
         live = (self._monitor_source is not None
                 and getattr(self._monitor_source, "is_connected", False))
         for b_on, b_off in self._test_buttons.values():
             b_on.setEnabled(on and live)
             b_off.setEnabled(on and live)
-        # Label harus ditulis di SETIAP cabang. Sebelumnya hanya cabang gagal
-        # yang mengisinya, sehingga pesan "PLC belum terhubung" tetap terpampang
-        # setelah koneksi berhasil — bertabrakan dengan badge hijau di atasnya.
+        # Label WAJIB ditulis di SETIAP cabang — kalau tidak, pesan gagal
+        # tetap terpampang setelah koneksi berhasil.
         if not on:
             self._lbl_test_warn.setText(self._TEST_HINT_OFF)
         elif live:

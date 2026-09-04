@@ -13,12 +13,8 @@ from PySide6.QtWidgets import QWidget
 
 
 class HistogramWidget(QWidget):
-    """
-    Widget histogram distribusi skor anomaly.
-    - OK scores: bar hijau
-    - NG scores: bar merah  
-    - Garis threshold vertikal putih
-    """
+    """Histogram distribusi skor: bar hijau (OK), bar merah (NG),
+    garis threshold vertikal putih."""
 
     # Colors
     COLOR_OK = QColor("#22C55E")

@@ -18,13 +18,8 @@ class RedefinitionError(Exception):
 
 
 class RedefinitionManager:
-    """
-    Mengelola redefinition loop:
-    - Koreksi hasil (operator menandai OK → NG atau NG → OK)
-    - Rebuild model dengan data koreksi
-    - Versioning dan rollback
-    - Audit trail
-    """
+    """Redefinition loop: koreksi hasil operator (OK↔NG), rebuild model dengan
+    data koreksi, versioning + rollback, audit trail."""
 
     def __init__(self, program_manager, training_pipeline, inference_engine):
         self._pm = program_manager
@@ -39,11 +34,8 @@ class RedefinitionManager:
 
     def correct_result(self, program: str, image_path: Path,
                        original_judgement: str, correct_judgement: str) -> dict:
-        """
-        Koreksi hasil inspeksi yang salah.
-        - Pindahkan gambar ke corrections/{ok,ng}
-        - Catat audit trail
-        """
+        """Koreksi hasil inspeksi yang salah: pindahkan gambar ke
+        corrections/{ok,ng} + catat audit trail."""
         if original_judgement == correct_judgement:
             logger.warning("Koreksi sama dengan asli, diabaikan")
             return {"status": "skipped"}

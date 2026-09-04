@@ -1,6 +1,7 @@
 """
 VisionInspect - Settings Page
-Pengaturan kamera, ROI, PLC, model, retensi, Flask API.
+Pengaturan global: kamera, PLC, inferensi (mode/timing/device), retensi,
+Flask API, PostgreSQL, bahasa. ROI & model diatur per-template di tab TEACH.
 """
 
 from PySide6.QtCore import Slot
@@ -8,8 +9,6 @@ from PySide6.QtGui import QStandardItemModel
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
-    QFileDialog,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -54,17 +53,6 @@ class SettingsPage(QWidget):
         cam_group = QGroupBox(self._tr.tr("settings_camera"))
         cam_layout = QVBoxLayout(cam_group)
 
-        def _add_combo_row(parent_layout, label, items, default_idx=0):
-            row = QHBoxLayout()
-            row.addWidget(QLabel(label))
-            combo = QComboBox()
-            combo.addItems(items)
-            combo.setCurrentIndex(default_idx)
-            row.addWidget(combo)
-            row.addStretch()
-            parent_layout.addLayout(row)
-            return combo
-
         def _add_spin_row(parent_layout, label, min_v, max_v, default_v):
             row = QHBoxLayout()
             row.addWidget(QLabel(label))
@@ -86,35 +74,7 @@ class SettingsPage(QWidget):
 
         main_layout.addWidget(cam_group)
 
-        # === ROI Settings ===
-        roi_group = QGroupBox(self._tr.tr("settings_roi"))
-        roi_layout = QVBoxLayout(roi_group)
-
-        self._roi_enabled = QCheckBox(self._tr.tr("settings_roi"))
-        self._roi_enabled.setChecked(True)
-        roi_layout.addWidget(self._roi_enabled)
-
-        roi_coords = QHBoxLayout()
-        roi_coords.addWidget(QLabel("X, Y:"))
-        self._roi_x = QSpinBox()
-        self._roi_x.setRange(0, 10000)
-        roi_coords.addWidget(self._roi_x)
-        self._roi_y = QSpinBox()
-        self._roi_y.setRange(0, 10000)
-        roi_coords.addWidget(self._roi_y)
-        roi_coords.addWidget(QLabel("W, H:"))
-        self._roi_w = QSpinBox()
-        self._roi_w.setRange(16, 4096)
-        self._roi_w.setValue(256)
-        roi_coords.addWidget(self._roi_w)
-        self._roi_h = QSpinBox()
-        self._roi_h.setRange(16, 4096)
-        self._roi_h.setValue(256)
-        roi_coords.addWidget(self._roi_h)
-        roi_coords.addStretch()
-        roi_layout.addLayout(roi_coords)
-
-        main_layout.addWidget(roi_group)
+        # ROI diatur per-template di tab TEACH (editor multi-ROI), bukan di sini.
 
         # === PLC Settings ===
         plc_group = QGroupBox(self._tr.tr("settings_plc"))
@@ -160,9 +120,8 @@ class SettingsPage(QWidget):
         plc_addr_row.addStretch()
         plc_layout.addLayout(plc_addr_row)
 
-        # --- Pulse durasi (ms) — dipakai pulse part_ready (opsional).
-        # Mapping coil TIDAK lagi di sini — pindah ke tab I/O Settings
-        # (Output/Input Assign) supaya tidak dobel sumber config plc.io_map.
+        # Pulse durasi (ms) untuk coil part_ready. Mapping coil ada di tab
+        # I/O Settings — jangan dobel sumber config plc.io_map.
         self._plc_pulse_ms = _add_spin_row(plc_layout, "Pulse durasi (ms):", 0, 5000, 300)
 
         main_layout.addWidget(plc_group)
@@ -231,83 +190,20 @@ class SettingsPage(QWidget):
 
         main_layout.addWidget(infer_group)
 
-        # === YOLO Class Filter (opsional) ===
-        # Form lengkap hanya muncul saat checkbox diaktifkan ("setting lengkap
-        # namun hanya muncul ketika dipilih model yolo").
-        yolo_group = QGroupBox("Filter Kelas (YOLO)")
-        yolo_layout = QVBoxLayout(yolo_group)
+        # Pemilihan engine (YOLO / PatchCore / EfficientAd), backbone, input size,
+        # dan threshold semuanya PER-TEMPLATE di tab TEACH → Training Profile.
 
-        self._yolo_enabled = QCheckBox("Aktifkan filter kelas YOLO")
-        self._yolo_enabled.setToolTip(
-            "Pre-filter: frame dicek dulu dengan model YOLO custom (.pt/.onnx).\n"
-            "Kalau kelas yang diharapkan tidak terdeteksi → NG langsung, tanpa\n"
-            "scoring anomali. Butuh: pip install ultralytics + model terlatih.")
-        yolo_layout.addWidget(self._yolo_enabled)
-
-        self._yolo_form = QWidget()
-        yf = QVBoxLayout(self._yolo_form)
-        yf.setContentsMargins(0, 0, 0, 0)
-
-        path_row = QHBoxLayout()
-        path_row.addWidget(QLabel("Model path (.pt/.onnx):"))
-        self._yolo_model_path = QLineEdit("")
-        self._yolo_model_path.setPlaceholderText("mis. data/yolo/best.pt")
-        path_row.addWidget(self._yolo_model_path, 1)
-        browse_btn = QPushButton("Browse...")
-        browse_btn.clicked.connect(self._on_yolo_browse)
-        path_row.addWidget(browse_btn)
-        yf.addLayout(path_row)
-
-        yf.addWidget(QLabel("Kelas yang diizinkan (pisah koma):"))
-        self._yolo_classes = QLineEdit("")
-        self._yolo_classes.setPlaceholderText("mis. coca_cola_bottle, cap")
-        self._yolo_classes.setToolTip(
-            "Nama kelas harus sama persis dengan nama kelas di model YOLO.\n"
-            "Kosong = tidak menyaring (semua kelas lolos filter).")
-        yf.addWidget(self._yolo_classes)
-
-        conf_row = QHBoxLayout()
-        conf_row.addWidget(QLabel("Min confidence:"))
-        self._yolo_min_conf = QDoubleSpinBox()
-        self._yolo_min_conf.setRange(0.05, 0.95)
-        self._yolo_min_conf.setSingleStep(0.05)
-        self._yolo_min_conf.setDecimals(2)
-        self._yolo_min_conf.setValue(0.25)
-        conf_row.addWidget(self._yolo_min_conf)
-        conf_row.addStretch()
-        yf.addLayout(conf_row)
-
-        yolo_layout.addWidget(self._yolo_form)
-        self._yolo_enabled.toggled.connect(self._update_yolo_form_visibility)
-
-        main_layout.addWidget(yolo_group)
-
-        # === Model Settings ===
-        model_group = QGroupBox(self._tr.tr("settings_model"))
-        model_layout = QVBoxLayout(model_group)
-
-        model_hint = QLabel(
-            "Default untuk template baru saja — tidak mengubah template yang "
-            "sudah ada. Untuk template yang sedang aktif, atur lewat "
-            "Training Profile di tab TEACH.")
-        model_hint.setWordWrap(True)
-        model_hint.setObjectName("secondaryText")
-        model_layout.addWidget(model_hint)
-
-        self._model_algo = _add_combo_row(model_layout, "Algorithm:", ["PatchCore", "EfficientAd"])
-        self._model_backbone = _add_combo_row(model_layout, "Backbone:", ["resnet18", "wide_resnet50_2"])
-        self._model_input_size = _add_spin_row(model_layout, "Input Size:", 64, 512, 256)
-
-        # Inference runtime indicator
+        # === Runtime Inferensi (status, bukan setelan) ===
+        runtime_group = QGroupBox("Runtime Inferensi")
+        runtime_layout = QVBoxLayout(runtime_group)
         runtime_row = QHBoxLayout()
-        runtime_row.addWidget(QLabel("Inference Runtime:"))
+        runtime_row.addWidget(QLabel("Status:"))
         self._runtime_label = QLabel("—")
         self._runtime_label.setStyleSheet("font-weight: bold; padding: 2px 8px; border-radius: 3px;")
         runtime_row.addWidget(self._runtime_label)
         runtime_row.addStretch()
-        model_layout.addLayout(runtime_row)
-
-        main_layout.addWidget(model_group)
+        runtime_layout.addLayout(runtime_row)
+        main_layout.addWidget(runtime_group)
 
         # === History / Retention ===
         hist_group = QGroupBox(self._tr.tr("settings_history"))
@@ -405,10 +301,7 @@ class SettingsPage(QWidget):
         main_layout.addWidget(pg_group)
 
         # === Penghitungan Part ===
-        # Menggantikan "NG Timeout" lama. Setelan itu menambah counter NG tiap
-        # sekian ms selama anomali bertahan — yang dihitung DURASI, bukan
-        # jumlah part, sehingga satu part yang diam lama terhitung berkali-kali
-        # dan pass rate tidak sebanding dengan counter OK.
+        # Pengganti "NG Timeout" lama yang menghitung DURASI, bukan jumlah part.
         ng_group = QGroupBox("Penghitungan Part")
         ng_form = QVBoxLayout(ng_group)
 
@@ -565,18 +458,6 @@ class SettingsPage(QWidget):
 
     # ---- Public API ----
 
-    def _on_yolo_browse(self):
-        """Pilih file model YOLO (.pt/.onnx) lewat dialog."""
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Pilih model YOLO", "",
-            "YOLO models (*.pt *.onnx);;All files (*)")
-        if path:
-            self._yolo_model_path.setText(path)
-
-    def _update_yolo_form_visibility(self):
-        """Form setting YOLO hanya tampil saat filter diaktifkan."""
-        self._yolo_form.setVisible(self._yolo_enabled.isChecked())
-
     @Slot()
     def get_settings_dict(self) -> dict:
         """Return dict of current settings values."""
@@ -589,13 +470,6 @@ class SettingsPage(QWidget):
                 "exposure": self._cam_exposure.value(),
                 "gain": self._cam_gain.value(),
                 "white_balance": self._cam_wb.value(),
-            },
-            "roi": {
-                "enabled": self._roi_enabled.isChecked(),
-                "x": self._roi_x.value(),
-                "y": self._roi_y.value(),
-                "width": self._roi_w.value(),
-                "height": self._roi_h.value(),
             },
             "plc": {
                 "enabled": self._plc_enabled.isChecked(),
@@ -613,18 +487,6 @@ class SettingsPage(QWidget):
                 "trigger_timeout_ms": self._trigger_timeout_spin.value(),
                 "count_cooldown_ms": self._count_cooldown_spin.value(),
                 "confirm_ok_frames": self._confirm_ok_frames_spin.value(),
-            },
-            "yolo": {
-                "enabled": self._yolo_enabled.isChecked(),
-                "model_path": self._yolo_model_path.text().strip(),
-                "expected_classes": [
-                    c.strip() for c in self._yolo_classes.text().split(",") if c.strip()],
-                "min_conf": self._yolo_min_conf.value(),
-            },
-            "model": {
-                "algorithm": self._model_algo.currentText().lower(),
-                "backbone": self._model_backbone.currentText(),
-                "input_size": self._model_input_size.value(),
             },
             "history": {
                 "auto_purge_days": self._retention_days.value(),
@@ -668,12 +530,6 @@ class SettingsPage(QWidget):
     def get_cycle_delay_ms(self) -> int:
         """Get cycle delay from config (ms). 0 = no delay."""
         return self._config.get("inference.cycle_delay_ms", 1000)
-
-    def get_yolo_enabled_checkbox(self) -> QCheckBox:
-        return self._yolo_enabled
-
-    def get_yolo_form(self) -> QWidget:
-        return self._yolo_form
 
     # ---- PLC status (koneksi) — mapping coil ada di tab I/O Settings ----
 
@@ -812,13 +668,6 @@ class SettingsPage(QWidget):
         self._cam_gain.setValue(self._config.get("camera.gain", -1))
         self._cam_wb.setValue(self._config.get("camera.white_balance", -1))
 
-        # ROI
-        self._roi_enabled.setChecked(self._config.get("roi.enabled", True))
-        self._roi_x.setValue(self._config.get("roi.x", 0))
-        self._roi_y.setValue(self._config.get("roi.y", 0))
-        self._roi_w.setValue(self._config.get("roi.width", 256))
-        self._roi_h.setValue(self._config.get("roi.height", 256))
-
         # PLC
         self._plc_enabled.setChecked(self._config.get("plc.enabled", False))
         self._plc_port.setText(self._config.get("plc.port", "COM1"))
@@ -827,9 +676,8 @@ class SettingsPage(QWidget):
         if idx >= 0:
             self._plc_baud.setCurrentIndex(idx)
 
-        # PLC IO Mapping — TIDAK di sini lagi (tab I/O Settings yang pegang).
-        # io_map hanya bisa diubah lewat halaman I/O Settings → Apply,
-        # supaya tidak ada dua sumber config plc.io_map.
+        # PLC IO Mapping ada di tab I/O Settings → Apply, bukan di sini
+        # (supaya tidak ada dua sumber config plc.io_map).
         self._plc_pulse_ms.setValue(self._config.get("plc.pulse_ms", 300))
 
         self._plc_scan_range.setValue(self._config.get("plc.scan_range", 127))
@@ -844,15 +692,6 @@ class SettingsPage(QWidget):
             self._config.get("inference.infer_when_idle", False))
         self._trigger_timeout_spin.setValue(
             self._config.get("inference.trigger_timeout_ms", 2000))
-
-        # Model
-        algo = self._config.get("model.algorithm", "patchcore")
-        self._model_algo.setCurrentIndex(0 if algo == "patchcore" else 1)
-        backbone = self._config.get("model.backbone", "resnet18")
-        idx = self._model_backbone.findText(backbone)
-        if idx >= 0:
-            self._model_backbone.setCurrentIndex(idx)
-        self._model_input_size.setValue(self._config.get("model.input_size", 256))
 
         # History
         self._retention_days.setValue(self._config.get("history.auto_purge_days", 30))
@@ -890,15 +729,6 @@ class SettingsPage(QWidget):
         self._ov_device.setCurrentIndex(idx_dev if idx_dev >= 0 else 0)
         self._cpu_pcore_only.setChecked(
             self._config.get("inference.cpu_pcore_only", False))
-
-        # YOLO class filter
-        self._yolo_enabled.setChecked(self._config.get("yolo.enabled", False))
-        self._yolo_model_path.setText(self._config.get("yolo.model_path", ""))
-        yolo_classes = self._config.get("yolo.expected_classes", [])
-        self._yolo_classes.setText(
-            ", ".join(yolo_classes) if isinstance(yolo_classes, list) else "")
-        self._yolo_min_conf.setValue(self._config.get("yolo.min_conf", 0.25))
-        self._update_yolo_form_visibility()
 
         # Logging
         self._show_debug_cb.setChecked(self._config.get("show_debug", False))

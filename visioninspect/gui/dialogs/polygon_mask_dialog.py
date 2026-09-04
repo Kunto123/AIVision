@@ -30,9 +30,8 @@ _MIN_DISPLAY = 320  # crop kecil (mis. 100x100) diperbesar dulu biar bisa digamb
 
 
 class PolygonMaskDialog(QDialog):
-    """Gambar/adjust polygon mask untuk SATU crop. `result_polygon()`
-    mengembalikan polygon (koordinat crop asli, bukan koordinat tampilan
-    yang diperbesar) atau None kalau tidak ada mask."""
+    """Gambar/adjust polygon mask untuk SATU crop. `result_polygon()` →
+    polygon dalam koordinat crop asli (bukan tampilan), atau None."""
 
     def __init__(self, crop_bgr: np.ndarray,
                  initial_polygon: Optional[List[Tuple[int, int]]],
@@ -47,10 +46,8 @@ class PolygonMaskDialog(QDialog):
         if initial_polygon:
             self._synthetic_roi.mask_polygon = list(initial_polygon)
 
-        # Perbesar tampilan supaya crop kecil (mis. 100x100 thumbnail review)
-        # tetap bisa digambar presisi — ROIEditor sendiri yang menangani
-        # scaling tampilan vs koordinat gambar asli (_map_to_image), jadi
-        # cukup atur ukuran widget-nya lebih besar dari pixmap aslinya.
+        # Perbesar tampilan supaya crop kecil tetap bisa digambar presisi —
+        # ROIEditor yang menangani scaling ke koordinat gambar asli.
         scale = max(1, int(_MIN_DISPLAY / max(w, h))) if max(w, h) else 1
         disp_w, disp_h = w * scale, h * scale
 

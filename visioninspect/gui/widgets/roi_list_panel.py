@@ -33,9 +33,8 @@ class ROIListPanel(QFrame):
     mask_polygon_requested = Signal(int)
     mask_polygon_clear_requested = Signal(int)
 
-    #: Baris terpilih harus menonjol jelas di tema gelap — inilah SATU-SATUNYA
-    #: pembeda warna di daftar ini. Garis kiri tebal dipakai supaya tetap
-    #: terbaca walau warna latar mirip dengan panel.
+    #: Highlight baris terpilih — SATU-SATUNYA pembeda warna di daftar ini.
+    #: Garis kiri tebal supaya tetap terbaca di tema gelap.
     _LIST_QSS = """
     QListWidget {
         background: #0E1A2B; border: 1px solid #233A57; border-radius: 4px;
@@ -62,9 +61,8 @@ class ROIListPanel(QFrame):
         self._setup_ui()
         self._rois: List[ROIData] = []
         self._updating = False
-        # Threshold template (dipakai ROI yang "ikut global"). Ditampilkan di
-        # spin saat centang aktif supaya operator melihat angka yang BENAR
-        # berlaku — bukan sisa nilai ROI yang dipilih sebelumnya.
+        # Threshold template (untuk ROI yang "ikut global") — ditampilkan di
+        # spin supaya operator lihat angka yang BENAR berlaku.
         self._global_threshold = 0.5
 
     def _setup_ui(self):
@@ -121,9 +119,7 @@ class ROIListPanel(QFrame):
         layout.addLayout(toggle_layout)
 
         # ── Threshold ROI terpilih ──────────────────────────────────────
-        # Tiap ROI melihat fitur berbeda, jadi ambang yang pas untuk satu ROI
-        # belum tentu pas untuk ROI lain. Kosongkan (centang "ikut global")
-        # untuk memakai threshold template.
+        # Tiap ROI lihat fitur beda; centang "ikut global" = pakai threshold template.
         thr_box = QVBoxLayout()
         thr_box.setSpacing(3)
         thr_title = QLabel("Threshold ROI terpilih")
@@ -161,10 +157,8 @@ class ROIListPanel(QFrame):
         thr_box.addLayout(thr_row)
         layout.addLayout(thr_box)
 
-        # ── Mask polygon ROI terpilih ────────────────────────────────────
-        # Kontur part di dalam ROI — piksel di luar polygon dinolkan saat
-        # training & inference (lihat visioninspect/core/roi_mask.py).
-        # Opsional: ROI tanpa mask berperilaku identik dengan sebelumnya.
+        # ── Mask polygon ROI terpilih (opsional) ─────────────────────────
+        # Piksel di luar polygon dinolkan saat training & inference.
         mask_box = QVBoxLayout()
         mask_box.setSpacing(3)
         mask_title = QLabel("Mask polygon ROI terpilih")
@@ -206,22 +200,16 @@ class ROIListPanel(QFrame):
         self._updating = True
         self._list.clear()
 
-        # Warna dipakai HANYA untuk menandai baris yang sedang dipilih —
-        # itu tugas highlight seleksi (lihat _LIST_QSS). Sebelumnya tiap ROI
-        # diberi warna latar per indeks, sehingga baris terpilih tenggelam di
-        # antara warna-warna lain dan operator tidak tahu mana yang aktif.
-        # (Warna lama juga salah tulis: QColor("#FFFFFF20") dibaca Qt sebagai
-        #  #AARRGGBB → alpha FF, biru 0x20, jadi kekuningan, bukan transparan.)
+        # Warna HANYA untuk menandai baris terpilih (lihat _LIST_QSS) — warna
+        # latar per-indeks bikin baris aktif tenggelam.
         for roi in rois:
             icon = "✓" if roi.enabled else "✗"
             text = f"{icon} {roi.label}  ({roi.x},{roi.y} {roi.width}x{roi.height})"
             if getattr(roi, "threshold", None) is not None:
                 text += f"  ⌁{roi.threshold:.3f}"   # punya ambang sendiri
             item = QListWidgetItem(text)
-            # Satu-satunya pembeda selain seleksi: aktif vs nonaktif.
-            # Warna redupnya sengaja tidak terlalu gelap — foreground yang
-            # diset per-item menang atas `color` di stylesheet, jadi ia harus
-            # tetap terbaca di atas latar biru saat baris ini terpilih.
+            # Pembeda selain seleksi: aktif vs nonaktif. Redupnya tidak terlalu
+            # gelap — harus tetap terbaca di atas latar biru saat terpilih.
             item.setForeground(QColor("#E2E8F0" if roi.enabled else "#94A3B8"))
             self._list.addItem(item)
 
@@ -276,8 +264,7 @@ class ROIListPanel(QFrame):
         self._thr_spin.setEnabled(not checked)
         self._thr_all_btn.setEnabled(not checked)
         # < 0 = kembali ikut global (field threshold dibuang dari config).
-        # Saat mulai memakai ambang sendiri, titik awalnya = nilai global —
-        # bukan sisa angka dari ROI yang dipilih sebelumnya.
+        # Titik awal ambang sendiri = nilai global, bukan sisa ROI sebelumnya.
         self.roi_threshold_changed.emit(
             row, -1.0 if checked else float(self._thr_spin.value()))
 

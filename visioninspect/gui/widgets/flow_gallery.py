@@ -40,21 +40,15 @@ class FlowGallery(QScrollArea):
         self._grid = QGridLayout(self._inner)
         self._grid.setContentsMargins(4, 4, 4, 4)
         self._grid.setSpacing(self._spacing)
-        # JANGAN setAlignment() di layout ini: alignment membuat layout tidak
-        # meneruskan tinggi minimumnya ke widget, sehingga QScrollArea mengira
-        # isinya selalu muat dan scrollbar vertikal tidak pernah muncul.
-        # Isi didorong ke kiri-atas lewat stretch baris/kolom di _relayout().
+        # JANGAN setAlignment() di sini — bikin QScrollArea mengira isinya
+        # selalu muat (scrollbar tak muncul). Pakai stretch di _relayout().
         self.setWidget(self._inner)
 
     # ---- API ----
 
     def add_widget(self, widget: QWidget) -> None:
-        """Tambah satu thumbnail di akhir daftar.
-
-        Ditempatkan langsung di sel berikutnya — BUKAN menata ulang seluruh
-        grid. Menata ulang tiap penambahan membuat pengisian 136 thumbnail
-        jadi O(n²) dan terasa berat di PC edge.
-        """
+        """Tambah 1 thumbnail di sel berikutnya — BUKAN menata ulang grid
+        (menata ulang tiap penambahan = O(n²), berat di PC edge)."""
         if self._cols <= 0:
             self._cols = self._column_count()
         idx = len(self._items)
@@ -84,14 +78,8 @@ class FlowGallery(QScrollArea):
         return max(1, (avail + self._spacing) // step)
 
     def _apply_stretch(self) -> None:
-        """Dorong isi ke kiri-atas + segarkan jangkauan scroll.
-
-        `updateGeometry()` WAJIB: tanpa itu QScrollArea tidak memperhitungkan
-        tinggi isi yang baru, jadi scrollbar vertikal tidak pernah muncul
-        walaupun isinya sudah jauh lebih tinggi dari container.
-        Baris stretch lama juga harus dinolkan — kalau tidak, baris yang tadi
-        kosong berubah jadi baris isi yang ikut meregang.
-        """
+        """Dorong isi ke kiri-atas + segarkan jangkauan scroll. `updateGeometry()`
+        WAJIB, dan stretch baris lama harus dinolkan dulu."""
         cols = max(1, self._cols)
         self._grid.setColumnStretch(cols, 1)
         rows = (len(self._items) + cols - 1) // cols

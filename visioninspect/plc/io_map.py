@@ -12,60 +12,36 @@ from typing import Optional
 
 
 def build_io_map(plc_config: Optional[dict]) -> dict:
-    """IO map default (coil/register) — override dari config.
-
-    Kontrak dengan ladder:
-      - Sistem HANYA mengirim OK. NG diputuskan PLC dari ketiadaan OK dalam
-        jendela waktunya sendiri.
-      - Heartbeat memisahkan "part cacat" dari "sistem rusak"; tanpa itu
-        kedua-duanya terlihat sama (sama-sama tidak ada OK).
-
-    outputs  : coil yang SISTEM tulis → PLC baca
-               result_ok / heartbeat / part_ready / busy
-    inputs   : coil yang PLC tulis → sistem baca
-               trigger / reset_result / switch_template / ng_from_plc
-    program_register : data register berisi nomor template tujuan
-    """
+    """IO map default (coil/register), override dari config. Kontrak ladder:
+    sistem HANYA kirim OK + heartbeat; NG diputuskan PLC dari ketiadaan OK."""
     default = {
         "outputs": {
             "result_ok": 1,       # M1: ON = part OK (pulse)
-            # CATATAN: coil result_ng DIHAPUS. NG sepenuhnya diputuskan PLC
-            # dari KETIADAAN sinyal OK dalam jendela waktu miliknya, jadi
-            # sistem tidak pernah lagi mengirim NG.
+            # Coil result_ng DIHAPUS — NG diputuskan PLC dari ketiadaan OK
+            # dalam jendela waktunya sendiri.
             "part_ready": 3,      # M3: ON = part terdeteksi (pulse saat transisi)
             "busy": 4,            # M4: ON = sistem sedang inspeksi
-            # Heartbeat: di-TOGGLE berkala selama sistem sehat (model termuat
-            # + kamera jalan). Tanpa ini, kamera lepas / aplikasi mati terlihat
-            # sama seperti part cacat di sisi PLC — lini terus membuang
-            # produksi bagus tanpa ada yang tahu. Ladder memantau
-            # PERUBAHANnya: tidak berubah > N detik = sistem rusak, bukan NG.
+            # Heartbeat: di-TOGGLE selama sistem sehat. Ladder pantau PERUBAHANnya
+            # — diam > N detik = sistem rusak, BUKAN part cacat.
             "heartbeat": 7,
-            # M9: pulse saat operator masuk RUN — ladder membersihkan
-            # M100/M110/M114/Y000/Y001/C0/C1/C2 kalau tidak sedang di
-            # tengah siklus (ladder yang menjaga lewat kontak /M100, bukan
-            # aplikasi). Opt-in lewat plc.reset_on_run_entry — lihat
-            # blueprint .claude/blueprint/kenapa-ok-tidak-sampai-plc.md.
+            # M9: pulse saat operator masuk RUN → ladder bersihkan state basi
+            # (dijaga kontak /M100). Opt-in lewat plc.reset_on_run_entry.
             "session_reset": 9,
         },
         "inputs": {
             "trigger": 0,         # M0: PLC minta 1 siklus inspeksi
             "reset_result": 5,    # M5: reset counter produksi OK/NG
-            # M6: ganti TEMPLATE aktif; nomornya dibaca dari program_register.
-            # Nama lama "switch_program" masih dikenali (config lama) — lihat
-            # _on_plc_poll_tick di main_window.
+            # M6: ganti TEMPLATE aktif (nomor dari program_register).
+            # Nama lama "switch_program" masih dikenali untuk config lama.
             "switch_template": 6,
-            # M8: PLC memvonis NG (tidak ada OK dalam jendela waktunya).
-            # Dipakai sistem untuk (1) menambah counter NG di layar supaya
-            # cocok dengan lampu, dan (2) membersihkan state siklus agar siap
-            # menerima trigger part berikutnya.
+            # M8: PLC memvonis NG → sistem menambah counter NG di layar dan
+            # membersihkan state siklus (siap trigger part berikutnya).
             "ng_from_plc": 8,
         },
         "program_register": 10,   # D10: nomor template tujuan
     }
     io = plc_config.get("io_map") if plc_config else None
-    # Guard: config `plc` tanpa key `io_map` bukan hal aneh (config lama /
-    # ditulis tangan). Sebelum ini baris program_register di bawah membaca
-    # `io` tanpa cek dan meledak dengan AttributeError.
+    # Guard: config `plc` boleh tanpa key `io_map` (config lama/ditulis tangan)
     if not isinstance(io, dict):
         return default
     for section in ("outputs", "inputs"):
@@ -76,15 +52,11 @@ def build_io_map(plc_config: Optional[dict]) -> dict:
     return default
 
 
-# Mode output hasil (mirip "Output Settings" di sensor Keyence IV3).
-# Aplikasi sudah jadi "sensor": PLC yg pegang timing/urutan. Hasil OK bisa:
-#   - latching: dibiarkan LEVEL sampai hasil berikutnya / PLC reset.
-#   - one_shot : pulse singkat (`one_shot_delay` lalu ON selama `one_shot_on_time`).
+# Mode output hasil OK (ala Keyence IV3): latching = LEVEL sampai hasil
+# berikutnya/reset PLC; one_shot = pulse singkat.
 DEFAULT_IO_MODE: dict = {
-    # DEFAULT one_shot (bukan latching) — kontrak yang disepakati dengan
-    # ladder: tiap part menghasilkan SATU kedipan tersendiri, dan "diam"
-    # berarti gagal. Latching membuat hasil part sebelumnya tetap terbaca
-    # selama sistem masih menghitung, sehingga vonis basi bisa dianggap baru.
+    # DEFAULT one_shot: tiap part = SATU kedipan, "diam" berarti gagal.
+    # Latching bikin vonis part sebelumnya bisa terbaca sebagai vonis baru.
     "output_mode": "one_shot",         # "latching" | "one_shot"
     "one_shot_on_time_ms": 300,        # durasi coil ON pd one_shot
     "one_shot_delay_ms": 0,            # tunda sebelum coil ON (one_shot)
@@ -94,11 +66,8 @@ DEFAULT_IO_MODE: dict = {
 
 
 def build_io_mode(plc_config: Optional[dict] = None) -> dict:
-    """Perilaku I/O (default), override dari config `plc.io_mode`.
-
-    Menjamin field selalu lengkap — backward-compat untuk config lama yang
-    belum punya io_mode.
-    """
+    """Perilaku I/O default, override dari config `plc.io_mode`.
+    Field dijamin lengkap (backward-compat config lama tanpa io_mode)."""
     out = DEFAULT_IO_MODE.copy()
     pl = plc_config or {}
     mode = pl.get("io_mode")

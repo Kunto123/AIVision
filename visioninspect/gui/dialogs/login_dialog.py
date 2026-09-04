@@ -203,9 +203,8 @@ class LoginDialog(QDialog):
                     return
             self.accept()
         else:
-            # Bedakan koneksi DB gagal vs kredensial salah. Backend PostgreSQL
-            # mengembalikan None untuk KEDUANYA, sehingga koneksi gagal dulu
-            # tampil sbg "password salah" yang membingungkan.
+            # Bedakan koneksi DB gagal vs kredensial salah — PostgreSQL
+            # mengembalikan None untuk KEDUANYA ("password salah" menyesatkan).
             msg = "Username atau password salah!"
             connect = getattr(self._db, "_connect", None)
             if callable(connect):
@@ -220,11 +219,8 @@ class LoginDialog(QDialog):
             self._password_input.setFocus()
 
     def _force_change_password(self, user: dict, username: str) -> bool:
-        """C4: paksa ganti password akun seed (admin/admin) sebelum masuk.
-
-        Returns True bila password berhasil diganti; False bila dibatalkan
-        (login tidak dilanjutkan).
-        """
+        """Paksa ganti password akun seed (admin/admin) sebelum masuk.
+        True = berhasil diganti; False = dibatalkan (login tidak lanjut)."""
         from PySide6.QtWidgets import QInputDialog, QLineEdit
 
         while True:

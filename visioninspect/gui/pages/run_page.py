@@ -296,14 +296,8 @@ class RunPage(QWidget):
 
     @Slot()
     def set_plc_status(self, connected: bool, port_open: bool = True):
-        """Badge status PLC di layar operator — TIGA keadaan, bukan dua.
-
-        "Port terbuka" (serial berhasil dibuka) dan "PLC menjawab" adalah
-        dua hal berbeda dengan tindakan perbaikan yang berbeda: kabel lepas
-        → cek kabel/konektor; PLC diam → cek daya PLC / rebutan port
-        (GX Works2). Dulu keduanya dilebur jadi hijau/merah dan badge bisa
-        hijau padahal PLC tidak menjawab sama sekali.
-        """
+        """Badge status PLC — TIGA keadaan, bukan dua: "port terbuka" dan "PLC
+        menjawab" beda penyebab (kabel lepas vs PLC mati/port direbut)."""
         if connected:
             self._plc_status_label.setText("OK " + self._tr.tr("connected"))
             self._plc_status_label.setStyleSheet(
@@ -362,8 +356,7 @@ class RunPage(QWidget):
             icon = "OK" if judge == "OK" else "NG"
             color = colors[i % len(colors)]
             # Threshold ikut ditampilkan karena tiap ROI bisa punya ambang
-            # sendiri — tanpa itu, skor 0,55 di satu baris dan 0,40 di baris
-            # lain tidak bisa dibandingkan operator.
+            # sendiri — tanpa itu skor antar baris tidak bisa dibandingkan.
             thr = r.get("threshold")
             thr_txt = f" / {thr:.3f}" if isinstance(thr, (int, float)) else ""
             lines.append(

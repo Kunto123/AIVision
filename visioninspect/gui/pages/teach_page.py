@@ -2,7 +2,7 @@
 VisionInspect - Teach Page
 Teaching & Training: capture OK/NG, gallery, train button, threshold slider, histogram.
 Plus Part Presence Check configuration.
-Layout: Left panel = dual ROI editors (QC + Gate), Right panel = controls.
+Layout: Left panel = dual ROI editors (Gate + QC), Right panel = controls.
 """
 
 from PySide6.QtCore import Qt, Signal, Slot
@@ -36,10 +36,8 @@ from visioninspect.utils.i18n import Translator
 class TeachPage(QWidget):
     """Halaman TEACH — teaching dan training model dengan multi-template."""
 
-    # Preset backbone+coreset combos for PatchCore — pre-tested combinations so
-    # most users never have to reason about raw hyperparameters. "custom" is a
-    # separate, implicit 4th option (not listed here) for hand-tuned values via
-    # Mode Lanjutan.
+    # Preset backbone+coreset PatchCore (kombinasi teruji) — user tak perlu
+    # mengutak-atik hyperparameter. "custom" = opsi ke-4 lewat Mode Lanjutan.
     TRAINING_PROFILES = {
         "fast": {"label": "Cepat", "backbone": "resnet18",
                  "coreset_sampling_ratio": 0.1, "input_size": 128},
@@ -67,9 +65,7 @@ class TeachPage(QWidget):
         layout.setSpacing(12)
 
         # ── Left Panel: Preview + Gate + Gallery ──
-        # Wrapped in a QScrollArea (same pattern as the right panel below) so the
-        # QC preview + Gate preview + gallery stack never overlaps on shorter
-        # screens (e.g. 1366x768 panel PCs) — it scrolls instead of squeezing.
+        # Dibungkus QScrollArea supaya tidak tumpang tindih di layar pendek.
         left_panel = QFrame()
         left_panel.setObjectName("cardPanel")
         left_outer = QVBoxLayout(left_panel)
@@ -194,24 +190,13 @@ class TeachPage(QWidget):
 
         left_layout.addLayout(import_row)
 
-        # ── Preview area: QC + Gate (top row) | Daftar ROI (bottom, full width) ──
+        # ── Preview area: Gate + QC (top row) | Daftar ROI (bottom, full width) ──
         preview_outer = QVBoxLayout()
         preview_outer.setSpacing(8)
 
-        # Top row: QC Region (left) | Gate Part 1 (right)
+        # Top row: Gate Part 1 (left) | QC Region (right)
         top_row = QHBoxLayout()
         top_row.setSpacing(8)
-
-        # QC Region
-        qc_box = QVBoxLayout()
-        qc_box.setSpacing(2)
-        qc_label = QLabel("QC Region")
-        qc_label.setObjectName("secondaryText")
-        qc_box.addWidget(qc_label)
-        self._roi_editor = ROIEditor()
-        self._roi_editor.setMinimumSize(240, 200)
-        qc_box.addWidget(self._roi_editor, 1)
-        top_row.addLayout(qc_box, 1)
 
         # Gate Part 1
         gate_box = QVBoxLayout()
@@ -226,6 +211,17 @@ class TeachPage(QWidget):
             "Gambar 1 kotak di area yang harus terisi part")
         gate_box.addWidget(self._gate_roi_editor, 1)
         top_row.addLayout(gate_box, 1)
+
+        # QC Region
+        qc_box = QVBoxLayout()
+        qc_box.setSpacing(2)
+        qc_label = QLabel("QC Region")
+        qc_label.setObjectName("secondaryText")
+        qc_box.addWidget(qc_label)
+        self._roi_editor = ROIEditor()
+        self._roi_editor.setMinimumSize(240, 200)
+        qc_box.addWidget(self._roi_editor, 1)
+        top_row.addLayout(qc_box, 1)
 
         preview_outer.addLayout(top_row, 3)
 
@@ -259,8 +255,7 @@ class TeachPage(QWidget):
         self._ok_count_label.setStyleSheet("color: #22C55E; font-weight: bold;")
         ok_g.addWidget(self._ok_count_label)
         # FlowGallery: thumbnail mengalir ke bawah, scroll vertikal saja.
-        # Tinggi ±2 baris supaya scroll ke bawah benar-benar berguna; ukuran
-        # tiap thumbnail tidak berubah (tetap seragam 78x82).
+        # Tinggi ±2 baris; ukuran tiap thumbnail tetap seragam 78x82.
         self._ok_gallery = FlowGallery()
         self._ok_gallery.setMinimumHeight(180)
         self._ok_gallery.setStyleSheet(_GAL_QSS)
@@ -285,9 +280,7 @@ class TeachPage(QWidget):
         layout.addWidget(left_panel, 3)
 
         # ── Right Panel: Training + Part Check Controls ──
-        # Wrapped in a QScrollArea (same pattern as SettingsPage) so the stack of
-        # cards below never overlaps on shorter screens (e.g. 1366x768 panel PCs) —
-        # it scrolls instead of squeezing widgets into negative space.
+        # Dibungkus QScrollArea supaya tidak tumpang tindih di layar pendek.
         right_panel = QFrame()
         right_panel.setObjectName("cardPanel")
         right_outer = QVBoxLayout(right_panel)
@@ -310,8 +303,7 @@ class TeachPage(QWidget):
         right_layout.addWidget(self._version_label)
 
         # ── Training Profile ──
-        # Preset-driven so most users never touch raw hyperparameters directly;
-        # "Mode Lanjutan" reveals the underlying fields for full manual control.
+        # Berbasis preset; "Mode Lanjutan" membuka field manual.
         profile_group = QGroupBox("Training Profile")
         profile_outer = QVBoxLayout(profile_group)
         profile_outer.setSpacing(6)
@@ -349,16 +341,8 @@ class TeachPage(QWidget):
         self._algo_combo.currentIndexChanged.connect(self._update_algorithm_field_visibility)
         self._adv_form.addRow("Algorithm:", self._algo_combo)
 
-        # Backbone & Coreset Ratio cuma dipakai PatchCore (lihat training.py:
-        # Patchcore(backbone=..., coreset_sampling_ratio=...) vs
-        # EfficientAd() yang tidak menerima parameter itu sama sekali — nilai
-        # yang tersimpan tetap ada di config tapi diabaikan total oleh
-        # training). Disembunyikan untuk EfficientAd lewat setRowVisible,
-        # sama seperti Epochs disembunyikan untuk PatchCore, biar tidak
-        # menyesatkan seolah-olah field itu berlaku untuk kedua algorithm.
-        # Ukuran input model — dipakai PatchCore, EfficientAd, dan YOLO
-        # (yolo_imgsz default 0 = ikut input_size, lihat core/training.py:115).
-        # Semua ROI di-resize ke ukuran ini sebelum masuk model.
+        # Backbone & Coreset Ratio HANYA dipakai PatchCore → disembunyikan untuk
+        # EfficientAd. Input size dipakai semua algoritma (ROI di-resize ke sini).
         self._input_size_combo = QComboBox()
         self._input_size_combo.addItems(["256", "192", "128"])
         self._input_size_combo.setCurrentIndex(0)
@@ -390,9 +374,8 @@ class TeachPage(QWidget):
         self._coreset_spin.valueChanged.connect(self._on_advanced_field_changed)
         self._adv_form.addRow("Coreset Ratio:", self._coreset_spin)
 
-        # Epoch cuma bermakna untuk EfficientAd (network beneran di-training
-        # via backprop) — disembunyikan untuk PatchCore (one-shot, selalu 1
-        # epoch) lewat setRowVisible, bukan dihapus, biar gampang di-toggle.
+        # Epoch cuma bermakna untuk EfficientAd (backprop) — disembunyikan
+        # untuk PatchCore (one-shot, selalu 1 epoch).
         self._epochs_spin = QSpinBox()
         self._epochs_spin.setRange(1, 1000)
         self._epochs_spin.setValue(100)
@@ -415,10 +398,8 @@ class TeachPage(QWidget):
         self._patience_spin.valueChanged.connect(self._on_advanced_field_changed)
         self._adv_form.addRow("Patience:", self._patience_spin)
 
-        # Pretrained YOLO — cuma untuk algorithm="yolo". Classification model
-        # (bukan detection) karena YOLO di sini menilai tiap crop OK/NG,
-        # persis peran Folder anomalib (normal/abnormal). v11 large/x-large
-        # cocok di-train di PC kuat; v8n opsi ringan untuk uji cepat.
+        # Pretrained YOLO (khusus algorithm="yolo") — model CLASSIFICATION,
+        # bukan detection. v11 l/x untuk PC kuat; v8n untuk uji cepat.
         self._yolo_pretrained_combo = QComboBox()
         self._yolo_pretrained_combo.addItem("YOLOv11 Large (cls)", "yolov11l-cls.pt")
         self._yolo_pretrained_combo.addItem("YOLOv11 X-Large (cls)", "yolov11x-cls.pt")
@@ -432,11 +413,8 @@ class TeachPage(QWidget):
 
         right_layout.addWidget(profile_group)
 
-        # ── Augmentasi Data ──
-        # Sengaja tidak menyediakan cutout/distorsi berat/blur berat — jenis
-        # augmentasi itu bisa menyerupai defect asli (scratch/kontaminasi)
-        # dan justru mengajari model salah. Cuma transformasi klasik yang
-        # aman: rotasi, flip, translasi, brightness, contrast.
+        # ── Augmentasi Data — hanya transformasi klasik yang aman ──
+        # Cutout/distorsi/blur berat sengaja TIDAK ada: mirip defect asli.
         aug_group = QGroupBox("Augmentasi Data")
         aug_outer = QVBoxLayout(aug_group)
         aug_outer.setSpacing(6)
@@ -506,10 +484,8 @@ class TeachPage(QWidget):
         sep.setStyleSheet("color: #233A57;")
         right_layout.addWidget(sep)
 
-        # ── Part Presence Check Controls ──
-        # Step 1 of the 2-step flow (gate before QC) — form-aligned rows, with
-        # method-specific rows hidden via setRowVisible so the panel only ever
-        # shows the 2-3 controls relevant to the chosen method, not all 6 at once.
+        # ── Part Presence Check Controls (gate sebelum QC) ──
+        # Baris spesifik-metode disembunyikan lewat setRowVisible.
         pc_group = QGroupBox("Part Presence (Step 1)")
         pc_outer = QVBoxLayout(pc_group)
         pc_outer.setSpacing(8)
@@ -611,9 +587,8 @@ class TeachPage(QWidget):
 
         tv = QHBoxLayout()
         tv.addWidget(QLabel("0.0"))
-        # Bisa diketik ATAU di-slide: spin sinkron dua arah dengan slider.
-        # keyboardTracking(False) → valueChanged hanya saat Enter/panah/focus-out,
-        # jadi mengetik angka tidak melompat-lompat tiap karakter.
+        # Spin sinkron dua arah dengan slider. keyboardTracking(False) supaya
+        # mengetik angka tidak melompat tiap karakter.
         self._threshold_spin = QDoubleSpinBox()
         self._threshold_spin.setRange(0.0, 1.0)
         self._threshold_spin.setDecimals(3)
@@ -649,11 +624,8 @@ class TeachPage(QWidget):
 
     def _build_augmentation_range_row(self, parent_layout, label: str, unit: str,
                                        min_val: int, max_val: int, default_val: int):
-        """Baris augmentasi bertipe rentang: checkbox aktif + spin max + 'Acak'.
-        Qt spinbox tidak punya state kosong native, jadi 'kosong = Acak' di
-        spek fitur direalisasikan lewat checkbox terpisah yang men-disable
-        spin-nya — nilai tersimpan jadi None (bukan angka yang kebetulan
-        masih ada di spinbox yang di-disable) saat Acak dicentang."""
+        """Baris augmentasi rentang: checkbox aktif + spin max + 'Acak'.
+        Qt spin tak punya state kosong → 'Acak' dicentang = nilai None."""
         row = QHBoxLayout()
         row.setSpacing(6)
 
@@ -770,9 +742,8 @@ class TeachPage(QWidget):
         self._threshold_spin.blockSignals(False)
 
     def _on_threshold_spin_changed(self, value: float):
-        """Spin diketik/diubah → geser slider. Tanpa blockSignals: valueChanged
-        slider memicu _on_threshold_changed (yang mem-block spin → anti-loop),
-        plus main_window._on_threshold_slider untuk update engine live."""
+        """Spin diubah → geser slider. Sengaja tanpa blockSignals supaya
+        main_window._on_threshold_slider ikut jalan (update engine live)."""
         self._threshold_slider.setValue(int(round(value * 1000)))
 
     @Slot()
@@ -821,9 +792,8 @@ class TeachPage(QWidget):
     # ---- Part Check ----
 
     def set_part_check_config(self, cfg: dict):
-        # Blokir sinyal selama load programatik. Tanpa ini, setChecked/setCurrentIndex
-        # memicu slot penyimpan config (di main_window) yang membaca nilai spinbox yang
-        # BELUM di-load → menimpa config di disk dgn default → setting kereset saat rerun.
+        # Blokir sinyal selama load programatik — tanpa ini setChecked memicu
+        # slot penyimpan config dan menimpa config di disk dengan default.
         _widgets = [
             self._pc_enabled_cb, self._pc_method_combo,
             self._pc_color_th_spin, self._pc_edge_th_spin,
@@ -879,9 +849,8 @@ class TeachPage(QWidget):
             "input_size": int(self._input_size_combo.currentText()),
             "training_profile": self._profile_combo.currentData(),
         }
-        # Cuma simpan override eksplisit untuk EfficientAd — PatchCore biar
-        # tetap pakai default 1 epoch dari TrainingConfig, bukan nilai yang
-        # kebetulan tersisa di spinbox yang sedang disembunyikan.
+        # Override epochs hanya untuk EfficientAd — PatchCore tetap pakai
+        # default 1 epoch, bukan sisa nilai spinbox yang disembunyikan.
         if self._algo_combo.currentData() == "efficientad":
             cfg["max_epochs"] = self._epochs_spin.value()
         # YOLO juga memakai epochs (ultralytics train) — simpan eksplisit
@@ -894,9 +863,8 @@ class TeachPage(QWidget):
         return cfg
 
     def set_training_config(self, cfg: dict):
-        # Blokir sinyal selama load programatik — sama alasannya dengan
-        # set_part_check_config di atas (hindari re-trigger handler penyimpan
-        # sebelum semua field selesai di-load).
+        # Blokir sinyal selama load programatik (sama seperti
+        # set_part_check_config) — hindari re-trigger handler penyimpan.
         _widgets = [self._profile_combo, self._algo_combo,
                     self._backbone_combo, self._coreset_spin, self._epochs_spin,
                     self._patience_spin, self._yolo_pretrained_combo,
@@ -983,10 +951,8 @@ class TeachPage(QWidget):
         self._advanced_widget.setVisible(checked)
 
     def _update_algorithm_field_visibility(self, *_):
-        """Tampilkan cuma field yang benar-benar dipakai algorithm terpilih:
-        Backbone & Coreset Ratio khusus PatchCore; Epochs khusus EfficientAd
-        & YOLO; YOLO Model khusus YOLO; Patience khusus EfficientAd & YOLO
-        (YOLO memakai patience untuk early stopping di model.train())."""
+        """Tampilkan hanya field yang dipakai algoritma terpilih: Backbone &
+        Coreset → PatchCore; Epochs/Patience → EfficientAd & YOLO."""
         algo = self._algo_combo.currentData()
         is_efficientad = algo == "efficientad"
         is_yolo = algo == "yolo"

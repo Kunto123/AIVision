@@ -75,9 +75,8 @@ class CameraConfig:
                 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # auto
             except AttributeError:
                 pass  # Some OpenCV builds don't have this constant
-        # F2: kunci gain & white-balance (>= 0 = nilai tetap, bukan auto).
-        # Auto adalah penyebab umum false-NG: cahaya berubah sedikit →
-        # histogram bergeser → model memberi NG palsu di kondisi lain.
+        # Kunci gain & white-balance (>= 0 = tetap). Auto = penyebab umum
+        # false-NG: cahaya bergeser sedikit → histogram geser → NG palsu.
         if self.gain is not None and self.gain >= 0:
             try:
                 cap.set(cv2.CAP_PROP_GAIN, self.gain)
@@ -217,11 +216,8 @@ class CameraDevice:
     # ---- One-shot Read (untuk QTimer polling) ----
 
     def read(self) -> Optional[npt.NDArray]:
-        """
-        Read a single frame (non-blocking, one-shot).
-        Returns frame or None on failure.
-        Cocok untuk QTimer polling: panggil read() tiap tick timer.
-        """
+        """Baca 1 frame (non-blocking, one-shot) → frame atau None.
+        Cocok untuk QTimer polling: panggil tiap tick."""
         if self._cap is None or not self._cap.isOpened():
             return None
 

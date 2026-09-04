@@ -58,44 +58,32 @@ class InferenceEngineError(Exception):
 
 
 class InferenceEngine:
-    """
-    OpenVINO inference engine dengan model hot-swap (double-buffer).
-    Thread-safe untuk concurrent access.
-    """
+    """Engine inferensi (OpenVINO / simple) dengan hot-swap model double-buffer.
+    Thread-safe untuk akses concurrent."""
 
     def __init__(self, input_size: int = 256, device: str = "CPU",
                  cache_dir: Optional[Path] = None,
                  cpu_pcore_only: bool = False):
         self._input_size = input_size
-        # Tugas 5: device inferensi bisa dipilih (CPU / GPU / AUTO). iGPU jauh
-        # lebih cepat untuk model besar DAN membebaskan CPU untuk GUI —
-        # terukur di PC dev (i5-7200U + HD 620): PatchCore 964→542 ms,
-        # YOLO11l-cls 1058→160 ms. Default tetap CPU (paling aman/portabel).
+        # Device: CPU | GPU | AUTO. iGPU jauh lebih cepat + membebaskan CPU
+        # untuk GUI, tapi default CPU (paling portabel).
         self._device = (device or "CPU").upper()
         self._active_device: Optional[str] = None   # device yg BENAR dipakai
-        # CPU hybrid (P-core + E-core, mis. i3-1315U): OpenVINO membagi satu
-        # inference ke semua thread lalu menunggu yang paling lambat — thread
-        # di E-core menahan seluruh inference. PCORE_ONLY membuat latency
-        # lebih stabil sekaligus menyisakan E-core untuk GUI + decode video.
+        # CPU hybrid (P+E core): batasi inference ke P-core → latency lebih
+        # stabil, E-core bebas untuk GUI + decode video.
         self._cpu_pcore_only = bool(cpu_pcore_only)
         self._lock = threading.Lock()
         self._model: Optional[ov.CompiledModel] = None
         self._model_path: Optional[Path] = None
         self._threshold: float = 0.5
-        # Threshold PER ROI (kunci = roi uid). Tiap ROI melihat fitur yang
-        # berbeda, jadi ambang yang pas untuk satu ROI belum tentu pas untuk
-        # ROI lain. Kosong = semua ROI memakai `_threshold` global (perilaku
-        # lama, dan tetap begitu untuk template yang belum menyetel per-ROI).
+        # Threshold per ROI (uid → nilai); kosong = semua ROI pakai _threshold global.
         self._threshold_per_roi: dict = {}
-        # Referensi normalisasi skor (raw PatchCore → [0,1]); score_ref → 0.5.
-        # Dibaca dari norm.json di samping model.xml saat load_model.
-        # _score_ref = fallback global; _score_ref_per_roi = {roi_uid: ref}
-        # (multi-ROI: tiap ROI punya skala skor berbeda, perlu ref sendiri).
+        # Normalisasi skor PatchCore mentah → [0,1] (score_ref → 0.5), dari
+        # norm.json. Per-ROI: tiap ROI punya skala skor berbeda.
         self._score_ref: Optional[float] = None
         self._score_ref_per_roi: dict = {}
-        # Mode model: "anomaly" (PatchCore/EfficientAd — skor anomali → similarity)
-        # atau "yolo" (klasifikasi OK/NG per crop — probabilitas kelas).
-        # Terdeteksi otomatis dari yolo_meta.json di samping model.xml.
+        # Mode model: "anomaly" (PatchCore/EfficientAd) | "yolo" (klasifikasi
+        # OK/NG per crop). Auto-deteksi dari yolo_meta.json di samping model.xml.
         self._algorithm: str = "anomaly"
         self._yolo_names: list = ["OK", "NG"]   # urutan kelas output model YOLO
         self._yolo_task: str = "classify"        # classify | detect
@@ -116,9 +104,8 @@ class InferenceEngine:
                 self._core = _OV_CORE()
                 logger.info("OpenVINO core initialized. Available devices: %s",
                             self._core.available_devices)
-                # Tugas 5: model cache — WAJIB kalau device GPU dipakai.
-                # Compile GPU tanpa cache ±18 detik tiap load (hot-swap jadi
-                # tidak terpakai); dengan cache ±0,4 detik (terukur).
+                # Model cache — WAJIB untuk GPU: compile pertama ±18 dtk,
+                # dengan cache ±0,4 dtk.
                 if cache_dir:
                     try:
                         Path(cache_dir).mkdir(parents=True, exist_ok=True)
@@ -127,7 +114,7 @@ class InferenceEngine:
                     except Exception as e:
                         logger.warning("CACHE_DIR gagal diset (%s): %s",
                                        cache_dir, e)
-                # Coba deteksi GPU device via OpenVINO
+                # Log GPU device yang terdeteksi (sekadar info)
                 try:
                     if self._core is not None:
                         gpu_devices = [d for d in self._core.available_devices if d.upper() in ("GPU", "IGPU")]
@@ -160,11 +147,8 @@ class InferenceEngine:
         self._threshold = max(0.0, min(1.0, value))
 
     def set_roi_thresholds(self, per_roi: Optional[dict]) -> None:
-        """Setel threshold per ROI ({uid: nilai}). None/kosong = pakai global.
-
-        Nilai di luar [0,1] dan uid kosong diabaikan — supaya config yang
-        rusak tidak diam-diam membuat satu ROI selalu lolos atau selalu NG.
-        """
+        """Setel threshold per ROI ({uid: nilai}); None/kosong = pakai global.
+        Nilai di luar [0,1] & uid kosong diabaikan (cegah config rusak)."""
         clean = {}
         for uid, val in (per_roi or {}).items():
             if not uid:
@@ -237,10 +221,7 @@ class InferenceEngine:
                      model_dir, threshold, self._input_size)
 
     def load_model(self, model_path: Path, threshold: Optional[float] = None) -> None:
-        """
-        Load OpenVINO model from path. Thread-safe.
-        Hot-swap: model baru dimuat dulu, lalu diganti secara atomik.
-        """
+        """Load model OpenVINO. Thread-safe, hot-swap atomik (muat dulu → tukar)."""
         if not self._use_ov:
             raise InferenceEngineError("OpenVINO not available")
 
@@ -264,13 +245,8 @@ class InferenceEngine:
                 if not xml_path.exists():
                     raise InferenceEngineError(f"OpenVINO IR not found: {xml_path}")
 
-        # Kalibrasi normalisasi skor (opsional). Ditulis saat training di
-        # samping model.xml. Skor PatchCore mentah tak di [0,1]; score_ref → 0.5.
+        # Kalibrasi skor (norm.json, opsional) + deteksi mode (yolo_meta.json)
         score_ref, score_ref_per_roi = self._read_norm(xml_path)
-
-        # Mode YOLO: kalau ada yolo_meta.json di samping model.xml (ditulis
-        # saat training/export YOLO), engine memakai jalur klasifikasi OK/NG
-        # (probabilitas kelas) — bukan skor anomali PatchCore/EfficientAd.
         algorithm, yolo_names, yolo_task = self._read_yolo_meta(xml_path)
 
         try:
@@ -294,9 +270,8 @@ class InferenceEngine:
             last_dim = pshape[-1]
             self._input_size = last_dim.get_length() if last_dim.is_static else self._input_size
 
-            # Pengaman: apa yang dipilih di TEACH vs apa yang benar-benar
-            # terpasang. `algorithm` dioper eksplisit karena atomic swap di
-            # bawah belum jalan — self._algorithm masih milik model lama.
+            # Cek config TEACH vs model terpasang (algorithm dioper eksplisit —
+            # atomic swap belum jalan, self._algorithm masih milik model lama).
             self._warn_config_model_mismatch(xml_path, algorithm)
 
             # Atomic swap
@@ -306,9 +281,8 @@ class InferenceEngine:
                 self._model_path = model_path
                 self._score_ref = score_ref
                 self._score_ref_per_roi = score_ref_per_roi
-                # Threshold per ROI milik TEMPLATE, bukan model — dibersihkan
-                # di sini supaya tidak bocor dari template sebelumnya, lalu
-                # dipasang ulang oleh pemanggil (set_roi_thresholds).
+                # Threshold per ROI milik TEMPLATE, bukan model → bersihkan,
+                # pemanggil pasang ulang via set_roi_thresholds().
                 self._threshold_per_roi = {}
                 self._algorithm = algorithm
                 self._yolo_names = yolo_names
@@ -327,11 +301,8 @@ class InferenceEngine:
             raise InferenceEngineError(f"Model load failed: {e}") from e
 
     def _compile_on_device(self, model):
-        """Compile ke device pilihan; gagal → fallback CPU + WARNING.
-
-        Device tidak tersedia TIDAK boleh membuat aplikasi crash — lini
-        produksi harus tetap jalan meski iGPU/driver bermasalah.
-        """
+        """Compile ke device pilihan; gagal → fallback CPU + WARNING (device
+        bermasalah tidak boleh crash-kan lini produksi)."""
         want = self._device or "CPU"
         avail = []
         try:
@@ -345,8 +316,7 @@ class InferenceEngine:
             want = "CPU"
 
         cfg = {}
-        # Properti hybrid P/E-core hanya valid untuk plugin CPU — dikirim ke
-        # GPU akan melempar exception.
+        # Properti hybrid P/E-core hanya valid di plugin CPU (ke GPU → exception)
         if want == "CPU" and self._cpu_pcore_only:
             cfg = {"SCHEDULING_CORE_TYPE": "PCORE_ONLY",
                    "ENABLE_HYPER_THREADING": "NO"}
@@ -375,13 +345,8 @@ class InferenceEngine:
 
     def set_device(self, device: str, cpu_pcore_only: Optional[bool] = None
                    ) -> None:
-        """Ganti device inferensi. Model yang sedang aktif di-compile ulang
-        (hot-swap) supaya perubahan langsung berlaku tanpa restart.
-
-        PERINGATAN: iGPU menghitung dengan presisi berbeda (FP16) sementara
-        `score_ref` di norm.json dikalibrasi pada CPU FP32 — skor bisa
-        bergeser. Validasi skor CPU vs GPU sebelum dipakai produksi.
-        """
+        """Ganti device inferensi → model aktif di-compile ulang (tanpa restart).
+        AWAS: iGPU FP16 vs score_ref (CPU FP32) → skor bergeser; validasi dulu."""
         new_dev = (device or "CPU").upper()
         changed = (new_dev != self._device
                    or (cpu_pcore_only is not None
@@ -399,12 +364,8 @@ class InferenceEngine:
 
     @staticmethod
     def _read_model_meta(xml_path: Path) -> dict:
-        """Baca model_meta.json di samping model.xml (Tugas 8).
-
-        Fallback ke folder 'openvino' bila model dimuat dari 'openvino_int8'
-        (pola sama dengan _read_norm / _read_yolo_meta). Model lama tidak
-        punya file ini → kembalikan {} tanpa keluhan.
-        """
+        """Baca model_meta.json di samping model.xml (fallback ke folder
+        'openvino' bila dimuat dari 'openvino_int8'). Tidak ada → {}."""
         import json
         candidates = [xml_path.parent / "model_meta.json"]
         if xml_path.parent.name == "openvino_int8":
@@ -420,21 +381,8 @@ class InferenceEngine:
         return {}
 
     def _warn_config_model_mismatch(self, xml_path: Path, algorithm: str):
-        """Bandingkan model yang BENAR-BENAR terpasang dengan config template.
-
-        Nama template = identitas PART, bukan nama arsitektur — jadi nama
-        TIDAK pernah dipakai untuk memeriksa apa pun di sini. Yang dibandingkan
-        adalah pengaturan yang dipilih operator di halaman TEACH (config)
-        terhadap catatan independen hasil export (model_meta.json + shape IR).
-
-        Field pembanding mengikuti algoritma, karena tiap algoritma memakai
-        field yang berbeda di TEACH:
-          yolo                  → `yolo_pretrained`  (field `backbone` tidak
-                                  berlaku & memang disembunyikan di UI)
-          patchcore/efficientad → `backbone`
-
-        Hanya log WARNING — tidak mengubah perilaku inference.
-        """
+        """Bandingkan model terpasang (model_meta.json + shape IR) vs config TEACH
+        → hanya log WARNING. Field: yolo → `yolo_pretrained`, lain → `backbone`."""
         import json
         cfg_path = xml_path.parent.parent.parent / "config.json"
         if not cfg_path.exists():
@@ -450,14 +398,10 @@ class InferenceEngine:
                     "wajib training ulang sebelum dipakai produksi.",
                     self._input_size, cfg_path, cfg_size)
 
-            # backbone/algorithm tidak terbaca dari IR → dibandingkan dengan
-            # model_meta.json (ditulis saat export). Model lama tidak punya
-            # file ini; itu bukan error, cukup dilewati.
+            # backbone/algorithm tidak ada di IR → bandingkan via model_meta.json
             meta = self._read_model_meta(xml_path)
             if not meta:
                 return
-            # Algoritma yang benar-benar terpasang: utamakan catatan export,
-            # fallback ke deteksi dari yolo_meta.json.
             algo = str(meta.get("algorithm") or algorithm or "").lower()
 
             if algo == "yolo":
@@ -486,12 +430,8 @@ class InferenceEngine:
 
     @staticmethod
     def _read_norm(xml_path: Path):
-        """Baca kalibrasi dari norm.json di samping model.xml (opsional).
-
-        Returns (score_ref, per_roi) — score_ref = fallback global (float|None),
-        per_roi = {roi_uid: ref}. Fallback ke folder 'openvino' bila model
-        dimuat dari 'openvino_int8'.
-        """
+        """Baca norm.json (opsional) → (score_ref: float|None, per_roi: {uid: ref}).
+        Fallback ke folder 'openvino' bila dimuat dari 'openvino_int8'."""
         import json
         candidates = [xml_path.parent / "norm.json"]
         if xml_path.parent.name == "openvino_int8":
@@ -517,12 +457,8 @@ class InferenceEngine:
 
     @staticmethod
     def _read_yolo_meta(xml_path: Path):
-        """Baca yolo_meta.json di samping model.xml → mode inferensi YOLO.
-
-        Returns (algorithm, yolo_names, yolo_task). Tanpa meta file → mode
-        anomaly biasa (PatchCore/EfficientAd). yolo_meta.json ditulis saat
-        training/export YOLO: {"names": ["OK","NG"], "task": "classify"}.
-        """
+        """Baca yolo_meta.json → (algorithm, names, task). Tanpa file → mode
+        anomaly. Isi file: {"names": ["OK","NG"], "task": "classify"}."""
         import json
         candidates = [xml_path.parent / "yolo_meta.json"]
         if xml_path.parent.name == "openvino_int8":
@@ -544,7 +480,7 @@ class InferenceEngine:
         return "anomaly", ["OK", "NG"], "classify"
 
     def unload_model(self) -> None:
-        """Unload current model (both OpenVINO and simple)."""
+        """Unload model aktif (OpenVINO & simple)."""
         with self._lock:
             self._model = None
             self._model_path = None
@@ -564,14 +500,8 @@ class InferenceEngine:
     def infer(self, frame: npt.NDArray, roi: Optional[dict] = None,
               track_latency: bool = True) -> InferenceResult:
         """
-        Run inference on frame (or ROI-cropped region).
-        Returns InferenceResult with score, judgement, heatmap.
-
-        track_latency=False skips updating the shared latency_avg_ms/p95_ms
-        rolling stats (used by the Diagnostics page for live RUN monitoring) —
-        set this when calling infer() outside the live inspection loop (e.g.
-        batch-testing static photos) so those runs don't skew production
-        latency stats.
+        Inferensi 1 frame (atau crop ROI) → InferenceResult (score, judgement, heatmap).
+        track_latency=False → skip rolling stats (untuk uji batch di luar loop live).
         """
         start = time.perf_counter()
 
@@ -585,10 +515,7 @@ class InferenceEngine:
             w = max(1, min(int(w), w_img - x))
             h = max(1, min(int(h), h_img - y))
             cropped = frame[y:y+h, x:x+w]
-            # Mask polygon (opsional) — HARUS identik dengan yang diterapkan
-            # saat training (lihat training_worker.py::_crop_images_to_rois).
-            # Tidak ada override per-gambar di sini: inference berjalan
-            # real-time tanpa review manusia, jadi selalu pakai default ROI.
+            # Mask polygon HARUS identik dengan saat training (roi_mask.py).
             cropped = apply_polygon_mask(cropped, roi.get("mask_polygon"))
         else:
             cropped = frame
@@ -612,27 +539,25 @@ class InferenceEngine:
             yolo_names = self._yolo_names
             yolo_task = self._yolo_task
 
-        # Multi-ROI: tiap ROI punya skala skor berbeda → pakai ref khusus ROI
-        # ini (by uid) bila ada, jika tidak fallback ke ref global.
+        # Per-ROI (by uid): score_ref & threshold khusus ROI ini kalau ada,
+        # kalau tidak fallback ke global.
         roi_uid = roi.get("uid") if roi else None
         if roi_uid in score_ref_per_roi:
             score_ref = score_ref_per_roi[roi_uid]
-        # Threshold per ROI — fallback ke global bila ROI ini belum disetel.
         if roi_uid in threshold_per_roi:
             threshold = threshold_per_roi[roi_uid]
 
         if model is None and not simple_loaded:
             elapsed = (time.perf_counter() - start) * 1000
-            # No model = tidak bisa deteksi anomali → similarity=1.0 (lolos)
+            # Tanpa model → tidak bisa deteksi anomali → similarity 1.0 (lolos)
             return InferenceResult(
                 score=1.0, judgement="OK", latency_ms=elapsed,
                 threshold=threshold, roi_cropped=resized
             )
 
-        # Simple model inference (z-score)
+        # ── Simple mode: z-score statistik piksel (fallback tanpa PyTorch) ──
         if simple_loaded and simple_mean is not None and simple_std is not None:
             try:
-                # Crop ROI if specified, with bounds checking
                 if roi:
                     x, y, w, h = roi["x"], roi["y"], roi["width"], roi["height"]
                     h_img, w_img = frame.shape[:2]
@@ -641,20 +566,15 @@ class InferenceEngine:
                     w = max(1, min(int(w), w_img - x))
                     h = max(1, min(int(h), h_img - y))
                     cropped = frame[y:y+h, x:x+w]
-                    # Sama seperti jalur OpenVINO di atas — mask HARUS
-                    # identik dengan training (lihat komentar di blok
-                    # pertama fungsi ini).
                     cropped = apply_polygon_mask(cropped, roi.get("mask_polygon"))
                 else:
                     cropped = frame
                 resized = cv2.resize(cropped, (self._input_size, self._input_size))
                 img_f = resized.astype(np.float32) / 255.0
-                # Per-pixel z-score, then mean z-score as anomaly score
                 z = np.abs(img_f - simple_mean) / simple_std
                 score = float(np.mean(z))
                 score = max(0.0, min(1.0, score))
-                # Konversi anomaly → similarity (1.0 = mirip OK)
-                score = 1.0 - score
+                score = 1.0 - score          # anomaly → similarity (1.0 = mirip OK)
                 judgement = "OK" if score >= threshold else "NG"
                 elapsed = (time.perf_counter() - start) * 1000
                 if track_latency:
@@ -676,12 +596,10 @@ class InferenceEngine:
                 )
 
         # ── YOLO mode: klasifikasi OK/NG per crop (probabilitas kelas) ──────
-        # Model YOLO (hasil training/export ultralytics → OpenVINO) output
-        # probabilitas per kelas, bukan anomaly score. Judgement = prob kelas
-        # "OK" (atau 1 - prob "NG") >= threshold → OK.
+        # Output = prob per kelas. Judgement: prob "OK" (atau 1 - prob "NG") >= threshold.
         if algorithm == "yolo":
             try:
-                # Preprocess sama dengan jalur anomaly: BGR→RGB, HWC→NCHW, /255.
+                # Preprocess: BGR→RGB, HWC→NCHW, /255
                 rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
                 input_tensor = rgb.astype(np.float32) / 255.0
                 input_tensor = np.transpose(input_tensor, (2, 0, 1))  # HWC → CHW
@@ -692,8 +610,7 @@ class InferenceEngine:
                 infer_request.start_async()
                 infer_request.wait()
 
-                # Output classification: [1, C] logits/probs.
-                # Output detect: [1, 4+C, N] anchors → fallback ambil prob kelas.
+                # classify → [1, C] probs; detect → [1, 4+C, N] anchors (fallback)
                 probs = None
                 for i in range(len(model.outputs)):
                     data = np.asarray(infer_request.get_output_tensor(i).data)
@@ -749,24 +666,22 @@ class InferenceEngine:
                     threshold=threshold, roi_cropped=resized,
                 )
 
+        # ── Anomaly mode: PatchCore / EfficientAd → skor anomali + heatmap ──
         try:
-            # Preprocess: BGR→RGB (model dilatih & dikalibrasi pd RGB — tanpa
-            # konversi ini skor bergeser & OK bisa salah jadi NG), HWC→NCHW, /255.
+            # Preprocess: BGR→RGB (model dikalibrasi di RGB — tanpa ini skor
+            # bergeser & OK bisa jadi NG), HWC→NCHW, /255
             rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
             input_tensor = rgb.astype(np.float32) / 255.0
             input_tensor = np.transpose(input_tensor, (2, 0, 1))  # HWC → CHW
             input_tensor = np.expand_dims(input_tensor, axis=0)    # CHW → NCHW
 
-            # Infer
             infer_request = model.create_infer_request()
             infer_request.set_input_tensor(ov.Tensor(input_tensor))
             infer_request.start_async()
             infer_request.wait()
 
-            # PatchCore mengekspor 2 output: anomaly_map [1,1,H,W] + pred_score [1].
-            # get_output_tensor() TANPA index gagal ("outputs.size() == 1"),
-            # jadi baca tiap output by index & kenali dari bentuknya:
-            # ndim>=3 → heatmap; selain itu → pred_score (diutamakan sbg skor).
+            # PatchCore: 2 output (anomaly_map [1,1,H,W] + pred_score [1]).
+            # Baca by index & kenali dari bentuk: ndim>=3 → heatmap, else → pred_score.
             raw_score = None
             heatmap_resized = None
             for i in range(len(model.outputs)):
@@ -785,15 +700,13 @@ class InferenceEngine:
             if raw_score is None:
                 raw_score = 0.0
 
-            # Skor PatchCore mentah (jarak fitur, mis. ~20) tidak berada di [0,1].
-            # Normalisasi pakai score_ref hasil kalibrasi training (score_ref → 0.5),
-            # agar sebanding dgn threshold. Tanpa score_ref, pakai skor mentah apa adanya.
+            # Skor mentah (jarak fitur, ~20) tidak di [0,1] → normalisasi pakai
+            # score_ref hasil kalibrasi (score_ref → 0.5). Tanpa ref: apa adanya.
             if score_ref and score_ref > 0:
                 score = min(1.0, max(0.0, 0.5 * raw_score / score_ref))
             else:
                 score = raw_score
-            # Konversi anomaly score → similarity score (1.0 = mirip OK)
-            score = 1.0 - score
+            score = 1.0 - score          # anomaly → similarity (1.0 = mirip OK)
             score = max(0.0, min(1.0, score))
 
             judgement = "OK" if score >= threshold else "NG"
@@ -827,9 +740,7 @@ class InferenceEngine:
     # ---- Hot-swap helper ----
 
     def hot_swap(self, new_model_path: Path, threshold: Optional[float] = None) -> None:
-        """
-        Hot-swap model atomically. Model lama dipakai sampai yang baru siap.
-        """
+        """Hot-swap atomik — model lama tetap melayani sampai yang baru siap."""
         old_model_path = self._model_path
         try:
             self.load_model(new_model_path, threshold)
@@ -846,23 +757,17 @@ def overlay_heatmap(
     alpha: float = 0.4,
     colormap: int = cv2.COLORMAP_JET,
 ) -> npt.NDArray:
-    """
-    Overlay heatmap on image with transparency.
-    Returns BGR image suitable for display.
-    """
+    """Overlay heatmap transparan di atas image → BGR siap tampil."""
     if heatmap is None:
         return image
 
-    # Ensure same size
     h, w = image.shape[:2]
     if heatmap.shape[:2] != (h, w):
         heatmap = cv2.resize(heatmap, (w, h))
 
-    # Normalize to 0-255 uint8
     heatmap_norm = cv2.normalize(heatmap, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
     heatmap_color = cv2.applyColorMap(heatmap_norm, colormap)
 
-    # Blend
     if image.shape[2] == 3:
         overlay = cv2.addWeighted(image, 1 - alpha, heatmap_color, alpha, 0)
     else:

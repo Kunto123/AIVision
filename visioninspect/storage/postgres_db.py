@@ -85,26 +85,12 @@ class PostgresConnectionError(PostgresError):
 
 
 class PostgresDB:
-    """
-    Koneksi ke PostgreSQL untuk autentikasi dan push inspeksi.
-
-    Menggunakan connection-per-call (tanpa pooling) karena eksekusi
-    dari Qt event loop — reconnect otomatis tiap query.
-    """
+    """Koneksi PostgreSQL untuk autentikasi + push inspeksi.
+    Connection-per-call (tanpa pooling) — reconnect otomatis tiap query."""
 
     def __init__(self, config: dict):
-        """
-        Args:
-            config: Dict dengan key:
-                enabled      - bool
-                host         - str
-                port         - int
-                dbname       - str
-                user         - str
-                password     - str
-                sslmode      - str
-                connect_timeout - int
-        """
+        """config: enabled, host, port, dbname, user, password, sslmode,
+        connect_timeout."""
         self._cfg = config
         self._enabled = config.get("enabled", False) and HAS_PSYCOPG2
         # C4: password non-plaintext — decrypt token "enc:v1:" (DPAPI/Fernet).
@@ -129,11 +115,8 @@ class PostgresDB:
     # ── Connection ───────────────────────────────────────────────────
 
     def _connect(self, timeout: Optional[float] = None):
-        """Create a new connection. Raises PostgresConnectionError on failure.
-
-        Args:
-            timeout: connect_timeout override (detik). None = pakai config.
-        """
+        """Buat koneksi baru; gagal → PostgresConnectionError.
+        `timeout` override connect_timeout (detik); None = pakai config."""
         if not self._enabled:
             raise PostgresConnectionError("PostgreSQL not enabled")
         try:
@@ -155,19 +138,8 @@ class PostgresDB:
     def _execute(self, query: str, params: tuple = None,
                  fetch: bool = False, fetch_one: bool = False,
                  returning: bool = False) -> Any:
-        """
-        Execute query with auto-connect + retry.
-
-        Args:
-            query: SQL query string
-            params: Query parameters
-            fetch: Return all rows as list[dict]
-            fetch_one: Return single row as dict or None
-            returning: Commit and return cursor.rowcount
-
-        Returns:
-            List[dict], dict, int, or None
-        """
+        """Jalankan query dengan auto-connect + retry.
+        fetch → list[dict], fetch_one → dict|None, returning → rowcount."""
         if not self._enabled:
             return [] if fetch else None
 
@@ -188,9 +160,8 @@ class PostgresDB:
 
                 if fetch_one:
                     row = cur.fetchone()
-                    # WAJIB commit: INSERT ... RETURNING id memakai fetch_one
-                    # (push_inspection, add_user). Tanpa ini baris di-rollback
-                    # saat koneksi ditutup (autocommit=False) → DB tetap kosong.
+                    # WAJIB commit: INSERT ... RETURNING id pakai fetch_one —
+                    # tanpa ini baris di-rollback saat koneksi ditutup.
                     conn.commit()
                     return dict(row) if row else None
 
@@ -212,13 +183,8 @@ class PostgresDB:
     # ── Readiness ────────────────────────────────────────────────────
 
     def ensure_ready(self) -> bool:
-        """Pastikan DB siap pakai setelah terhubung.
-
-        Verifikasi (dan buat bila belum ada) tabel yang dibutuhkan, lalu seed
-        admin default bila tabel user kosong. Dipanggil setelah koneksi
-        berhasil (startup & simpan settings) agar kegagalan push/login tidak
-        terjadi diam-diam. Returns True bila DB siap.
-        """
+        """Verifikasi/buat tabel yang dibutuhkan + seed admin default kalau
+        tabel user kosong. Return True bila DB siap."""
         if not self._enabled:
             return False
         try:
@@ -238,10 +204,8 @@ class PostgresDB:
                     rfid_uid_last4 TEXT,
                     rfid_bound_at TIMESTAMPTZ
                 )""")
-            # Skema ASLI tabel produksi — lima kolom, tidak lebih. Aplikasi
-            # ini pernah menambahkan 9 kolom lain (line/operator/image_path/
-            # threshold/latency_ms/local_id/corrected*); semuanya dicabut
-            # kembali, lihat _drop_legacy_push_columns().
+            # Skema ASLI tabel produksi — lima kolom, tidak lebih.
+            # Kolom tambahan versi lama dicabut di _drop_legacy_push_columns().
             self._execute("""
                 CREATE TABLE IF NOT EXISTS qc_inspection_push (
                     id BIGSERIAL PRIMARY KEY,
@@ -252,10 +216,8 @@ class PostgresDB:
                     data2 DOUBLE PRECISION
                 )""")
 
-            # C4: kolom must_change_password untuk akun seed (paksa ganti).
-            # Dijalankan SEBELUM pembersihan kolom lama: tanpa kolom ini login
-            # gagal total, jadi ia tidak boleh bergantung pada langkah lain
-            # yang sifatnya hanya kebersihan skema.
+            # Kolom must_change_password (akun seed). WAJIB sebelum pembersihan
+            # kolom lama — tanpa kolom ini login gagal total.
             try:
                 self._execute(
                     "ALTER TABLE qc_user_accounts ADD COLUMN IF NOT EXISTS "
@@ -300,23 +262,8 @@ class PostgresDB:
     # ── Authentication ──────────────────────────────────────────────
 
     def sync_users_from_sqlite(self, sqlite_db) -> int:
-        """[DEPRECATED — 2026-08-07] Sinkronkan user SQLite → PG (upsert one-way).
-
-        TIDAK DIPANGGIL LAGI sejak PG dijadikan satu-satunya sumber akun
-        (main_window.py). Method ini menimpa role/password qc_user_accounts
-        dengan isi SQLite tiap startup, sehingga akun yang dibuat/diedit di
-        pgAdmin4 selalu dikembalikan ke state SQLite. Dipertahankan hanya
-        sebagai utilitas migrasi manual bila suatu saat diperlukan.
-
-        C2: SQLite & PG adalah dua auth source terpisah. User (dengan
-        password custom) hidup di SQLite; PG hanya punya seed admin/admin.
-        Begitu PG "hidup" (lihat fix is_alive 2026-08-07), login beralih ke
-        PG dan user SQLite tak ada di sana → login gagal. Pepper hash sama
-        (``visioninspect_2024_``) sehingga password_hash bisa disalin
-        langsung. Dipanggil sekali saat startup setelah ``ensure_ready``.
-
-        Returns jumlah user yang di-upsert (0 bila disabled/gagal).
-        """
+        """[DEPRECATED] Upsert user SQLite → PG. TIDAK DIPANGGIL lagi sejak PG
+        jadi satu-satunya sumber akun; disimpan untuk migrasi manual."""
         if not self._enabled:
             return 0
         try:
@@ -326,9 +273,8 @@ class PostgresDB:
             now = _now()
             n = 0
             for u in users:
-                # ON CONFLICT (username) butuh UNIQUE constraint — tabel lama
-                # hasil CREATE IF NOT EXISTS bisa tidak punya → pakai
-                # SELECT→INSERT/UPDATE manual (robust terhadap skema apa pun).
+                # ON CONFLICT butuh UNIQUE constraint yang belum tentu ada di
+                # tabel lama → pakai SELECT→INSERT/UPDATE manual.
                 exists = self._execute(
                     "SELECT id FROM qc_user_accounts WHERE username = %s",
                     (u["username"],), fetch_one=True)
@@ -358,14 +304,8 @@ class PostgresDB:
             return 0
 
     def authenticate(self, username: str, password: str) -> Optional[dict]:
-        """
-        Authenticate user against qc_user_accounts.
-
-        Returns user dict (with keys: id, username, role, display_name=username)
-        or None if credentials invalid / user not active.
-
-        On success, updates last_login_at.
-        """
+        """Autentikasi ke qc_user_accounts → dict(id, username, role, display_name)
+        atau None kalau invalid/nonaktif. Sukses → last_login_at diperbarui."""
         if not self._enabled:
             return None
 
@@ -636,21 +576,10 @@ class PostgresDB:
     )
 
     def _drop_legacy_push_columns(self) -> None:
-        """Hapus permanen kolom yang dulu ditambahkan aplikasi ini.
-
-        PERMANEN: data di kolom-kolom itu ikut hilang dan tidak bisa
-        dikembalikan tanpa backup. Dijalankan sekali — `DROP COLUMN IF EXISTS`
-        bersifat idempoten, jadi startup berikutnya tidak melakukan apa-apa.
-
-        Semua informasi itu TETAP ADA di SQLite lokal (image_path, threshold,
-        latency_ms, verdict, koreksi, skor per ROI), jadi yang hilang hanya
-        salinannya di PostgreSQL.
-        """
-        # Except LEBAR (bukan hanya PostgresError): langkah ini semata-mata
-        # kebersihan skema. Kalau ia gagal karena sebab apa pun, sisa
-        # ensure_ready() — termasuk migrasi kolom yang dibutuhkan LOGIN —
-        # tetap harus jalan. (Pernah terjadi: TypeError di sini membuat
-        # `must_change_password` tidak pernah dibuat dan login mati total.)
+        """Hapus PERMANEN kolom warisan aplikasi ini (idempoten). Datanya hilang,
+        tapi semua informasi itu tetap lengkap di SQLite lokal."""
+        # Except LEBAR: ini hanya kebersihan skema — kegagalan apa pun tidak
+        # boleh menghentikan sisa ensure_ready() (migrasi kolom untuk LOGIN).
         try:
             existing = self._execute(
                 """SELECT column_name FROM information_schema.columns
@@ -682,23 +611,8 @@ class PostgresDB:
     def push_inspection(self, partname: str, mpcheck: str,
                         data1: float = 0.0, data2: float = 0.0,
                         datecheckmc: Optional[str] = None) -> Optional[int]:
-        """Push hasil inspeksi OK ke qc_inspection_push (skema asli, 5 kolom).
-
-        Args:
-            partname: Nama part (dari nama template aktif)
-            mpcheck: MP (ManPower) yang memeriksa — NAMA AKUN OPERATOR yang
-                login di operator view. Bukan verdict OK/NG: tabel ini hanya
-                menerima hasil OK, jadi verdict-nya tersirat.
-            data1: Skor part-check (0 bila part-check tidak aktif)
-            data2: Skor inspeksi ROI penentu
-            datecheckmc: Waktu INSPEKSI (bukan waktu insert). Wajib diisi
-                pemanggil — kalau outbox tertahan karena PG mati, memakai
-                jam insert akan menggeser seluruh baris tertunda ke waktu
-                koneksi pulih. None hanya sebagai jaring pengaman.
-
-        Returns:
-            Inserted row ID, atau None on failure.
-        """
+        """Push hasil OK ke qc_inspection_push (5 kolom). `mpcheck` = nama akun
+        operator, `datecheckmc` = waktu INSPEKSI (bukan waktu insert)."""
         if not self._enabled:
             return None
 
@@ -723,28 +637,14 @@ class PostgresDB:
             logger.warning("Push inspection error: %s", e)
             return None
 
-    # CATATAN: propagasi koreksi ke PostgreSQL (mark_correction_pg /
-    # rollback_correction_pg) DIHAPUS. Kolom penopangnya (local_id, corrected,
-    # correct_judgement, corrected_at) sudah tidak ada, dan tabel ini hanya
-    # menerima hasil OK — sementara koreksi hampir selalu menyangkut NG.
-    # Koreksi operator tetap tercatat lengkap di SQLite lokal.
+    # Propagasi koreksi ke PG DIHAPUS (kolom penopangnya tidak ada & tabel
+    # ini hanya menerima OK). Koreksi tetap lengkap di SQLite lokal.
 
     # ── Liveness (C2) ──────────────────────────────────────────────
 
     def is_alive(self, timeout: Optional[float] = None) -> bool:
-        """Cek apakah PostgreSQL benar-benar terjangkau (C2).
-
-        ``is_enabled`` hanya membaca flag config — server bisa saja mati.
-        Query ringan SELECT 1 dengan connect_timeout singkat; dipakai untuk
-        login fallback ke SQLite lokal dan indikator sink di DIAGNOSTICS.
-
-        Catatan (fix 2026-08-07): JANGAN panggil dengan timeout kecil
-        (mis. 2.0) di host ``localhost``/Windows — resolve IPv6 ``::1``
-        dulu bisa makan budget, lalu libpq fallback ke 127.0.0.1; kalau
-        timeout habis, is_alive false-negative padahal PG hidup (inisialisasi
-        yang pakai connect_timeout config = 10s tetap sukses). None = pakai
-        config ``connect_timeout`` supaya konsisten dengan jalur init.
-        """
+        """SELECT 1 untuk cek PG benar-benar terjangkau (is_enabled cuma flag config).
+        JANGAN pakai timeout kecil di localhost/Windows — resolve IPv6 bikin false-negative."""
         if not self._enabled:
             return False
         try:

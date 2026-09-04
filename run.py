@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-VisionInspect — Runner script.
-Gunakan ini untuk menjalankan aplikasi dari folder proyek.
+VisionInspect — Runner.
+Jalankan aplikasi dari folder proyek: `python run.py` (atau `run.bat` di Windows).
 """
 
 import os
@@ -9,7 +9,7 @@ import sys
 import platform
 from pathlib import Path
 
-# === WSL-specific fixes ===
+# 1. Deteksi WSL → paksa software rendering (hindari error EGL/MESA/ZINK)
 _on_wsl = False
 if platform.system() == "Linux":
     try:
@@ -19,22 +19,20 @@ if platform.system() == "Linux":
         pass
 
 if _on_wsl:
-    # Suppress EGL/MESA/ZINK errors — pakai software rendering
     os.environ.setdefault("QT_OPENGL", "software")
     os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
-    # Pastikan display environment ada
     if "DISPLAY" not in os.environ and "WAYLAND_DISPLAY" not in os.environ:
         print("INFO: Running in WSL tanpa display server.",
               "Install VcXsrv/X410 di Windows lalu export DISPLAY=:0")
 
-# Auto-set VISIONINSPECT_DATA ke data/ proyek (agar konsisten
-# di Windows & WSL tanpa perlu config override manual)
+# 2. Arahkan folder data ke <proyek>/data (konsisten Windows & WSL)
+#    Override lewat env VISIONINSPECT_DATA kalau perlu.
 _project_root = Path(__file__).resolve().parent
 _data_dir = str(_project_root / "data")
 if "VISIONINSPECT_DATA" not in os.environ:
     os.environ["VISIONINSPECT_DATA"] = _data_dir
 
-# Add project root to path
+# 3. Package root ke sys.path, lalu jalankan
 sys.path.insert(0, str(_project_root))
 
 from visioninspect.main import main

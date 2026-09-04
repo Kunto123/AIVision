@@ -69,13 +69,8 @@ class PartCheckResult:
 
 
 def part_check_state(pc_cfg: dict) -> str:
-    """Return state of part check: ``"disabled"`` | ``"incomplete"`` | ``"active"``.
-
-    * ``"disabled"`` — part check is turned off (backward compat for old templates).
-    * ``"incomplete"`` — part check is enabled but master photo or gate ROI missing
-      (fail-safe: block QC, don't produce false NG).
-    * ``"active"`` — fully configured, can evaluate part presence.
-    """
+    """State part check: "disabled" (mati) | "incomplete" (aktif tapi master/gate
+    ROI belum ada → blok QC, fail-safe) | "active" (siap dievaluasi)."""
     if not pc_cfg.get("enabled"):
         return "disabled"
     if not (pc_cfg.get("has_master") and pc_cfg.get("gate_roi")):
@@ -114,11 +109,8 @@ def compute_master_stats(
     canny_low: int = 50,
     canny_high: int = 150,
 ) -> dict:
-    """Compute master statistics from a BGR image (already cropped to gate ROI).
-    Returns dict with:
-        mean_bgr (list[float] 3), std_bgr (list[float] 3, floored),
-        edge_density (float), image_size (list[int] h,w)
-    """
+    """Statistik master dari gambar BGR (sudah di-crop ke gate ROI) →
+    dict: mean_bgr, std_bgr (floored), edge_density, image_size."""
     mean_bgr = cv2.mean(master_bgr)[:3]  # (B, G, R) float
     # Manual std per channel (cv2.meanStdDev returns weird format)
     f32 = master_bgr.astype(np.float32)
@@ -137,21 +129,8 @@ def evaluate_part_presence(
     gate_roi: dict,
     part_check_cfg: dict,
 ) -> PartCheckResult:
-    """Evaluate whether a part is present at the gate ROI.
-    Compares live frame against master statistics.
-
-    Metode "edge" menggunakan rasio relatif (ternormalisasi terhadap
-    master_edge_density) agar stabil di berbagai kondisi pencahayaan
-    dan ukuran ROI. Lihat MIN_EDGE_FLOOR sebagai denominator minimum.
-
-    Args:
-        frame_bgr: Full camera frame (BGR).
-        gate_roi: Dict with x, y, width, height.
-        part_check_cfg: Part check config dict.
-
-    Returns:
-        PartCheckResult with ready flag.
-    """
+    """Cek part ada di gate ROI: bandingkan frame live vs statistik master
+    → PartCheckResult(ready). Metode "edge" pakai rasio relatif (MIN_EDGE_FLOOR)."""
     if not part_check_cfg.get("has_master"):
         return PartCheckResult(
             ready=False, method=part_check_cfg.get("method", "both"),
@@ -195,9 +174,8 @@ def evaluate_part_presence(
         color_score = float(np.mean(z))
         color_ready = color_score < color_threshold
 
-    # ── Edge score (hanya bila method=edge/both) ──
-    # Menggunakan rasio relatif: |live - master| / max(master, MIN_EDGE_FLOOR)
-    # supaya tidak bergantung pada magnitudo absolut edge density.
+    # ── Edge score (method=edge/both) — rasio relatif ──
+    # |live - master| / max(master, MIN_EDGE_FLOOR), bebas magnitudo absolut.
     if method in ("edge", "both"):
         me = part_check_cfg.get("master_edge_density")
         if me is None:

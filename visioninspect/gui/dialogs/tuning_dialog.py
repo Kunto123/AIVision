@@ -67,24 +67,13 @@ class TuningROI:
 # ── Tuning Dialog ──────────────────────────────────────────────────────
 
 class TuningDialog(QDialog):
-    """
-    Dialog tuning: lihat gambar hasil inspeksi dengan ROI berwarna,
-    klik ROI untuk koreksi per-ROI (Register as OK / Register as NG).
-
-    Returns:
-        corrections: list of TuningROI.to_dict() for ROIs that were corrected.
-    """
+    """Dialog tuning: gambar hasil inspeksi + ROI berwarna, klik ROI untuk
+    koreksi per-ROI. Return list TuningROI.to_dict() yang dikoreksi."""
 
     def __init__(self, image_path: str, image: np.ndarray,
                  rois_data: List[dict], parent=None):
-        """
-        Args:
-            image_path: Path ke file gambar (untuk referensi).
-            image: Numpy array (BGR) — gambar full-frame.
-            rois_data: List dict per-ROI dari history:
-                [{x, y, width, height, score, judgement, label?}, ...]
-            parent: Parent widget.
-        """
+        """`image` = full-frame BGR, `rois_data` = list dict per-ROI dari history
+        ({x, y, width, height, score, judgement, label?})."""
         super().__init__(parent)
         self._image_path = image_path
         self._image = image
@@ -271,10 +260,8 @@ class TuningDialog(QDialog):
                 f"background: {'#1A2A44' if i != self._selected_idx else '#233A57'}; "
                 f"color: #E2E8F0;"
             )
-            # NOTE: PySide6 QPushButton.clicked punya 2 overload — `clicked()` dan
-            # `clicked(bool checked)`. Lambda HARUS menerima `checked=False` opsional:
-            #   - lambda `checked, idx=i` (2 wajib) → crash "missing 'checked'" saat emit `clicked()`
-            #   - lambda `idx=i` (1 wajib) → tersambung ke overload `clicked(bool)` → idx tertimpa False → SELALU pilih ROI pertama
+            # QPushButton.clicked punya 2 overload → lambda WAJIB `checked=False`
+            # opsional; kalau tidak, idx tertimpa False / crash saat emit.
             btn.clicked.connect(
                 lambda checked=False, idx=i: self._select_roi(idx))
             self._roi_list_layout.addWidget(btn)

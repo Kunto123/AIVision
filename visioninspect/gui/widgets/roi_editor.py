@@ -35,12 +35,8 @@ class ROIData:
         # Threshold khusus ROI ini. None = ikut threshold global template
         # (perilaku lama, dan tetap begitu untuk template yang belum disetel).
         self.threshold = None
-        # Polygon mask (opsional) — kontur part di dalam ROI ini, koordinat
-        # ROI-lokal (0,0 = pojok kiri-atas crop, ukuran asli ROI SEBELUM
-        # resize ke input_size). None = tidak ada mask, ROI dipakai penuh
-        # persis seperti sebelum fitur ini ada. Diterapkan identik di
-        # training (training_worker.py) dan inference (inference.py) —
-        # lihat visioninspect/core/roi_mask.py.
+        # Polygon mask opsional, koordinat ROI-lokal (sebelum resize).
+        # None = ROI dipakai penuh. Lihat core/roi_mask.py.
         self.mask_polygon: Optional[List[Tuple[int, int]]] = None
 
     def to_dict(self) -> dict:
@@ -53,9 +49,8 @@ class ROIData:
             "enabled": self.enabled,
             "label": self.label,
         }
-        # Key `threshold` HANYA ditulis kalau ROI ini benar-benar punya
-        # ambang sendiri — supaya config template lama tidak berubah bentuk
-        # dan "ikut global" tetap terbaca sebagai ketiadaan field.
+        # Key `threshold` HANYA ditulis kalau ROI punya ambang sendiri —
+        # "ikut global" harus tetap terbaca sebagai ketiadaan field.
         if self.threshold is not None:
             d["threshold"] = float(self.threshold)
         # Sama seperti threshold: omit kalau tidak ada, supaya ROI tanpa
@@ -92,11 +87,8 @@ class ROIData:
 
 
 class ROIEditor(QWidget):
-    """
-    Editor multi-ROI. Drag untuk move/resize rectangle.
-    Click untuk select. Delete untuk hapus. Toggle enabled/disabled.
-    Zoom: Ctrl++ / Ctrl+- / Ctrl+0.  Pan: drag di area kosong + scroll wheel.
-    """
+    """Editor multi-ROI: drag = move/resize, klik = select, Delete = hapus.
+    Zoom Ctrl+ +/-/0; pan = drag area kosong + scroll wheel."""
 
     rois_changed = Signal()  # emitted when ROIs are modified
 
@@ -140,25 +132,15 @@ class ROIEditor(QWidget):
         self._pan_start_dy = 0.0
         self._click_start = None     # QPointF — for click-vs-drag detection
 
-        # — Mode gambar polygon mask (opsional, per-ROI) —
-        # Terpisah dari drag/resize/pan di atas: dicek PALING AWAL di setiap
-        # mouse handler supaya tidak tabrakan dengan hit-test rectangle yang
-        # sudah ada. Titik dikumpulkan dalam koordinat IMAGE PENUH
-        # (dari _map_to_image, sama seperti drag/resize), baru dikonversi ke
-        # ROI-lokal (dikurangi roi.x/roi.y) saat polygon ditutup — supaya
-        # tetap valid walau ROI itu sendiri nanti digeser (asalkan bentuknya
-        # tidak berubah; kalau ROI di-resize, mask lama tetap harus digambar
-        # ulang, tapi itu wajar karena bentuk crop-nya sendiri berubah).
+        # — Mode gambar polygon mask (per-ROI) — dicek PALING AWAL di tiap
+        # mouse handler. Titik dikumpulkan di koordinat image, disimpan ROI-lokal.
         self._drawing_mask: bool = False
         self._mask_target_roi: Optional[ROIData] = None
         self._mask_points_img: List[Tuple[int, int]] = []
         self._mask_cursor_pos = None  # QPointF terakhir, buat garis preview
 
-        # Dipakai PolygonMaskDialog: ROI sintetis yang menutupi seluruh
-        # gambar punya handle resize persis di tepi — tanpa lock ini, klik
-        # dekat tepi buat naruh titik polygon bisa malah men-drag/resize
-        # rectangle-nya. Saat locked, body/handle rectangle diabaikan total
-        # (jatuh ke pan atau ke mode gambar polygon).
+        # Untuk PolygonMaskDialog: tanpa lock, klik dekat tepi malah men-drag
+        # rectangle. Saat locked, body/handle rectangle diabaikan total.
         self._rect_locked: bool = False
 
         self.setMinimumSize(320, 240)
@@ -187,9 +169,8 @@ class ROIEditor(QWidget):
         self.update()
 
     def set_rect_locked(self, locked: bool) -> None:
-        """Kunci rectangle ROI dari drag/resize (dipakai PolygonMaskDialog —
-        ROI sintetis satu-satunya sengaja menutupi seluruh gambar, jadi
-        mengedit posisinya tidak bermakna dan berisiko tidak sengaja)."""
+        """Kunci rectangle ROI dari drag/resize — dipakai PolygonMaskDialog,
+        di mana ROI sintetisnya menutupi seluruh gambar."""
         self._rect_locked = bool(locked)
 
     def set_max_rois(self, n: Optional[int]) -> None:
@@ -245,10 +226,8 @@ class ROIEditor(QWidget):
     # ---- Mode gambar polygon mask ----
 
     def start_drawing_mask(self, roi: ROIData):
-        """Mulai mode gambar polygon untuk `roi`. Klik menambah titik,
-        double-click menutup polygon (min. 3 titik), Escape membatalkan.
-        Rectangle ROI yang lain tidak bisa di-drag/resize selama mode ini
-        aktif — supaya tidak tertukar dengan aksi gambar polygon."""
+        """Mode gambar polygon untuk `roi`: klik = tambah titik, double-click =
+        tutup (min 3 titik), Escape = batal. ROI lain terkunci selama mode ini."""
         self._drawing_mask = True
         self._mask_target_roi = roi
         self._mask_points_img = []
@@ -452,9 +431,8 @@ class ROIEditor(QWidget):
                     painter.drawLine(int(rect.x()), int(gy),
                                      int(rect.right()), int(gy))
 
-            # Overlay polygon mask (kalau ROI ini punya) — outline solid +
-            # fill tipis supaya kelihatan area yang BUKAN mask (yang nanti
-            # dinolkan) tanpa menutupi seluruh crop.
+            # Overlay polygon mask: outline solid + fill tipis supaya area
+            # yang nanti dinolkan kelihatan tanpa menutupi crop.
             widget_pts = self._mask_polygon_to_widget(roi)
             if widget_pts:
                 poly = QPolygonF(widget_pts)
@@ -543,9 +521,8 @@ class ROIEditor(QWidget):
         pos = event.position()
 
         if self._drawing_mask:
-            # setMouseTracking(True) sudah aktif (lihat __init__) — event
-            # ini terus mengalir walau tombol tidak ditekan, jadi garis
-            # "rubber band" ke posisi kursor bisa di-preview live.
+            # setMouseTracking(True) aktif → event tetap mengalir tanpa klik,
+            # jadi garis "rubber band" ke kursor bisa di-preview live.
             self._mask_cursor_pos = pos
             self.update()
             return

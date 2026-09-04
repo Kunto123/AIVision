@@ -17,11 +17,8 @@ logger = get_logger("training")
 
 
 class SimpleThresholdTrainer:
-    """
-    Fallback trainer: compute mean + std of OK images.
-    At inference, pixel-wise z-score → anomaly score.
-    Tidak perlu PyTorch, hanya numpy + OpenCV.
-    """
+    """Fallback trainer tanpa PyTorch (numpy + OpenCV): hitung mean + std gambar
+    OK; saat inferensi z-score per piksel → anomaly score."""
 
     def __init__(self, input_size: int = 256):
         self._input_size = input_size

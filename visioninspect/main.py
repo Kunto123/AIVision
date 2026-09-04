@@ -9,19 +9,15 @@ import sys
 import traceback
 from pathlib import Path
 
-# Ensure package root is in path
+# 1. Pastikan package root ada di sys.path
 _pkg_root = Path(__file__).resolve().parent
 if str(_pkg_root) not in sys.path:
     sys.path.insert(0, str(_pkg_root))
 
 
 def _is_edge_mode() -> bool:
-    """Baca flag `edge_mode` dari config SEBELUM import apa pun (Tugas 4).
-
-    PC edge (i3-1315U, inference-only) tidak pernah perlu memuat torch
-    (±250 MB RSS / ±5 s startup). Torch hanya boleh dimuat kalau memang
-    dibutuhkan training, dan hanya di PC dev.
-    """
+    """Baca flag `edge_mode` dari config SEBELUM import apa pun.
+    True → torch tidak dimuat (hemat ±250 MB / ±5 dtk startup di PC edge)."""
     try:
         data_dir = os.environ.get("VISIONINSPECT_DATA", "")
         candidates = []
@@ -39,17 +35,16 @@ def _is_edge_mode() -> bool:
     return False
 
 
+# 2. Import torch lebih awal (sebelum PySide6/cv2/openvino) — urutan ini
+#    menghindari TLS-slot exhaustion di Windows (WinError 1114).
 _EDGE_MODE = _is_edge_mode()
 
 if not _EDGE_MODE:
-    # Early import torch (sebelum PySide6/cv2/openvino) untuk menghindari
-    # konflik TLS-slot exhaustion di Windows (WinError 1114). Lihat debug:
-    # https://github.com/pytorch/pytorch/issues/110488
     try:
         import torch  # noqa: F401
     except Exception as _e:
-        # Kegagalan 1114 TIDAK boleh senyap — efeknya training diam-diam
-        # jatuh ke WSL/simple mode tanpa user tahu.
+        # Kegagalan JANGAN senyap — tanpa warning, training diam-diam jatuh
+        # ke WSL/simple mode dan user tidak tahu.
         print(f"WARN: Gagal import torch di startup ({_e}) — training akan "
               "menggunakan mode fallback", file=sys.stderr)
 else:
@@ -91,13 +86,13 @@ def parse_args() -> argparse.Namespace:
         "--config",
         type=str,
         default="",
-        help="Path to config file (default: ~/.visioninspect/config.json)",
+        help="Path file config (default: <proyek>/data/config.json)",
     )
     parser.add_argument(
         "--data-dir",
         type=str,
         default="",
-        help="Data directory override (default: ~/.visioninspect)",
+        help="Override folder data (default: <proyek>/data)",
     )
     parser.add_argument(
         "--log-level",
@@ -115,7 +110,7 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
 
-    # --- Configuration ---
+    # 1. Config
     try:
         config = Config()
         if args.config:
@@ -133,7 +128,7 @@ def main():
         data_dir = Path(__file__).resolve().parent / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Logging ---
+    # 2. Logging (rotating file handler per subsistem, di <data>/logs/)
     log_level = args.log_level or config.get("logging.level", "INFO")
     log_dir = data_dir / "logs"
     setup_logging(
@@ -146,22 +141,18 @@ def main():
 
     logger.info("Python interpreter: %s", sys.executable)
 
-    # --- Translator ---
+    # 3. Translator (bahasa UI: "id" | "en")
     translator = Translator(language=config.get("language", "id"))
 
-    # --- Qt Application ---
+    # 4. Qt application
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName("VisionInspect")
+    app.setStyle("Fusion")            # base style
+    _setup_qt_message_handler()       # saring QPainter warning tak berbahaya
 
-    # High-DPI support
-    app.setStyle("Fusion")  # Use Fusion style as base
-
-    # Saring QPainter warnings yang tidak berbahaya
-    _setup_qt_message_handler()
-
-    # --- Main Window ---
+    # 5. Main window
     try:
         window = MainWindow(config, translator)
         window.show()
@@ -171,7 +162,7 @@ def main():
         print(f"FATAL: {e}", file=sys.stderr)
         return 1
 
-    # --- Run event loop ---
+    # 6. Event loop
     exit_code = app.exec()
 
     logger.info("Application exited with code %d", exit_code)

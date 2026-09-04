@@ -1,23 +1,3 @@
-"""
-VisionInspect - Program Manager
-Manajemen program inspeksi: create, switch, config, model versioning.
-Program = folder terstruktur dengan config, model, images.
-
-Struktur folder per program:
-    programs/<name>/
-        config.json                    ← program-level config (camera, PLC)
-        metadata.json                  ← program metadata
-        templates/
-            <template_id>/
-                config.json            ← template config (roi, threshold, algorithm)
-                images/
-                    ok/   (*.png, *.jpg)
-                    ng/   (*.png, *.jpg)
-                model/
-                    openvino/model.xml
-                    openvino_int8/model.xml (optional)
-"""
-
 import gc
 import json
 import os
@@ -49,9 +29,7 @@ class ProgramManager:
         self._base_dir = base_dir
         self._base_dir.mkdir(parents=True, exist_ok=True)
 
-    # =====================================================================
-    # PROGRAM LEVEL
-    # =====================================================================
+    # ══ PROGRAM LEVEL ═════════════════════════════════════════════════
 
     def list_programs(self) -> List[Dict[str, Any]]:
         """List all programs with metadata."""
@@ -122,19 +100,11 @@ class ProgramManager:
         shutil.rmtree(prog_dir)
         logger.info("Program deleted: %s", name)
 
-    # ------------------------------------------------------------------
-    # Helpers — rename dengan retry (Windows file-lock: antivirus/Explorer
-    # bisa menahan handle folder sesaat → WinError 5 Access is denied)
-    # ------------------------------------------------------------------
     @staticmethod
     def _rename_dir_with_retry(old_dir: Path, new_dir: Path,
                                attempts: int = 4) -> None:
-        """Rename folder dengan retry singkat + backoff.
-
-        Windows menolak rename folder yang berisi file di-lock proses lain
-        (mis. model.bin yang di-mmap OpenVINO, atau sedang dipindai antivirus).
-        Retry singkat biasanya cukup; error terakhir tetap di-raise.
-        """
+        """Rename folder dengan retry + backoff. Windows menolak rename folder
+        berisi file di-lock (model.bin di-mmap OpenVINO, scan antivirus)."""
         last_err: Optional[Exception] = None
         for i in range(attempts):
             try:
@@ -161,9 +131,7 @@ class ProgramManager:
         self._atomic_write(self._get_config_path(new_name), config)
         logger.info("Program renamed: %s → %s", old_name, new_name)
 
-    # =====================================================================
-    # TEMPLATE LEVEL
-    # =====================================================================
+    # ══ TEMPLATE LEVEL ════════════════════════════════════════════════
 
     def list_templates(self, program: str) -> List[Dict[str, Any]]:
         """List all templates in a program."""
@@ -185,11 +153,7 @@ class ProgramManager:
 
     def create_template(self, program: str, template_name: str,
                         config: Optional[dict] = None) -> dict:
-        """
-        Create a new template in a program.
-        Folder name = display name (disanitasi), bukan template_N lagi.
-        Returns template info.
-        """
+        """Buat template baru. Folder = nama display (disanitasi). Return info template."""
         safe_name = self._sanitize_name(template_name)
         tmpl_dir_base = self._get_template_dir(program)
 
@@ -244,10 +208,7 @@ class ProgramManager:
 
     def rename_template(self, program: str, old_id: str,
                         new_name: str) -> dict:
-        """
-        Rename template: rename folder + update config.
-        Returns updated template info.
-        """
+        """Rename template (folder + config). Return info template terbaru."""
         safe_name = self._sanitize_name(new_name)
         tmpl_dir_base = self._get_template_dir(program)
         old_dir = tmpl_dir_base / old_id
@@ -286,14 +247,8 @@ class ProgramManager:
         logger.info("Template '%s' deleted from program '%s'", template_id, program)
 
     def get_template_config(self, program: str, template_id: str) -> dict:
-        """Get template configuration.
-
-        Perbaikan-diri: `id` di config WAJIB sama dengan nama folder. Import
-        versi lama menimpa `id` dengan nilai dari template sumber (mis. folder
-        `t` berisi id `Yolov11L`), sehingga identitas template tidak bisa
-        dipercaya dan nama yang salah ikut terekam ke history. Di sini
-        diluruskan sekali, saat config pertama kali dibaca.
-        """
+        """Baca config template. Perbaikan-diri: `id` di config diluruskan agar
+        selalu = nama folder (import lama bisa menimpanya dengan id sumber)."""
         cfg_path = self._get_template_dir(program) / template_id / "config.json"
         cfg = self._load_json(cfg_path, {})
         if cfg and str(cfg.get("id", "")) != template_id:
@@ -331,26 +286,14 @@ class ProgramManager:
         meta = self._load_json(self._get_meta_path(program), {})
         return meta.get("active_template", "")
 
-    # =====================================================================
-    # TEMPLATE IMAGE MANAGEMENT
-    # =====================================================================
+    # ══ TEMPLATE IMAGE MANAGEMENT ═════════════════════════════════════
 
     def save_template_image(self, program: str, template_id: str,
                              image: Any, label: str,
                              update_count: bool = True,
                              roi_uid: Optional[str] = None) -> Path:
-        """
-        Save an image to the template's image directory.
-        label = "ok" or "ng"
-
-        `roi_uid` (opsional): disisipkan ke nama file (`roi-<uid>`) untuk
-        crop per-ROI (`label` berakhiran `_per_roi`) — tanpa ini, file
-        _per_roi tidak menyimpan info ROI mana asalnya sama sekali, dan
-        template dengan banyak ROI (mis. 10 ROI) tidak bisa membedakan
-        crop mana milik ROI mana setelah tersimpan. Backward-compatible:
-        file lama tanpa segmen ini tetap kebaca normal, cuma dianggap
-        "ROI tidak diketahui" oleh kode yang membacanya balik.
-        """
+        """Simpan gambar ke images template (label "ok"|"ng"). `roi_uid` opsional
+        disisipkan ke nama file supaya crop per-ROI bisa ditelusuri asalnya."""
         base = (self._get_template_dir(program) / template_id
                 / "images" / label)
         base.mkdir(parents=True, exist_ok=True)
@@ -395,25 +338,19 @@ class ProgramManager:
         files = sorted(base.glob("*.png")) + sorted(base.glob("*.jpg"))
         return files
 
-    # =====================================================================
-    # MODEL VERSIONING (per template)
-    # =====================================================================
+    # ══ MODEL VERSIONING (per template) ═══════════════════════════════
 
     def save_template_model(self, program: str, template_id: str,
                                  model_artifacts: dict) -> int:
-            """
-            Save trained model artifacts to a template.
-            `model_artifacts` harus berisi path ke folder export (openvino/ atau openvino_int8/).
-            Returns version number.
-            """
+            """Simpan artifacts model hasil training ke template → return nomor versi.
+            `model_artifacts` berisi path folder export (openvino/ / openvino_int8/)."""
             cfg = self.get_template_config(program, template_id)
             version = cfg.get("model_version", 0) + 1
 
             model_dir = (self._get_template_dir(program) / template_id / "model")
 
-            # Clear old model. On Windows the previous model.bin may still be
-            # mmap'd by OpenVINO for a moment (WinError 32); retry with a GC pass
-            # so any lingering handle is released before we delete.
+            # Hapus model lama — retry + GC: model.bin lama bisa masih di-mmap
+            # OpenVINO sesaat (WinError 32).
             if model_dir.exists():
 
                 def _clear() -> None:
@@ -461,18 +398,14 @@ class ProgramManager:
             return version
 
     def get_template_model_path(self, program: str, template_id: str) -> Optional[Path]:
-        """
-        Get path to the trained model file (OpenVINO XML) for a template.
-        Returns None if no model.
-        """
+        """Path model terlatih template (OpenVINO .xml, atau mean.npy untuk
+        simple mode). None kalau belum ada."""
         model_dir = self._get_template_dir(program) / template_id / "model"
 
-        # Check int8 first, then openvino
-        for sub in ["openvino_int8", "openvino"]:
+        for sub in ["openvino_int8", "openvino"]:   # int8 diutamakan
             xml = model_dir / sub / "model.xml"
             if xml.exists():
                 return xml
-        # Check simple model format (no-PyTorch fallback)
         simple = model_dir / "simple_model" / "mean.npy"
         if simple.exists():
             return simple
@@ -483,9 +416,7 @@ class ProgramManager:
         cfg = self.get_template_config(program, template_id)
         return cfg.get("trained", False)
 
-    # =====================================================================
-    # PART CHECK
-    # =====================================================================
+    # ══ PART CHECK ════════════════════════════════════════════════════
 
     def get_part_check_config(self, program: str, template_id: str) -> dict:
         """Get part check config for a template, with safe defaults for old templates."""
@@ -542,22 +473,12 @@ class ProgramManager:
         master = pc_dir / "master.png"
         return master if master.exists() else None
 
-    # =====================================================================
-    # MODEL EXPORT / IMPORT (untuk deploy Dev → Edge)
-    # =====================================================================
+    # ══ MODEL EXPORT / IMPORT (untuk deploy Dev → Edge) ═══════════════
 
     def export_model_to_zip(self, program: str, template_id: str,
                             output_path: Path) -> str:
-        """Export trained model + config + metadata ke file .zip portabel.
-
-        Args:
-            program: Nama program.
-            template_id: ID template.
-            output_path: Path file .zip tujuan.
-
-        Returns:
-            str: Path file zip yang dihasilkan.
-        """
+        """Export model + config + metadata ke .zip portabel (deploy Dev → Edge).
+        Return path zip."""
         import zipfile
 
         model_dir = self._get_template_dir(program) / template_id / "model"
@@ -606,21 +527,8 @@ class ProgramManager:
     def import_model_from_zip(self, zip_path: Path, program: str,
                                   template_id: Optional[str] = None,
                                   as_new_template: bool = True) -> dict:
-            """Import model dari file .zip.
-
-            Args:
-                zip_path: Path file .zip hasil export.
-                program: Nama program tujuan.
-                template_id: Template tujuan bila menimpa (as_new_template=False).
-                as_new_template: True (default) → BUAT TEMPLATE BARU, tidak
-                    menimpa apa pun. Karena tujuannya folder kosong, seluruh
-                    isi config dari PC training boleh dipulihkan apa adanya
-                    (ROI, part-check, threshold, dst) tanpa merusak template
-                    yang sudah dikalibrasi di mesin ini.
-
-            Returns:
-                dict: Metadata hasil import.
-            """
+            """Import model dari .zip hasil export → return metadata.
+            as_new_template=True: buat template baru; False: timpa `template_id`."""
             import zipfile
 
             zip_path = Path(zip_path)
@@ -656,9 +564,8 @@ class ProgramManager:
             restored_config = {}
 
             with zipfile.ZipFile(str(zip_path), "r") as zf:
-                # Normalisasi nama entry zip: export di Windows menyimpan arcname
-                # dengan backslash (model\\openvino\\model.bin), di WSL dengan slash.
-                # Map nama-asli -> nama-ternormalisasi biar zip lintas-OS terbaca.
+                # Normalisasi arcname zip (Windows pakai backslash, WSL slash)
+                # supaya zip lintas-OS tetap terbaca.
                 norm_map = {n.replace("\\", "/"): n for n in zf.namelist()}
 
                 # Baca metadata
@@ -690,9 +597,8 @@ class ProgramManager:
                             gc.collect()
                             time.sleep(0.5)
 
-                # Extract to temp dir first, then move — avoids partial writes / locking.
-                # Temp dibuat DI DRIVE YANG SAMA dengan target (tmpl_dir): os.rename
-                # tidak bisa lintas drive (WinError 17: C: temp → D: data).
+                # Extract ke temp dulu (hindari partial write). Temp WAJIB di
+                # drive yang sama — os.rename tidak bisa lintas drive (WinError 17).
                 with tempfile.TemporaryDirectory(
                         prefix="vi_import_", dir=str(tmpl_dir)) as tmpdir:
                     tmp_model_dir = Path(tmpdir) / "model"
@@ -725,9 +631,8 @@ class ProgramManager:
                                 # Remove existing first (if any)
                                 if dest.exists():
                                     dest.unlink()
-                                # Atomic replace kalau satu volume; shutil.move otomatis
-                                # fallback ke copy+unlink kalau beda volume/fs (EXDEV,
-                                # WinError 17) — mis. WSL /tmp (ext4) → /mnt/d (drvfs).
+                                # Atomic replace kalau satu volume; shutil.move
+                                # fallback copy+unlink kalau beda volume (EXDEV).
                                 shutil.move(str(src), str(dest))
                                 break
                             except (PermissionError, OSError) as e:
@@ -747,15 +652,11 @@ class ProgramManager:
                     existing_cfg = self.get_template_config(program, template_id)
                     restored_config["images"] = existing_cfg.get("images", {})
                     restored_config["image_count"] = existing_cfg.get("image_count", 0)
-                    # `id` TIDAK BOLEH diambil dari zip. Sebelum ini, config
-                    # sumber menimpa id sehingga folder `t` berisi
-                    # id=`Yolov11L` — dan nama itu ikut terekam ke history,
-                    # membuat entry tidak bisa ditelusuri ke templatenya.
-                    # id SELALU = nama folder.
+                    # `id` SELALU = nama folder, JANGAN dari zip — kalau tidak,
+                    # id ikut terekam ke history dan entry tak bisa ditelusuri.
                     restored_config["id"] = template_id
-                    # Nama tampilan boleh ikut dari sumber, TAPI jangan sampai
-                    # dua template punya nama sama (folder id yang membedakan,
-                    # dan itu tidak terlihat operator).
+                    # Nama tampilan boleh dari sumber, tapi cegah 2 template
+                    # bernama sama (yang membedakan cuma folder id, tak terlihat operator).
                     src_display = str(restored_config.get("name", "") or "")
                     if src_display:
                         clash = any(
@@ -785,9 +686,7 @@ class ProgramManager:
                 "files_restored": len(model_files),
             }
 
-    # =====================================================================
-    # AUGMENTATION
-    # =====================================================================
+    # ══ AUGMENTATION ══════════════════════════════════════════════════
 
     def get_augmentation_config(self, program: str, template_id: str) -> dict:
         """Get augmentation config for a template, with safe defaults for old templates."""
@@ -808,9 +707,7 @@ class ProgramManager:
         self.update_template_config(program, template_id, tmpl_cfg)
         return aug
 
-    # =====================================================================
-    # INTERNAL
-    # =====================================================================
+    # ══ INTERNAL ══════════════════════════════════════════════════════
 
     def _get_program_dir(self, name: str) -> Path:
         return self._base_dir / name

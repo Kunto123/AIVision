@@ -52,10 +52,8 @@ class VideoReplayWorker(QObject):
         self._w = 0
         self._h = 0
         self._last_frame_t = None
-        # Pacing: batas atas laju replay (≤ video_fps / 30 fps) supaya tampilan
-        # tidak ngebut tak terkendali — SINI benar-benar tereksekusi sejak
-        # inference pindah ke thread sendiri (Tugas 3): worker tinggal menunggu
-        # ack, jadi sleep ini menjaga replay tetap di tempo yang masuk akal.
+        # Pacing: batas atas laju replay (≤ video_fps / 30 fps) supaya
+        # tampilan tidak ngebut tak terkendali.
         self._target_fps = 30.0
         # Tugas 6a: "Periksa tiap N frame" — default 1 = semua frame diperiksa.
         # N>1: frame yang di-skip hanya di-grab (tanpa decode penuh).
@@ -115,10 +113,8 @@ class VideoReplayWorker(QObject):
 
     @Slot(int)
     def set_frame_step(self, n: int):
-        """Tugas 6a: periksa tiap N frame (default 1 = semua frame).
-
-        N>1 menghemat decode penuh — frame yang dilewati hanya di-grab.
-        Aman dipanggil dari thread mana pun (self-dispatch)."""
+        """Periksa tiap N frame (1 = semua). N>1 hemat decode — frame yang
+        dilewati hanya di-grab. Aman dari thread mana pun (self-dispatch)."""
         if self.thread() is not QThread.currentThread():
             QMetaObject.invokeMethod(
                 self, "set_frame_step", Qt.QueuedConnection, Q_ARG(int, n))
@@ -160,9 +156,8 @@ class VideoReplayWorker(QObject):
         Membaca satu frame, emit signal, lalu berhenti sampai dipanggil lagi."""
         if not self._running or self._stop_flag or self._cap is None:
             return
-        # Pacing: jaga laju ≤ target fps (default 30) — replay tampil di
-        # tempo yang masuk akal (bukan ngebut tak terkendali sejak infer
-        # async di Tugas 3). Sleep di thread worker, bukan GUI.
+        # Pacing: jaga laju ≤ target fps (default 30). Sleep di thread
+        # worker, bukan GUI.
         if self._target_fps > 0:
             target_dt = 1.0 / self._target_fps
             now = time.monotonic()

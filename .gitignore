@@ -9,10 +9,6 @@ build/
 *.whl
 *.spec
 
-# Kecuali wheel yang SENGAJA di-vendor. fxplc tidak ada di PyPI (hanya di
-# GitHub), jadi instalasi offline PC edge bergantung pada file ini ikut
-# ter-commit. Tanpa pengecualian ini, *.whl di atas membuangnya diam-diam
-# dan PLC tidak akan berfungsi di mesin hasil clone.
 !vendor/*.whl
 
 # --- Virtual Environment ---
@@ -74,12 +70,6 @@ temp/
 *.tmp
 .claude/
 
-# --- Anomalib/training auto-downloaded & generated artifacts ---
-# datasets/: EfficientAd's imagenette auxiliary dataset (auto-downloaded on
-#            first EfficientAd training run)
-# pre_trained/: EfficientAd pretrained teacher weights (auto-downloaded)
-# results/: Anomalib/Lightning default output dir (incl. its own symlink
-#           capability probe on Windows)
 datasets/
 pre_trained/
 results/

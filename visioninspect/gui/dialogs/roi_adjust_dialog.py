@@ -24,14 +24,8 @@ from visioninspect.gui.widgets.roi_editor import ROIEditor, ROIData
 
 
 class ROIAdjustDialog(QDialog):
-    """Modal dialog untuk menyesuaikan ROI pada gambar.
-
-    Args:
-        image_path: Path ke file gambar.
-        current_rois: List dict ROI saat ini (dari template config).
-            Setiap dict: {uid, x, y, width, height, enabled, label}.
-        parent: Parent widget.
-    """
+    """Dialog modal untuk menyesuaikan ROI pada gambar. `current_rois` =
+    list dict {uid, x, y, width, height, enabled, label} dari config template."""
 
     def __init__(
         self,

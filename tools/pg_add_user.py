@@ -143,11 +143,8 @@ def _ensure_table(conn) -> None:
 def add_user(conn, username: str, password: str, role: str,
              is_active: bool = True,
              must_change_password: bool = False, update: bool = False) -> None:
-    """Insert atau update (--update) satu user. Exit non-zero bila sudah ada.
-
-    Catatan: qc_user_accounts TIDAK punya kolom display_name (PostgresDB
-    selalu menampilkan display_name=username), jadi tidak di-set di sini.
-    """
+    """Insert/update (--update) satu user; exit non-zero bila sudah ada.
+    qc_user_accounts tidak punya kolom display_name — jadi tidak di-set."""
     now_sql = "now()"
     pw_hash = _hash_password(password)
 

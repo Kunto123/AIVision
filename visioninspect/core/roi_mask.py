@@ -23,11 +23,7 @@ def apply_polygon_mask(
     fill_value: int = 0,
 ) -> np.ndarray:
     """Nolkan piksel di luar `polygon` (koordinat ROI-lokal, sebelum resize).
-
-    `polygon` None/kosong → no-op, kembalikan `crop_bgr` apa adanya. Ini yang
-    membuat fitur ini backward-compatible: ROI tanpa mask_polygon berperilaku
-    identik dengan sebelum fitur ini ada.
-    """
+    `polygon` None/kosong → no-op (ROI tanpa mask berperilaku seperti dulu)."""
     if not polygon or len(polygon) < 3:
         return crop_bgr
     mask = np.zeros(crop_bgr.shape[:2], dtype=np.uint8)
@@ -43,12 +39,8 @@ def resolve_polygon_for_image(
     overrides: Optional[dict],
     image_key: str,
 ) -> Optional[List[Tuple[int, int]]]:
-    """Polygon yang berlaku untuk satu gambar tertentu: override kalau ada
-    (mis. "ok/frame_0001.png"), fallback ke default milik ROI.
-
-    `overrides` adalah `image_mask_overrides.get(roi_uid)` — dict
-    {image_key: polygon} — bukan seluruh struktur `image_mask_overrides`.
-    """
+    """Polygon untuk satu gambar: override kalau ada, fallback ke default ROI.
+    `overrides` = `image_mask_overrides[roi_uid]` ({image_key: polygon})."""
     if overrides:
         override = overrides.get(image_key)
         if override:

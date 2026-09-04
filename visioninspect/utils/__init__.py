@@ -12,11 +12,8 @@ from typing import Any
 
 
 def normalize_wsl_path(path_str: str) -> Path:
-    """Convert Windows paths (C:\\foo) to WSL paths (/mnt/c/foo).
-
-    Di WSL, Path('C:\\foo') dianggap relative path karena tidak dimulai
-    dengan '/'. Fungsi ini mendeteksi path bergaya Windows dan mengkonversinya.
-    """
+    """Konversi path Windows (C:\\foo) → WSL (/mnt/c/foo). Perlu karena di WSL
+    Path('C:\\foo') dianggap relative (tidak diawali '/')."""
     p = Path(path_str)
 
     # Cek: apakah ini path Windows? (C:\, D:\, d:\)

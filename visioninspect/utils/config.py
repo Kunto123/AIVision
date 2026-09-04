@@ -59,103 +59,53 @@ class Config:
         # Rollout / deploy bertahap
         "rollout": {
             "shadow_mode": False,
-            # True: hasil hanya ditampilkan & dicatat, coil result_ok TIDAK
-            # ditulis — lini tidak terpengaruh sebelum akurasi terbukti.
-            # PERHATIAN pada desain sekarang: tanpa sinyal OK, PLC akan
-            # memvonis SEMUA part sebagai NG. Shadow mode kini berarti
-            # "tolak semua", bukan "tidak berpengaruh".
+            # True: hasil hanya ditampilkan, coil result_ok TIDAK ditulis.
+            # AWAS: tanpa sinyal OK, PLC memvonis SEMUA part NG (= tolak semua).
         },
 
-        # ROI
-        "roi": {
-            "enabled": True,
-            "x": 0,
-            "y": 0,
-            "width": 256,
-            "height": 256,
-            "multi_roi_enabled": False,
-            "roi_list": [],  # list of {x, y, width, height, model_id}
-        },
-
-        # Model / Training
-        "model": {
-            "algorithm": "patchcore",  # patchcore | efficientad
-            "backbone": "resnet18",    # resnet18 | wide_resnet50_2
-            "coreset_sampling_ratio": 0.1,
-            "input_size": 256,
-            "threshold_mode": "adaptive",  # adaptive | manual
-            "manual_threshold": 0.5,
-            "threshold_margin_sigma": 3.0,
-        },
+        # ROI & model config = PER-TEMPLATE (diatur di tab TEACH), bukan di sini.
+        # Template baru di-seed oleh MainWindow._new_template_defaults().
 
         # Inference
         "inference": {
-            # continuous  — infer terus tanpa trigger. Dipakai untuk
-            #               self-trigger lewat part-check: tahap 1 lolos →
-            #               coil part_ready dikirim, PLC yang mulai timer.
-            # plc_trigger — infer hanya saat ada trigger. Sumbernya setara:
-            #               coil PLC, tombol "Trigger Now", POST /trigger.
-            # Mode lama "manual" DIHAPUS — setelah tombol UI dibuat setara
-            # trigger eksternal, ia identik dengan plc_trigger dalam segala
-            # hal. Config lama dinormalisasi di _migrate().
+            # continuous  — infer terus, self-trigger lewat gate part-check.
+            # plc_trigger — infer saat ada trigger (coil PLC / tombol / POST).
             "mode": "continuous",  # continuous | plc_trigger
             "openvino_device": "CPU",   # CPU | GPU | AUTO (Tugas 5)
-            # CPU hybrid (P-core + E-core, mis. i3-1315U): batasi inference ke
-            # P-core → latency lebih stabil + E-core bebas untuk GUI/decode.
-            # Tidak berpengaruh di CPU non-hybrid. Diabaikan bila device=GPU.
+            # CPU hybrid (P+E core): batasi ke P-core → latency stabil.
+            # Tidak berpengaruh di CPU non-hybrid / device=GPU.
             "cpu_pcore_only": False,
             "enable_int8": True,
-            # Mode plc_trigger: batas waktu satu siklus trigger. Lewat ini →
-            # peringatan di layar, freeze dilepas, dan TIDAK ada pulse ke PLC
-            # (diam = gagal). Sengaja LEBIH PENDEK dari watchdog ladder supaya
-            # operator melihat sebabnya sebelum lini berhenti.
+            # Batas waktu 1 siklus trigger; lewat ini = peringatan + TIDAK ada
+            # pulse. Setel LEBIH PENDEK dari watchdog ladder.
             "trigger_timeout_ms": 2000,
-            # Mode plc_trigger: tetap infer di antara trigger (skor live
-            # terlihat) — hasil resmi tetap hanya dari frame trigger.
-            # Default MATI: di CPU 2 core ini menambah antrean dan
-            # memperlambat hasil resmi hampir 2x.
+            # Tetap infer di antara trigger (skor live terlihat); hasil resmi
+            # tetap dari frame trigger. Default MATI — di CPU 2 core ~2x lambat.
             "infer_when_idle": False,
-            # Jarak minimum antar hitungan part — supaya satu part tidak
-            # terhitung berkali-kali selagi masih di depan kamera. Hanya
-            # dipakai bila tidak ada trigger PLC / gate part-check (keduanya
-            # lebih akurat). 0 = hitung tiap inspeksi (perilaku lama).
+            # Jarak minimum antar hitungan part (cegah 1 part terhitung berkali).
+            # Hanya dipakai kalau tidak ada trigger PLC / gate. 0 = tiap inspeksi.
             "count_cooldown_ms": 1500,
-            # Verdict OK (gate part-check DAN judgement QC) baru keluar setelah
-            # N hasil infer OK berturut-turut — meredam OK "kedip" satu frame.
-            # NG apa pun mereset hitungan (fail-safe). 1 = tanpa konfirmasi
-            # (perilaku lama). Hanya mode continuous; plc_trigger selalu 1.
+            # Verdict OK (gate & QC) baru keluar setelah N infer OK berturut;
+            # NG mereset. 1 = tanpa konfirmasi. Continuous saja (trigger = 1).
             "confirm_ok_frames": 1,
             "cycle_delay_ms": 1000,  # jeda antar siklus inspeksi (ms), 0=langsung
         },
 
         # PLC
         "plc": {
-            # Transport: FX Computer Link (protokol port pemrograman
-            # Mitsubishi) — jalur yang sama dengan GX Works2. MODBUS dihapus:
-            # FX3U menuntut adaptor -MB khusus, dan pada unit tanpa adaptor
-            # itu D8400/D8401 tetap nol berapa kali pun di-power-cycle.
-            #
-            # Format serial TIDAK ada di sini: protokolnya mengunci 7E1.
-            # Hanya port dan baudrate yang bisa diatur.
+            # Transport FX Computer Link (jalur GX Works2); MODBUS dihapus.
+            # Format serial dikunci 7E1 — hanya port & baudrate bisa diatur.
             "enabled": False,
             "port": "COM1",
             "baudrate": 9600,
             "timeout": 1.0,
-            # Perilaku input `switch_template`:
-            #   "cycle"    (default) — tiap sinyal MAJU satu template, dan
-            #              kembali ke template pertama setelah yang terakhir.
-            #              Holding register tidak dipakai; PLC cukup punya
-            #              satu tombol "next".
-            #   "register" — pindah ke nomor template yang ada di
-            #              program_register (1 = template pertama). Dipakai
-            #              kalau PLC memang tahu jenis part yang datang.
+            # Input `switch_template`: "cycle" = tiap sinyal maju 1 template
+            # (memutar); "register" = lompat ke nomor di program_register.
             "template_switch_mode": "cycle",
             "pulse_ms": 300,          # durasi coil hasil nyala (OK/NG), ms
             "scan_range": 127,        # range probe scan coil (0..N)
-            # IO mapping — GANTI DI SINI (atau lewat UI Settings → PLC)
-            # outputs: coil yang SISTEM tulis → PLC baca
-            # inputs : coil yang PLC tulis → sistem baca
-            # Sistem HANYA mengirim OK; NG diputuskan PLC dari ketiadaan OK.
+            # IO mapping — outputs = coil yang sistem tulis, inputs = yang PLC tulis.
+            # Ganti di sini atau lewat tab I/O Settings.
             "io_map": {
                 "outputs": {
                     "result_ok": 1,
@@ -182,14 +132,8 @@ class Config:
             # Reconnect
             "reconnect_interval": 5.0,
             "max_reconnect_attempts": 0,  # 0 = unlimited
-            # Opt-in: pulse coil `session_reset` (M9) saat operator masuk RUN,
-            # supaya M100/M110/M114/Y000/Y001/C0/C1/C2 di PLC bersih dari state
-            # basi sesi sebelumnya. DEFAULT MATI — butuh rung baru di ladder
-            # dulu (M9 · /M100 → RST ...), dan tanpa rung itu pulse-nya tidak
-            # berpengaruh apa pun (aman untuk dinyalakan lebih awal, cuma
-            # tidak berguna sampai ladder menyusul). Ladder yang menjaga lewat
-            # kontak /M100 — TIDAK dieksekusi kalau siklus sedang berjalan,
-            # supaya vonis part yang sedang diperiksa tidak tersapu diam-diam.
+            # Opt-in: pulse coil session_reset (M9) saat masuk RUN → ladder
+            # bersihkan state basi. DEFAULT MATI (butuh rung M9·/M100 dulu).
             "reset_on_run_entry": False,
         },
 
@@ -222,12 +166,8 @@ class Config:
             "check_interval_sec": 2.0,
         },
 
-        # Global settings
-        # CATATAN: `ng_debounce_ms` (timer interval NG) SUDAH TIDAK DIPAKAI.
-        # Ia menambah counter NG tiap tick selama anomali bertahan — yang
-        # diukur DURASI kondisi NG, bukan jumlah part NG. Penggantinya
-        # `inference.count_cooldown_ms`. Key ini dibiarkan agar config lama
-        # tetap terbaca tanpa error, tapi tidak berpengaruh apa pun.
+        # `ng_debounce_ms` TIDAK DIPAKAI (mengukur durasi NG, bukan jumlah part).
+        # Digantikan inference.count_cooldown_ms; key disimpan agar config lama kebaca.
         "ng_debounce_ms": 500,   # [TIDAK DIPAKAI]
 
         # Active program
@@ -320,20 +260,15 @@ class Config:
         self._data = self._deep_merge(self._deep_copy(self.DEFAULTS), self._data)
         self._migrate()
 
-    #: Nilai config lama → penggantinya. Tanpa tabel ini, mode yang sudah
-    #: dihapus akan jatuh ke index 0 ("continuous") di UI — dan stasiun yang
-    #: tadinya menunggu trigger akan diam-diam mulai menulis coil OK sendiri.
+    #: Nilai config lama → penggantinya. Tanpa ini, mode yang sudah dihapus
+    #: jatuh ke "continuous" — stasiun bertrigger diam-diam menulis coil OK.
     MODE_ALIASES: Dict[str, str] = {
         "manual": "plc_trigger",
     }
 
     def _migrate(self) -> None:
         """Normalisasi config lama supaya tidak jatuh ke default diam-diam.
-
-        Sengaja TIDAK menulis file: mutasi cukup di memori, dan file ikut
-        terkoreksi saat penyimpanan berikutnya. Konstruktor yang menulis ke
-        disk sebagai efek samping lebih sulit ditebak daripada yang tidak.
-        """
+        Sengaja hanya mutasi di memori — file terkoreksi saat save berikutnya."""
         mode = self._get_nested(self._data, "inference.mode")
         if isinstance(mode, str) and mode in self.MODE_ALIASES:
             self.set("inference.mode", self.MODE_ALIASES[mode])

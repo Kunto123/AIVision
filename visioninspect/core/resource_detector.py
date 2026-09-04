@@ -128,16 +128,8 @@ def estimate_peak_memory(
     input_size: int = 256,
     coreset_ratio: float = 0.1,
 ) -> float:
-    """Estimasi peak memory training dalam GB.
-
-    PatchCore: memory bank grows O(n × d) — linear dengan jumlah patch × feature dim.
-    - resnet18: ~1024-d feature per patch (256×256 → 256 patches = ~262k feat/IMG)
-    - 1 gambar ≈ ~4 MB di memory bank (resnet18, 256×256)
-    - Augmentasi ×5 → 5× memory bank
-    - Coreset sampling terjadi SETELAH ekstraksi, jadi peak adalah pre-sampling
-
-    EfficientAd: jauh lebih ringan (teacher-student, tanpa memory bank)
-    """
+    """Estimasi peak memory training (GB). PatchCore: memory bank O(n×d), ±4 MB
+    per gambar (resnet18 256²), puncak SEBELUM coreset. EfficientAd jauh ringan."""
     total = (num_ok + num_ng) * aug_factor
 
     if algorithm == "efficientad":

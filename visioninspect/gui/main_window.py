@@ -1,6 +1,6 @@
 """
 VisionInspect - Main Window
-Window utama + 7 tab (RUN, TEACH, HISTORY, SETTINGS, DIAGNOSTICS, Akun, I/O Settings),
+Window utama + 6 tab (RUN, TEACH, HISTORY, SETTINGS, Akun, I/O Settings),
 login role admin/operator. Orkestrator pusat: memiliki CameraThread, InferenceWorker,
 PLC link, ProgramManager, watchdog, dan menghubungkan sinyal antar-komponen.
 """
@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Optional
 
 import cv2
-import psutil
 
 from PySide6.QtCore import Qt, QTimer, Signal, QMetaObject, QThread
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QImage, QPixmap, QPainter, QPen, QColor, QFont
@@ -40,7 +39,6 @@ from visioninspect.utils.logging_setup import setup_logging, get_logger
 
 from visioninspect.core.program import ProgramManager
 from visioninspect.core.inference import InferenceEngine, overlay_heatmap
-from visioninspect.core.yolo_filter import YOLODetector, class_filter_matches
 from visioninspect.core.roi_mask import apply_polygon_mask
 from visioninspect.gui.dialogs.polygon_mask_dialog import PolygonMaskDialog
 from visioninspect.core import part_check as pc_module
@@ -56,7 +54,6 @@ from visioninspect.gui.pages.teach_page import TeachPage
 from visioninspect.gui.pages.history_page import HistoryPage
 from visioninspect.gui.pages.settings_page import SettingsPage
 from visioninspect.gui.pages.io_settings_page import IOSettingsPage
-from visioninspect.gui.pages.diagnostics_page import DiagnosticsPage
 from visioninspect.gui.pages.account_page import AccountPage
 from visioninspect.gui.dialogs.login_dialog import LoginDialog
 from visioninspect.storage import secret_store
@@ -70,12 +67,8 @@ class MainWindow(QMainWindow):
     # Signal untuk invoke training di QThread worker
     start_training_signal = Signal(str, str, bool)
 
-    # Signals untuk kirim hasil training WSL dari background thread biasa
-    # (bukan QThread) balik ke GUI thread. QTimer.singleShot yang dipanggil
-    # dari thread tanpa Qt event loop tidak aman (bisa warning "Timers can
-    # only be used with threads started with QThread") — Signal.emit() lintas
-    # thread otomatis di-queue oleh Qt ke thread pemilik receiver, jadi ini
-    # cara yang benar.
+    # Kirim hasil training WSL dari thread biasa (bukan QThread) ke GUI thread.
+    # Signal.emit() lintas thread otomatis di-queue Qt; QTimer.singleShot tidak aman.
     _wsl_train_done_signal = Signal()
     _wsl_train_error_signal = Signal(str)
     _wsl_train_progress_signal = Signal(str)
@@ -109,20 +102,14 @@ class MainWindow(QMainWindow):
         from visioninspect.storage.postgres_db import PostgresDB
         from visioninspect.storage import secret_store
         self._db = Database(data_dir / "database.db")
-        # PostgreSQL connection (optional — enabled via config).
-        # WAJIB sub-dict "postgresql" (PostgresDB baca config["enabled"]/["host"]/dst);
-        # get_all() meneruskan config penuh -> "enabled" tak ketemu -> keliru nonaktif.
+        # PostgreSQL (opsional). WAJIB sub-dict "postgresql" — get_all() meneruskan
+        # config penuh sehingga "enabled" tak ketemu dan PG keliru dianggap mati.
         self._pg = PostgresDB(self._config.get("postgresql", {}))
         if self._pg.is_enabled:
             # Pastikan DB siap pakai (tabel ada, admin ter-seed) begitu terhubung
             self._pg.ensure_ready()
-            # C2a (2026-08-07): PostgreSQL = SATU-SATUNYA sumber akun.
-            # Sebelumnya ada sinkronisasi one-way SQLite → PG yang menimpa
-            # role/password di qc_user_accounts dengan isi database.db tiap
-            # startup — akibatnya akun yang dibuat/diedit via pgAdmin4 selalu
-            # kembali ke state SQLite. Sync itu DIBUANG: akun hanya dibuat/
-            # diedit via PG (pgAdmin4 atau halaman Account). SQLite tetap
-            # dipakai hanya sebagai fallback autentikasi saat PG mati.
+            # PostgreSQL = SATU-SATUNYA sumber akun (sync SQLite→PG dibuang).
+            # SQLite hanya fallback autentikasi saat PG mati.
 
         # C4: migrasi kredensial — password PG plaintext lama dienkripsi sekali
         pg_cfg = self._config.get("postgresql", {})
@@ -150,33 +137,23 @@ class MainWindow(QMainWindow):
         self._active_template = ""
         self._force_regenerate_augmentation = False
 
-        # Performance monitoring
-        self._perf_timer = QTimer(self)
-        self._perf_timer.timeout.connect(self._update_performance)
-        self._process = psutil.Process()
-
         # Training worker
         self._training_thread = TrainingThread(self._pm, self)
         self._training_thread.start()
         self._training_worker = self._training_thread.worker
 
-        # Inference engine (Tugas 5: device + model cache dari config).
-        # CACHE_DIR wajib kalau device GPU dipakai — tanpa cache, compile
-        # GPU ±18 dtk tiap load model; dengan cache ±0,4 dtk.
+        # Inference engine (device + model cache dari config). CACHE_DIR wajib
+        # untuk GPU: compile ±18 dtk tanpa cache vs ±0,4 dtk dengan cache.
         self._inference_engine = InferenceEngine(
-            input_size=self._config.get("model.input_size", 256),
+            # input_size sebenarnya di-override dari IR model saat load_model;
+            # 256 hanya nilai awal sebelum template pertama dimuat.
+            input_size=256,
             device=self._config.get("inference.openvino_device", "CPU"),
             cache_dir=Path(self._config.get("data_dir", "data")) / "ov_cache",
             cpu_pcore_only=self._config.get("inference.cpu_pcore_only", False),
         )
-        # Detektor YOLO (filter kelas) — lazy load, None bila nonaktif/gagal
-        self._yolo_det = None
-        self._last_class_filter_ng = False
-
-        # Tugas 3: inference dijalankan di thread terpisah — loop infer
-        # per-ROI (0,65–1 dtk) tidak lagi membekukan UI. Worker menerima
-        # frame + snapshot config, mengembalikan hasil via signal; semua
-        # efek samping (UI/PLC/history) tetap di thread GUI.
+        # Inference di thread terpisah (loop per-ROI 0,65–1 dtk tak membekukan UI).
+        # Worker balikkan hasil via signal; semua efek samping tetap di GUI thread.
         from visioninspect.gui.inference_worker import InferenceWorker
         self._infer_thread = QThread(self)
         self._infer_thread.setObjectName("InferenceWorkerThread")
@@ -209,73 +186,47 @@ class MainWindow(QMainWindow):
         self._inspection_ng = 0
         self._inference_save_counter = 0  # throttle DB saves (~1/sec)
 
-        # CATATAN: timer interval NG DIHAPUS. Dulu ia menambah counter NG tiap
-        # `ng_debounce_ms` selama anomali bertahan — itu mengukur DURASI
-        # kondisi NG, bukan JUMLAH part NG, sehingga satu part yang diam 5 dtk
-        # terhitung 10 NG sementara part OK terhitung 5 OK (dua jam berbeda,
-        # pass rate tidak sebanding). Sekarang NG diperlakukan sama dengan OK:
-        # satu part = satu hitungan, lihat _should_count_part().
+        # Timer interval NG DIHAPUS (mengukur DURASI NG, bukan jumlah part).
+        # Sekarang NG sama dengan OK: satu part = satu hitungan.
 
-        # Cycle delay timer (jeda antar siklus inspeksi).
-        # CATATAN: di mode plc_trigger cycle delay TIDAK berlaku — timing antar
-        # part dipegang ladder PLC sepenuhnya.
+        # Cycle delay timer (jeda antar siklus). TIDAK berlaku di mode
+        # plc_trigger — timing antar part dipegang ladder PLC.
         self._cycle_delay_timer = QTimer(self)
         self._cycle_delay_timer.setSingleShot(True)
         self._cycle_delay_timer.timeout.connect(self._on_cycle_delay_tick)
         self._cycle_delay_active = False
 
-        # ── Siklus trigger PLC (mode plc_trigger) ──
-        # Kontrak dengan ladder: PULSE HANYA KELUAR KALAU MODEL BENAR-BENAR
-        # SELESAI MENILAI. Part-check menolak / error / timeout → TIDAK ada
-        # pulse sama sekali; watchdog ladder yang menghentikan lini, dan
-        # operator melihat sebabnya di layar.
+        # ── Siklus trigger PLC — kontrak ladder: PULSE HANYA kalau model
+        # benar-benar selesai menilai. Part-check tolak/error/timeout → diam.
         self._trigger_cycle_active = False   # siklus ter-trigger sedang jalan
         self._freeze_pending = False         # frame berikutnya = frame beku
         self._display_frozen = False         # live view dibekukan
         self._gate_rejected = False          # part-check menolak → gate merah
-        # NG retry (2026-09-02): dalam satu siklus trigger, NG di percobaan
-        # pertama TIDAK langsung menutup siklus — dicoba lagi sampai OK
-        # ketemu atau timeout. Bukti NG (gambar+SQLite) cuma disimpan SEKALI
-        # dari percobaan TERAKHIR saat timeout benar-benar terjadi, bukan
-        # tiap percobaan (supaya satu part fisik tidak jadi banyak entry NG).
+        # NG di percobaan pertama TIDAK menutup siklus — retry sampai OK/timeout.
+        # Bukti NG disimpan SEKALI dari percobaan terakhir saat timeout.
         self._last_ng_evidence: Optional[dict] = None
         self._trigger_timeout_timer = QTimer(self)
         self._trigger_timeout_timer.setSingleShot(True)
         self._trigger_timeout_timer.timeout.connect(self._on_trigger_timeout)
 
-        # ── Rem antrean inferensi ──────────────────────────────────────────
-        # Tanpa ini, submit.emit() dipanggil untuk SETIAP frame kamera (30 fps)
-        # sementara satu inferensi makan ~700 ms → ±21 frame menumpuk di
-        # antrean signal. Akibatnya hasil yang tampil berasal dari frame ~15
-        # detik lalu, dan ±130 MB frame 1080p tertahan di memori.
-        # Aturannya: satu inferensi in-flight; frame baru DIBUANG selama
-        # worker sibuk (latest-frame-wins), KECUALI frame ber-trigger PLC yang
-        # tidak boleh hilang karena ladder sedang menunggu.
+        # ── Rem antrean: satu inferensi in-flight, frame baru dibuang selama
+        # worker sibuk (latest-frame-wins). KECUALI frame ber-trigger PLC.
         self._infer_seq = 0            # nomor urut permintaan
         self._infer_inflight_seq = -1  # seq yang sedang dikerjakan (-1 = idle)
         self._infer_inflight_since = 0.0
         self._trigger_seq = -1         # seq milik vonis resmi trigger
 
-        # ── Epoch sesi RUN — buang hasil inferensi "basi konteks" ──────────
-        # Beda dari _infer_inflight_seq (yang cuma menjaga request LEBIH
-        # BARU tidak ketiban hasil LAMA): epoch ini menjaga supaya hasil
-        # yang sudah kadung di-submit tapi baru selesai SETELAH operator
-        # pindah tab/logout/kamera berhenti tidak ikut memulsa part_ready
-        # atau publish OK/NG ke PLC — konteksnya sudah tidak relevan lagi
-        # walau seq-nya tetap "yang ditunggu". Lihat _bump_run_session_epoch().
+        # ── Epoch sesi RUN — buang hasil "basi konteks": sudah di-submit tapi
+        # baru selesai setelah operator pindah tab/logout/kamera berhenti.
         self._run_session_epoch = 0
         self._infer_inflight_epoch = 0
 
-        # ── Satu part = satu hitungan ──────────────────────────────────────
-        # Dulu OK dihitung tiap inspeksi (laju cycle_delay) dan NG dihitung
-        # tiap tick timer interval (laju ng_debounce_ms) — dua jam berbeda,
-        # sehingga satu part yang diam 5 dtk terhitung 5 OK atau 10 NG dan
-        # pass rate ok/(ok+ng) tidak bermakna. Lihat _should_count_part().
+        # ── Satu part = satu hitungan (lihat _should_count_part) ───────────
+        # Dulu OK & NG dihitung pakai dua jam berbeda → pass rate tak bermakna.
         self._counted_this_episode = False  # sudah dihitung di episode gate ini
         self._last_count_ts = 0.0           # untuk cooldown (tanpa gate)
         # Konfirmasi N frame OK berturut (inference.confirm_ok_frames) sebelum
-        # gate lolos / verdict QC = OK. NG apa pun mereset. Lihat
-        # _confirm_ok_frames_effective() & _reset_confirm_streaks().
+        # gate lolos / verdict QC = OK; NG apa pun mereset.
         self._gate_confirm_streak = 0
         self._qc_ok_streak = 0
         # Debounce arah turun: frame notready berturut sebelum gate yang sudah
@@ -300,10 +251,8 @@ class MainWindow(QMainWindow):
         # Part name untuk push ke PG (di-set saat ganti template)
         self._active_partname = ""
 
-        # ── Replay video (uji model via file video — "kamera virtual") ──
-        # test_mode=True → PLC publish, counter produksi, history SQLite/PG,
-        # dan save inspection frame SEMUA di-bypass (data uji jangan pernah
-        # mencemari produksi; actuator PLC jangan pernah nyala karena video).
+        # ── Replay video (uji model — "kamera virtual") ──
+        # test_mode=True → PLC, counter, history, save frame SEMUA di-bypass.
         self._replay_test_mode = False
         self._replay_skip_part_check = False   # bypass part-check khusus uji
         self._replay_export_enabled = True     # simpan frame OK/NG ke folder export
@@ -332,10 +281,8 @@ class MainWindow(QMainWindow):
         # ── Flask API (opsional, bind 127.0.0.1) ──
         self._flask_api: Optional[FlaskAPI] = None
 
-        # ── Export frame replay (Tugas 6b) ──
-        # cv2.imwrite 1080p = ±41 ms — jangan di GUI thread. Queue kecil &
-        # bounded: kalau penuh, frame tertua dibuang (frame terbaru lebih
-        # penting untuk koreksi dataset).
+        # ── Export frame replay — cv2.imwrite 1080p ±41 ms, jangan di GUI thread.
+        # Queue bounded: kalau penuh, frame tertua dibuang.
         import queue as _queue
         self._export_queue: _queue.Queue = _queue.Queue(maxsize=16)
         self._export_stop = False
@@ -354,7 +301,6 @@ class MainWindow(QMainWindow):
         self._apply_theme()
         self._connect_signals()
         self._init_camera()
-        self._start_perf_monitor()
         self._init_programs()
         self._init_plc()
         self._init_flask()
@@ -406,16 +352,15 @@ class MainWindow(QMainWindow):
         self._teach_page = TeachPage(self._tr)
         self._history_page = HistoryPage(self._tr)
         self._settings_page = SettingsPage(self._tr, self._config)
-        self._diagnostics_page = DiagnosticsPage(self._tr)
         auth_db = self._pg if self._pg.is_enabled else self._db
         self._account_page = AccountPage(auth_db)
         self._io_page = IOSettingsPage(self._tr, self._config)
 
+        # Tab: RUN(0) TEACH(1) HISTORY(2) SETTINGS(3) Akun(4) I/O(5)
         self._tabs.addTab(self._run_page, self._tr.tr("nav_run"))
         self._tabs.addTab(self._teach_page, self._tr.tr("nav_teach"))
         self._tabs.addTab(self._history_page, self._tr.tr("nav_history"))
         self._tabs.addTab(self._settings_page, self._tr.tr("nav_settings"))
-        self._tabs.addTab(self._diagnostics_page, self._tr.tr("nav_diagnostics"))
         self._tabs.addTab(self._account_page, "👥 Akun")
         self._tabs.addTab(self._io_page, "I/O Settings")
         self._io_page.apply_requested.connect(self._on_io_settings_apply)
@@ -423,7 +368,6 @@ class MainWindow(QMainWindow):
         # By default hide admin-only tabs; shown after login if role=admin
         for idx in range(1, self._tabs.count()):
             self._tabs.setTabVisible(idx, False)
-        self._tabs.setTabVisible(5, False)  # account page
 
         self._main_layout.addWidget(self._tabs)
 
@@ -498,12 +442,8 @@ class MainWindow(QMainWindow):
 
     def _show_login(self):
         """Show login dialog, apply role visibility after success."""
-        # C2: is_enabled hanya flag config — server bisa mati. Cek koneksi
-        # hidup; kalau PG tidak terjangkau, fallback ke autentikasi SQLite
-        # lokal supaya lini tidak berhenti (server DB mati ≠ nobody can login).
-        # timeout=None → pakai connect_timeout config (10s) supaya konsisten
-        # dengan inisialisasi; timeout 2s pernah false-negative di host
-        # localhost/Windows (resolve IPv6 ::1 dulu makan budget).
+        # is_enabled cuma flag config → cek koneksi hidup; PG tak terjangkau =
+        # fallback auth SQLite. timeout=None (jangan kecil: false-negative IPv6).
         if self._pg.is_enabled and self._pg.is_alive():
             auth_db = self._pg
         else:
@@ -547,9 +487,8 @@ class MainWindow(QMainWindow):
         # plc.reset_on_run_entry (lihat _plc_reset_session).
         self._plc_reset_session()
 
-        # Hasil inferensi yang masih diproses di thread lain tidak boleh
-        # lagi memulsa part_ready/OK ke PLC begitu selesai — sesi ini sudah
-        # berakhir. Lihat _bump_run_session_epoch().
+        # Sesi berakhir → hasil inferensi yang masih diproses tidak boleh lagi
+        # memulsa part_ready/OK ke PLC (lihat _bump_run_session_epoch).
         self._bump_run_session_epoch()
 
         # Hentikan kamera & inferensi selama logout — view berhenti berjalan
@@ -565,15 +504,13 @@ class MainWindow(QMainWindow):
         Admin sees all tabs EXCEPT RUN. Operator sees only RUN."""
         is_admin = self._user_role == "admin"
 
-        # Tab indices: 0=RUN, 1=TEACH, 2=HISTORY, 3=SETTINGS, 4=DIAGNOSTICS,
-        #              5=AKUN, 6=GLOBAL SETTINGS
+        # Tab indices: 0=RUN, 1=TEACH, 2=HISTORY, 3=SETTINGS, 4=AKUN, 5=I/O
         self._tabs.setTabVisible(0, not is_admin)  # RUN: operator only
         self._tabs.setTabVisible(1, is_admin)      # TEACH
         self._tabs.setTabVisible(2, is_admin)      # HISTORY
         self._tabs.setTabVisible(3, is_admin)      # SETTINGS
-        self._tabs.setTabVisible(4, is_admin)      # DIAGNOSTICS
-        self._tabs.setTabVisible(5, is_admin)      # AKUN
-        self._tabs.setTabVisible(6, is_admin)      # GLOBAL SETTINGS
+        self._tabs.setTabVisible(4, is_admin)      # AKUN
+        self._tabs.setTabVisible(5, is_admin)      # I/O Settings
         # View operator = 1 tab saja → sembunyikan tab bar (hilangkan
         # tulisan "RUN"); admin butuh tab bar untuk navigasi.
         self._tabs.tabBar().setVisible(is_admin)
@@ -665,9 +602,8 @@ class MainWindow(QMainWindow):
         self._teach_page.get_roi_panel().mask_polygon_clear_requested.connect(
             self._on_roi_mask_clear_requested)
 
-        # TEACH: Threshold slider → live update inference threshold,
-        # lalu simpan permanen ke config template saat slider dilepas
-        # (sliderReleased, bukan tiap tick, agar tidak menulis file terus-menerus)
+        # TEACH: slider threshold → update engine live; disimpan ke config
+        # template saat sliderReleased (bukan tiap tick).
         self._teach_page.get_threshold_slider().valueChanged.connect(self._on_threshold_slider)
         self._teach_page.get_threshold_slider().sliderReleased.connect(self._on_threshold_released)
         # Commit threshold yang diketik manual — editingFinished = Enter/focus-out,
@@ -786,35 +722,25 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _color_alpha(name: str, alpha: int) -> QColor:
-        """QColor dengan alpha transparan — QColor(str, int) TIDAK ADA di Qt6
-        (TypeError 'Supported signatures' setiap frame = log membengkak + ROI
-        gagal tergambar). Cara benar: setAlpha() setelah konstruksi."""
+        """QColor dengan alpha — QColor(str, int) TIDAK ADA di Qt6 (TypeError
+        tiap frame + ROI gagal tergambar). Cara benar: setAlpha() setelah init."""
         c = QColor(name)
         c.setAlpha(alpha)
         return c
 
     def _on_frame_received(self, img):
-        """Frame baru dari kamera/replay — update display.
-
-        Tugas 7: worker mengirim QImage (aman lintas thread); konversi ke
-        QPixmap dilakukan DI SINI (GUI thread). QPainter/overlay ROI juga
-        hanya boleh di GUI thread.
-        """
-        # Tugas 2: display hanya untuk tab yang benar-benar melihat video
-        # (RUN/TEACH). Inference TIDAK lewat sini (frame_raw terpisah →
-        # _on_frame_for_inference), jadi frame untuk inspeksi tidak pernah
-        # hilang — yang dihemat cuma kerja QPainter/display.
+        """Frame baru dari kamera/replay → update display. Worker kirim QImage;
+        konversi ke QPixmap + overlay ROI HANYA boleh di GUI thread."""
+        # Display hanya untuk tab yang melihat video (RUN/TEACH). Inference
+        # lewat jalur terpisah (frame_raw), jadi tidak ada frame yang hilang.
         if self._tabs.currentIndex() not in (0, 1):
             return
         # Mode trigger: tampilan DIBEKUKAN di frame yang sedang dinilai sampai
-        # hasil keluar (atau siklus gagal). Operator melihat persis frame yang
-        # diputuskan sistem, bukan frame setelahnya.
+        # hasil keluar — operator lihat persis frame yang diputuskan sistem.
         if self._display_frozen:
             return
-        # Throttle display live ke ~15 fps (mata operator tidak butuh 30).
-        # Inference tidak terpengaruh (jalur terpisah). Replay dikecualikan.
-        # Frame yang akan dibekukan TIDAK boleh kena throttle — ia harus
-        # benar-benar tergambar sebelum tampilan dikunci.
+        # Throttle display ke ~15 fps (inference tak terpengaruh, replay dikecualikan).
+        # Frame yang akan dibekukan TIDAK boleh kena throttle.
         now = time.monotonic()
         if (not self._replay_test_mode and not self._freeze_pending
                 and self._last_display_ts
@@ -895,12 +821,8 @@ class MainWindow(QMainWindow):
                 gy = int(self._last_gate_roi.get("y", 0))
                 gw = int(self._last_gate_roi.get("width", 64))
                 gh = int(self._last_gate_roi.get("height", 64))
-                # Tiga keadaan — merah HARUS bisa dibedakan dari biru, karena
-                # biru = normal menunggu sedangkan merah = lini berhenti:
-                #   biru  menunggu (belum ada trigger)
-                #   hijau part terdeteksi, inspeksi berjalan
-                #   merah trigger datang tapi part-check MENOLAK → tidak ada
-                #         sinyal ke PLC, operator harus turun tangan
+                # biru = menunggu trigger, hijau = part terdeteksi/inspeksi jalan,
+                # merah = part-check MENOLAK (lini berhenti, operator turun tangan).
                 if self._gate_rejected:
                     gate_color, gate_text = "#EF4444", "GATE NG"
                 elif self._last_part_ready:
@@ -964,9 +886,8 @@ class MainWindow(QMainWindow):
         self._run_page.set_camera_status(False)
         self._start_cam_action.setText("Start Kamera")
         self._teach_page.set_preview_text("Kamera dimatikan")
-        # Kamera berhenti = tidak ada lagi frame baru yang bisa menyusul —
-        # hasil inferensi in-flight yang masih tersisa tidak boleh memulsa
-        # part_ready/OK ke PLC begitu selesai. Lihat _bump_run_session_epoch().
+        # Kamera berhenti → hasil inferensi in-flight yang tersisa tidak boleh
+        # memulsa part_ready/OK ke PLC (lihat _bump_run_session_epoch).
         self._bump_run_session_epoch()
 
     def _on_camera_error(self, msg: str):
@@ -998,22 +919,13 @@ class MainWindow(QMainWindow):
     # ---- Inference ----
 
     def _request_trigger(self, source: str) -> bool:
-        """Satu-satunya jalur permintaan trigger, dari sumber mana pun.
-
-        Sumber yang setara: coil trigger PLC (tombol eksternal), tombol
-        "Trigger Now" di halaman Run, dan POST /trigger. Ketiganya melewati
-        fungsi ini supaya perilakunya sama secara struktur — bukan karena
-        kebetulan ada dua blok kode yang mirip.
-
-        Returns True bila permintaan diterima.
-        """
+        """Satu-satunya jalur permintaan trigger (coil PLC / tombol Run / POST).
+        Return True bila permintaan diterima."""
         mode = self._config.get("inference.mode", "continuous")
         if mode == "plc_trigger":
             if self._trigger_cycle_active:
-                # Siklus lama belum tuntas. Menerima trigger di sini akan
-                # menimpa _trigger_seq, membuat hasil inferensi yang sedang
-                # berjalan dibuang sebagai basi — tidak ada pulse OK, dan
-                # part yang BAGUS ikut divonis NG oleh timeout ladder.
+                # Siklus lama belum tuntas — menerima trigger di sini menimpa
+                # _trigger_seq dan part BAGUS ikut divonis NG oleh timeout ladder.
                 logger.warning(
                     "Trigger dari %s diabaikan — siklus sebelumnya masih "
                     "berjalan.", source)
@@ -1041,11 +953,8 @@ class MainWindow(QMainWindow):
                 and not self._replay_test_mode)
 
     def _begin_trigger_cycle(self):
-        """Trigger diterima: bekukan tampilan + pasang batas waktu.
-
-        Freeze memakai frame yang SAMA dengan yang dinilai — operator melihat
-        persis apa yang diputuskan sistem, bukan frame setelahnya.
-        """
+        """Trigger diterima: bekukan tampilan + pasang batas waktu. Freeze memakai
+        frame yang SAMA dengan yang dinilai."""
         self._trigger_cycle_active = True
         self._freeze_pending = True
         self._gate_rejected = False
@@ -1055,24 +964,16 @@ class MainWindow(QMainWindow):
         self._trigger_timeout_timer.start(ms)
 
     def _finish_trigger_cycle(self, fault: str = "", detail: str = ""):
-        """Tutup siklus trigger: lepas freeze, matikan timer batas waktu.
-
-        `fault` kosong = model selesai menilai (pulse OK/NG sudah dikirim di
-        jalur normal). `fault` terisi = TIDAK ADA pulse yang dikirim — sesuai
-        kontrak "diam berarti gagal"; ladder yang menghentikan lini lewat
-        watchdog, layar yang menjelaskan sebabnya ke operator.
-        """
+        """Tutup siklus trigger: lepas freeze + matikan timer batas waktu.
+        `fault` terisi = TIDAK ada pulse ("diam berarti gagal")."""
         if self._trigger_timeout_timer.isActive():
             self._trigger_timeout_timer.stop()
         was_active = self._trigger_cycle_active
         self._trigger_cycle_active = False
         self._freeze_pending = False
         self._display_frozen = False
-        # Timeout = jendela waktu benar-benar habis tanpa OK. Percobaan
-        # NG terakhir yang sempat dicoba (kalau ada) baru DITULIS sekarang —
-        # itulah vonis akhir part ini. Fault lain (part_check/error) berarti
-        # siklus batal total, bukti NG yang sempat nyangkut dibuang saja
-        # (bukan part cacat, tapi gangguan/part hilang di tengah jalan).
+        # Timeout = jendela habis tanpa OK → bukti NG terakhir DITULIS sekarang.
+        # Fault lain (part_check/error) = siklus batal, bukti NG dibuang.
         if fault == "timeout" and self._last_ng_evidence is not None:
             if not self._replay_test_mode:
                 self._save_ng_evidence(**self._last_ng_evidence)
@@ -1102,19 +1003,14 @@ class MainWindow(QMainWindow):
 
     # ---- Rem antrean inferensi --------------------------------------------
 
-    #: Kalau hasil tak kunjung datang selama ini, anggap permintaan hilang dan
-    #: buka lagi remnya — supaya satu worker yang macet tidak membekukan
-    #: inspeksi selamanya.
+    #: Hasil tak datang selama ini → anggap permintaan hilang & buka rem, supaya
+    #: satu worker macet tidak membekukan inspeksi selamanya.
     _INFER_STUCK_SEC = 10.0
 
     @staticmethod
     def _roi_thresholds_from_config(tmpl_cfg: dict) -> dict:
-        """Kumpulkan {uid: threshold} dari config template.
-
-        Hanya ROI yang PUNYA field `threshold` yang diambil — sisanya sengaja
-        dibiarkan kosong supaya jatuh ke threshold global. Dengan begitu
-        template lama berperilaku persis seperti sebelumnya.
-        """
+        """Kumpulkan {uid: threshold} dari config template — hanya ROI yang PUNYA
+        field `threshold`; sisanya jatuh ke threshold global."""
         out = {}
         for r in (tmpl_cfg.get("rois") or []):
             uid = r.get("uid")
@@ -1125,10 +1021,7 @@ class MainWindow(QMainWindow):
 
     def _confirm_ok_frames_effective(self) -> int:
         """N hasil infer OK berturut sebelum gate lolos / verdict QC = OK.
-
-        Continuous saja — mode plc_trigger & replay uji selalu 1 (timing part
-        milik ladder / dialog uji, bukan aplikasi).
-        """
+        Continuous saja — plc_trigger & replay uji selalu 1."""
         if self._is_trigger_mode() or self._replay_test_mode:
             return 1
         try:
@@ -1144,9 +1037,8 @@ class MainWindow(QMainWindow):
         self._gate_lost_streak = 0
 
     def _arm_cycle_delay(self) -> None:
-        """Continuous: pasang jeda antar siklus (Settings → Cycle Delay), juga
-        di antara frame konfirmasi. plc_trigger / replay: timing bukan milik
-        aplikasi → tanpa jeda."""
+        """Continuous: pasang jeda antar siklus (Settings → Cycle Delay), termasuk
+        di antara frame konfirmasi. plc_trigger/replay: tanpa jeda."""
         if (self._config.get("inference.mode", "continuous") == "continuous"
                 and not self._replay_test_mode):
             cycle_delay = self._settings_page.get_cycle_delay_ms()
@@ -1158,28 +1050,8 @@ class MainWindow(QMainWindow):
         self._cycle_delay_active = False
 
     def _should_count_part(self, judgement: str) -> bool:
-        """Boleh menambah counter / kirim ke PLC untuk hasil ini?
-
-        Satu part harus terhitung SEKALI, berapa pun frame yang sempat
-        diperiksa selagi part itu ada di depan kamera. Sumber "satu part"
-        dipilih dari yang paling akurat ke yang paling kasar:
-
-        1. Mode trigger PLC → 1 trigger = 1 part. Tepat, tidak perlu apa-apa.
-        2. Gate part-check aktif → hitung sekali per episode "ada part".
-           Tepat SELAMA ada celah kosong antar part; kalau part datang rapat
-           tanpa celah, gate tidak pernah turun dan part kedua tak terhitung.
-        3. Tidak keduanya → cooldown waktu. Ini heuristik: ia menukar
-           kelebihan-hitung dengan risiko kekurangan-hitung bila part datang
-           lebih cepat dari cooldown. Berlaku untuk OK MAUPUN NG dengan jam
-           yang sama supaya pass rate tetap sebanding.
-
-        Episode (case 2) SENGAJA cuma dikunci (`_counted_this_episode`) kalau
-        judgement-nya OK (2026-09-02) — NG di evaluasi pertama BUKAN vonis
-        akhir selama part masih di gate; frame berikutnya (part yang sama)
-        masih boleh "menyelamatkan" jadi OK. Episode baru benar-benar ditutup
-        kalau part hilang dari gate (`pc_blocked`, lihat _on_inference_result)
-        tanpa pernah OK — itulah momen vonis NG akhirnya dianggap final.
-        """
+        """Boleh menambah counter / kirim ke PLC untuk hasil ini? Sumber "satu part"
+        dari akurat ke kasar: trigger PLC → gate part-check → cooldown waktu."""
         if self._is_trigger_mode():
             return True
 
@@ -1217,27 +1089,15 @@ class MainWindow(QMainWindow):
         return True
 
     def _bump_run_session_epoch(self):
-        """Tandai konteks sesi RUN berubah (keluar tab RUN / logout / kamera
-        berhenti) — hasil inferensi yang sudah kadung di-submit SEBELUM ini
-        tapi baru selesai SESUDAHNYA akan dibuang di _on_inference_result
-        (lihat pengecekan _infer_inflight_epoch), bukan ikut memulsa
-        part_ready/OK ke PLC. Reset _last_part_ready sekalian supaya state
-        gate tidak menggantung lintas sesi.
-        """
+        """Tandai konteks sesi RUN berubah (keluar RUN / logout / kamera berhenti) —
+        hasil infer yang sudah di-submit akan dibuang, bukan memulsa PLC."""
         self._run_session_epoch += 1
         self._last_part_ready = False
         self._reset_confirm_streaks()
 
     def _on_frame_for_inference(self, frame):
-        """Frame dari kamera → submit ke worker inference (Tugas 3).
-
-        Fungsi ini murni meng-queue kerja ke InferenceWorkerThread lalu
-        langsung kembali — UI tidak beku. Guard live (tab RUN, cycle delay,
-        trigger manual) tetap dievaluasi di sini. Semua efek samping hasil
-        infer diproses di _on_inference_result (thread GUI).
-        Return True kalau frame di-submit ke worker, False kalau di-skip
-        (dipakai jalur replay untuk ack manual supaya token tidak hilang).
-        """
+        """Frame dari kamera → queue ke InferenceWorker lalu langsung kembali (UI tak
+        beku). Return True kalau di-submit, False kalau di-skip guard."""
         if not self._inference_engine.is_loaded:
             return False
         if not self._current_all_rois:
@@ -1245,15 +1105,12 @@ class MainWindow(QMainWindow):
         # Only infer on RUN tab — other tabs don't show inference results
         if self._tabs.currentIndex() != 0:
             return False
-        # Skip frame if in cycle delay (jeda antar siklus) — TIDAK berlaku di
-        # mode plc_trigger: timing antar part milik ladder, aplikasi tidak
-        # boleh menahan siklus.
+        # Skip frame selama cycle delay — TIDAK berlaku di mode plc_trigger
+        # (timing antar part milik ladder).
         if self._cycle_delay_active and not self._is_trigger_mode():
             return False
-        # Mode plc_trigger: inspeksi hanya saat ada trigger
-        # (coil trigger PLC ON, tombol Trigger Now, atau POST /trigger).
-        # Replay video (mode uji): trigger PLC tidak relevan — jalankan
-        # seperti continuous supaya uji tidak terkunci menunggu trigger.
+        # plc_trigger: infer hanya saat ada trigger (coil PLC / tombol / POST).
+        # Replay uji dijalankan seperti continuous supaya tidak terkunci.
         infer_mode = self._config.get("inference.mode", "continuous")
         triggered = False
         if infer_mode == "plc_trigger" and not self._replay_test_mode:
@@ -1261,31 +1118,22 @@ class MainWindow(QMainWindow):
                 self._plc_trigger_pending = False
                 triggered = True
             elif self._trigger_cycle_active:
-                # Siklus trigger masih menunggu OK (belum timeout) —
-                # BUKAN trigger baru: _begin_trigger_cycle() TIDAK dipanggil
-                # lagi di sini (timer batas waktu & freeze tampilan cuma
-                # sekali di awal siklus). Frame ini numpang di siklus yang
-                # sama supaya NG di percobaan pertama tidak langsung jadi
-                # vonis akhir — dicoba lagi sampai OK ketemu atau
-                # trigger_timeout_ms habis. Ladder tetap pegang jendela
-                # waktu asli (T0); timeout app di sini cuma jaring pengaman
-                # supaya tidak retry selamanya.
+                # Siklus masih menunggu OK — BUKAN trigger baru. Frame ini numpang
+                # di siklus yang sama (retry sampai OK / trigger_timeout_ms habis).
                 pass
             elif not self._config.get("inference.infer_when_idle", False):
                 # Mode default: tanpa trigger/siklus aktif, tidak ada
                 # inferensi sama sekali (paling ringan).
                 return False
 
-        # ── Rem antrean: jangan menumpuk pekerjaan di worker ──
-        # Frame ber-trigger TIDAK PERNAH dibuang — ladder sedang menunggu
-        # pulse. Frame live boleh dibuang; yang penting hasilnya segar.
+        # ── Rem antrean: frame live boleh dibuang (yang penting segar), tapi
+        # frame ber-trigger TIDAK PERNAH — ladder sedang menunggu pulse.
         if not triggered and self._infer_is_busy():
             return False
 
         if triggered:
-            # Frame INILAH yang dinilai. Bekukan tampilan tepat di frame ini
-            # (frame_raw di-emit sebelum frame_ready, jadi _on_frame_received
-            # untuk frame yang sama akan menyusul dan menjadi frame beku).
+            # Frame INILAH yang dinilai → bekukan tampilan tepat di sini
+            # (frame_raw di-emit sebelum frame_ready, jadi pasti menyusul).
             self._begin_trigger_cycle()
 
         # ── Step 1: Part Presence Check — state dihitung di sini (murah),
@@ -1297,9 +1145,8 @@ class MainWindow(QMainWindow):
             self._last_gate_roi = pc_cfg.get("gate_roi")
         elif pc_state == "incomplete":
             if self._replay_test_mode and self._replay_skip_part_check:
-                # Replay uji: operator memilih bypass part-check — perlakukan
-                # sebagai disabled (fall through ke QC). Hanya untuk sesi uji;
-                # flag di-reset di _stop_replay().
+                # Replay uji: operator bypass part-check → perlakukan sebagai
+                # disabled. Flag di-reset di _stop_replay().
                 self._pc_active_for_overlay = False
                 self._last_gate_roi = None
                 self._last_part_ready = False
@@ -1325,7 +1172,6 @@ class MainWindow(QMainWindow):
         rois_uid = list(self._current_all_roi_uids)
         rois_label = list(self._current_all_roi_labels)
         rois_mask = list(self._current_all_roi_mask_polygons)
-        yc = self._yolo_cfg()
 
         # Queue ke worker thread (submit → infer di-connect QueuedConnection
         # di dalam InferenceWorker) → GUI thread langsung bebas.
@@ -1335,44 +1181,32 @@ class MainWindow(QMainWindow):
         self._infer_inflight_epoch = self._run_session_epoch
         self._infer_inflight_since = time.monotonic()
         if triggered or self._trigger_cycle_active:
-            # Retry (triggered=False tapi siklus masih aktif) ikut dicatat
-            # sebagai "seq yang ditunggu siklus" — supaya hasilnya nanti
-            # tetap dikenali is_trigger_result=True di _on_inference_result.
+            # Retry (siklus masih aktif) ikut dicatat sebagai "seq yang ditunggu"
+            # supaya hasilnya tetap dikenali is_trigger_result=True.
             self._trigger_seq = seq
         self._inference_worker.submit.emit(
-            seq, frame, pc_cfg, pc_state, rois, rois_uid, rois_label, rois_mask, yc)
+            seq, frame, pc_cfg, pc_state, rois, rois_uid, rois_label, rois_mask)
         return True
     def _on_inference_result(self, result: dict):
-        """Hasil infer dari worker thread — SEMUA efek samping di GUI thread.
-
-        Dipanggil via signal (auto queued) → selalu thread GUI. Bagian yang
-        komputasi berat (part-check evaluate, YOLO pre-filter, loop infer
-        per-ROI) sudah dikerjakan InferenceWorker; body asli Step 2 dst.
-        dari _on_frame_for_inference pindah ke sini apa adanya.
-        """
+        """Hasil infer dari worker — SEMUA efek samping dikerjakan di sini (GUI
+        thread). Dipanggil via signal, jadi selalu thread GUI."""
         try:
-            # Hasil basi: permintaan yang lebih baru sudah menyusul (mis.
-            # trigger PLC datang saat inferensi live masih berjalan). Jangan
-            # dipakai jadi vonis — frame-nya bukan frame yang dimaksud.
+            # Hasil basi: sudah ada permintaan lebih baru → jangan dipakai jadi
+            # vonis, frame-nya bukan frame yang dimaksud.
             seq = result.get("seq", -1)
             if seq >= 0 and seq != self._infer_inflight_seq:
                 logger.debug("Hasil infer basi (seq=%s) — dilewati", seq)
                 return
             self._infer_inflight_seq = -1
-            # Hasil basi-konteks: frame ini sudah di-submit SEBELUM operator
-            # pindah tab keluar RUN / logout / kamera berhenti, tapi baru
-            # selesai diproses SESUDAHNYA (inferensi jalan di thread lain,
-            # butuh waktu). Tanpa guard ini, part_ready/OK tetap terpulsa ke
-            # PLC walau tidak ada inspeksi yang operator lihat sedang
-            # berlangsung — lihat _bump_run_session_epoch().
+            # Hasil basi-konteks: di-submit sebelum operator pindah tab/logout,
+            # selesai sesudahnya. Tanpa guard ini PLC tetap terpulsa.
             if self._infer_inflight_epoch != self._run_session_epoch:
                 logger.debug(
                     "Hasil infer basi-konteks (epoch=%s, sesi sekarang=%s) — "
                     "dilewati", self._infer_inflight_epoch, self._run_session_epoch)
                 return
-            # Vonis resmi trigger hanya boleh datang dari frame ber-trigger.
-            # seq < 0 = pemanggil tanpa nomor urut (jalur lama/uji) → ikut
-            # keadaan siklus yang sedang aktif.
+            # Vonis resmi trigger hanya dari frame ber-trigger. seq < 0 (jalur
+            # lama/uji) → ikut keadaan siklus yang sedang aktif.
             if seq < 0:
                 is_trigger_result = self._trigger_cycle_active
             else:
@@ -1382,11 +1216,8 @@ class MainWindow(QMainWindow):
 
             if result.get("error"):
                 logger.warning("Inference worker error: %s", result["error"])
-                # Mode trigger: JANGAN diam tanpa jejak — freeze harus dilepas
-                # dan operator harus tahu. Tidak ada pulse (kontrak: pulse
-                # hanya kalau model benar-benar selesai menilai). Hanya kalau
-                # error ini memang milik frame ber-trigger — error inferensi
-                # live tidak boleh membatalkan siklus trigger yang berjalan.
+                # Mode trigger: JANGAN diam tanpa jejak — lepas freeze, tanpa pulse.
+                # Hanya kalau error ini milik frame ber-trigger.
                 if is_trigger_result:
                     self._finish_trigger_cycle("error", str(result["error"]))
                 return
@@ -1397,11 +1228,8 @@ class MainWindow(QMainWindow):
             # Worker tidak bisa set_waiting_for_part (objek Qt) → di sini.
             if result.get("pc_blocked"):
                 confirm_n = self._confirm_ok_frames_effective()
-                # Debounce arah TURUN: tangan/bayangan lewat sekejap di atas
-                # part tidak boleh menutup episode (kalau tidak → false NG +
-                # part yang sama terhitung 2x). Butuh N frame notready berturut
-                # (N yang sama dengan konfirmasi OK) sebelum part benar-benar
-                # dianggap hilang. Hanya kalau gate SUDAH pernah lolos.
+                # Debounce arah TURUN: butuh N frame notready berturut sebelum part
+                # dianggap hilang — tangan lewat sekejap ≠ false NG + double count.
                 if (self._last_part_ready
                         and not self._is_trigger_mode()
                         and not self._replay_test_mode
@@ -1412,29 +1240,20 @@ class MainWindow(QMainWindow):
                     return
                 self._last_part_ready = False
                 self._gate_lost_streak = 0
-                # Gate turun = part sudah lewat → episode berikutnya boleh
-                # dihitung lagi. Inilah yang membuat satu part terhitung
-                # sekali walau diperiksa berkali-kali selagi ada di gate.
+                # Gate turun = part sudah lewat → episode berikutnya boleh dihitung.
+                # Inilah yang bikin satu part terhitung sekali saja.
                 self._counted_this_episode = False
                 self._reset_confirm_streaks()
-                # Mode continuous: part akhirnya benar-benar hilang dari gate
-                # TANPA pernah OK selama di sana — itu baru vonis akhirnya,
-                # tulis SEKARANG (bukan tiap frame NG selagi masih dicoba).
-                # Mode plc_trigger sengaja TIDAK di-flush di sini — part
-                # hilang di TENGAH siklus trigger berarti gangguan/part
-                # tercabut, bukan vonis cacat (lihat _finish_trigger_cycle,
-                # fault "part_check" membuang bukti ini, bukan menulisnya).
+                # Continuous: part hilang dari gate tanpa pernah OK = vonis akhir,
+                # tulis SEKARANG. plc_trigger TIDAK di-flush (itu gangguan, bukan cacat).
                 if (not self._is_trigger_mode()
                         and self._last_ng_evidence is not None
                         and not self._replay_test_mode):
                     self._save_ng_evidence(**self._last_ng_evidence)
                 self._last_ng_evidence = None
                 if self._trigger_cycle_active and is_trigger_result:
-                    # Trigger datang tapi part tidak terdeteksi → BERHENTI di
-                    # sini: model tidak dijalankan (hemat ~1 dtk) dan tidak
-                    # ada pulse ke PLC. Gate ROI jadi merah sampai trigger
-                    # berikutnya supaya operator tahu ini fault mesin,
-                    # bukan part cacat.
+                    # Trigger datang tapi part tak terdeteksi → BERHENTI: model tidak
+                    # dijalankan, tanpa pulse. Gate ROI merah = fault mesin.
                     self._gate_rejected = True
                     self._finish_trigger_cycle("part_check")
                 else:
@@ -1442,9 +1261,8 @@ class MainWindow(QMainWindow):
                 return
             if (result.get("pc_state") == "active"
                     and result.get("pc_result") is not None):
-                # Gate "ready" — butuh N frame ready berturut sebelum lolos ke
-                # QC (Settings → Penghitungan Part). N=1 (default) = perilaku
-                # lama. Frame konfirmasi tetap kena cycle delay.
+                # Gate "ready" — butuh N frame ready berturut sebelum lolos ke QC.
+                # N=1 = perilaku lama; frame konfirmasi tetap kena cycle delay.
                 confirm_n = self._confirm_ok_frames_effective()
                 # Frame ready → reset budget debounce turun (occlusion beres).
                 self._gate_lost_streak = 0
@@ -1470,14 +1288,11 @@ class MainWindow(QMainWindow):
             worst_score = result.get("worst_score", 1.0)
             avg_latency = result.get("avg_latency", 0.0)
             raw_judgement = result.get("raw_judgement", "OK")
-            class_ng = result.get("class_ng", False)
 
             if result.get("heatmap") is not None:
                 self._last_heatmap = result["heatmap"]
                 self._last_frame = frame
             self._last_worst_score = worst_score
-            # Catat alasan NG karena filter kelas (untuk tampilan/status)
-            self._last_class_filter_ng = bool(class_ng)
 
             # Simpan judgement per-ROI beserta timestamp untuk warna live
             self._roi_col_judgement = {}
@@ -1485,9 +1300,8 @@ class MainWindow(QMainWindow):
                 self._roi_col_judgement[idx] = r.get("judgement", "OK")
             self._roi_col_timestamp = time.monotonic()
 
-            # Push ke PostgreSQL TIDAK di sini (per-frame = boros + tanpa
-            # backpressure, lihat PRD R4). Push dilakukan per verdict-event
-            # di blok add_inspection (NG pertama / OK throttled) via outbox.
+            # Push PG TIDAK di sini (per-frame = boros, tanpa backpressure) —
+            # dilakukan per verdict-event lewat outbox.
 
             avg_latency = float(avg_latency) if avg_latency is not None else 0.0
             self._run_page.update_latency(avg_latency)
@@ -1497,10 +1311,8 @@ class MainWindow(QMainWindow):
             self._last_judgement = raw_judgement
             self._last_worst_score = worst_score
 
-            # Hasil ini boleh jadi VONIS RESMI (pulse PLC + counter + history)?
-            # Di mode trigger hanya frame ber-trigger yang boleh — kalau tidak,
-            # opsi "infer saat idle" akan memulsa PLC tanpa pernah ada trigger.
-            # Di mode lain semua hasil resmi seperti biasa.
+            # Boleh jadi VONIS RESMI (pulse + counter + history)? Di mode trigger
+            # hanya frame ber-trigger — kalau tidak, "infer saat idle" memulsa PLC.
             official = (not self._is_trigger_mode()) or is_trigger_result
 
             # Replay video (mode uji): catat hasil frame untuk stats/export —
@@ -1525,10 +1337,8 @@ class MainWindow(QMainWindow):
                     if len(self._replay_stats["ng_frames"]) < 64:
                         self._replay_stats["ng_frames"].append((idx, worst_score))
 
-            # Konfirmasi N frame OK berturut sebelum verdict OK final (Settings
-            # → Penghitungan Part). NG apa pun mereset streak (fail-safe).
-            # N=1 (default) = perilaku lama. Frame konfirmasi tetap kena cycle
-            # delay dan tidak menghitung / memulsa PLC.
+            # Konfirmasi N frame OK berturut sebelum verdict OK final; NG mereset
+            # streak (fail-safe). Frame konfirmasi tidak menghitung / memulsa PLC.
             confirm_n = self._confirm_ok_frames_effective()
             if raw_judgement == "OK":
                 self._qc_ok_streak += 1
@@ -1540,100 +1350,66 @@ class MainWindow(QMainWindow):
                 self._arm_cycle_delay()
                 return
 
-            # Satu part = satu hitungan. Tampilan SELALU diperbarui (operator
-            # perlu melihat kondisi terkini), tapi counter/PLC/history hanya
-            # sekali per part. Lihat _should_count_part().
+            # Satu part = satu hitungan: tampilan SELALU diperbarui, tapi
+            # counter/PLC/history hanya sekali per part (_should_count_part).
             counts = official and self._should_count_part(raw_judgement)
 
             if raw_judgement == "OK":
                 # Show OK immediately, increment OK counter (produksi)
                 self._run_page.update_judgement("OK", worst_score)
                 if not self._replay_test_mode and counts:
-                    # OK ketemu → bukti NG dari percobaan sebelumnya (kalau
-                    # ada, dari part yang sama di episode ini) sudah tidak
-                    # relevan — buang, jangan pernah ditulis.
+                    # OK ketemu → bukti NG dari percobaan sebelumnya (part yang sama)
+                    # tidak relevan lagi; buang, jangan pernah ditulis.
                     self._last_ng_evidence = None
                     self._inspection_ok += 1
                     self._run_page.update_counters(
                         self._inspection_ok, self._inspection_ng)
                     # Feedback ke PLC: publikasi hasil OK
                     self._publish_result("OK")
-                    # Push ke PostgreSQL: SETIAP part OK, bukan sampel.
-                    # Tabel produksi ini adalah HITUNGAN part bagus — kalau
-                    # di-sampling (dulu 1 dari 30), angkanya jadi 30x lebih
-                    # kecil dari kenyataan. Lewat outbox, jadi tetap aman
-                    # kalau PG sedang mati.
+                    # Push PG untuk SETIAP part OK, bukan sampel — tabel ini HITUNGAN
+                    # part bagus. Lewat outbox, jadi aman kalau PG mati.
                     self._push_inspection_async(
                         self._build_push_entry(worst_score))
 
             else:  # raw_judgement == "NG"
                 # NG diperlakukan SAMA dengan OK: satu part = satu vonis.
-                # Timer interval NG (yang dulu menambah counter tiap 500 ms
-                # selama anomali bertahan) sudah dibuang — ia mengukur
-                # DURASI kondisi NG, bukan JUMLAH part NG, sehingga pass rate
-                # ok/(ok+ng) tidak pernah sebanding.
+                # Timer interval NG dibuang (mengukur durasi, bukan jumlah part).
                 self._run_page.update_judgement("NG", worst_score)
                 if counts:
-                    # TIDAK ada sinyal NG ke PLC, dan counter NG TIDAK
-                    # ditambah di sini. NG sepenuhnya diputuskan PLC dari
-                    # ketiadaan OK dalam jendela waktunya; counter diisi saat
-                    # sinyal NG masuk (_on_plc_ng) supaya angka di layar
-                    # selalu cocok dengan lampu.
+                    # TIDAK ada sinyal NG ke PLC & counter NG tidak ditambah di sini —
+                    # diisi saat sinyal NG masuk (_on_plc_ng) supaya cocok dengan lampu.
                     if not self._replay_test_mode:
                         if self._trigger_cycle_active and is_trigger_result:
-                            # Mode plc_trigger: NG di SATU percobaan bukan
-                            # vonis akhir — jendela waktu masih berjalan,
-                            # frame berikutnya akan dicoba lagi (lihat gate
-                            # retry di _on_frame_for_inference). Simpan bukti
-                            # percobaan TERAKHIR saja (ditimpa tiap retry);
-                            # baru benar-benar ditulis kalau timeout terjadi
-                            # (_finish_trigger_cycle). Kalau nanti ketemu OK,
-                            # bukti ini dibuang tanpa pernah ditulis.
+                            # plc_trigger: NG di SATU percobaan bukan vonis akhir.
+                            # Simpan bukti percobaan TERAKHIR saja (ditimpa tiap retry).
                             self._last_ng_evidence = {
                                 "frame": frame, "worst_score": worst_score,
                                 "roi_results": roi_results,
                                 "avg_latency": avg_latency,
                             }
                         elif self._pc_active_for_overlay:
-                            # Continuous + Part Check aktif: part yang sama
-                            # masih mungkin ada di gate di frame berikutnya —
-                            # NG di sini BUKAN vonis akhir. Simpan bukti
-                            # percobaan TERAKHIR saja; baru benar-benar
-                            # ditulis kalau part akhirnya hilang dari gate
-                            # tanpa pernah OK (pc_blocked, lihat blok di
-                            # atas). Kalau nanti ketemu OK, bukti ini
-                            # dibuang tanpa pernah ditulis (lihat cabang OK).
+                            # Continuous + gate aktif: part yang sama masih mungkin
+                            # di gate → simpan bukti terakhir, tulis saat gate turun.
                             self._last_ng_evidence = {
                                 "frame": frame, "worst_score": worst_score,
                                 "roi_results": roi_results,
                                 "avg_latency": avg_latency,
                             }
                         else:
-                            # Part Check nonaktif (cooldown murni) — tidak
-                            # ada sinyal "part hilang dari gate" untuk
-                            # dijadikan titik tunda, jadi simpan langsung
-                            # seperti semula (satu frame = satu vonis).
+                            # Part Check nonaktif (cooldown murni) — tak ada sinyal
+                            # "part hilang" untuk menunda, jadi simpan langsung.
                             self._save_ng_evidence(
                                 frame, worst_score, roi_results, avg_latency)
 
-            # ── Siklus trigger: OK BENAR-BENAR menilai → lepas freeze tanpa
-            # fault. NG TIDAK menutup siklus di sini — biarkan retry sampai
-            # OK ketemu atau _on_trigger_timeout yang menutupnya. ──
+            # ── Siklus trigger: OK = lepas freeze tanpa fault. NG TIDAK menutup
+            # siklus — retry sampai OK ketemu atau _on_trigger_timeout. ──
             if (self._trigger_cycle_active and is_trigger_result
                     and raw_judgement == "OK"):
                 self._finish_trigger_cycle()
 
-            # ── Cycle delay: jeda antar siklus inspeksi ──
-            # Continuous + produksi nyata saja. Replay video (Tugas 6a) &
-            # plc_trigger: timing bukan milik aplikasi (lihat _arm_cycle_delay).
+            # ── Cycle delay: continuous + produksi nyata saja. Replay &
+            # plc_trigger: timing bukan milik aplikasi (_arm_cycle_delay). ──
             self._arm_cycle_delay()
-
-            # Diagnostics latency
-            self._diagnostics_page.update_performance(
-                0, 0, 0,
-                self._inference_engine.latency_avg_ms,
-                self._inference_engine.latency_p95_ms,
-            )
 
             # Simpan gambar + riwayat SQLite di-throttle (mahal) tiap 30 frame OK
             # — hanya untuk produksi nyata; replay video memakai jalur export sendiri.
@@ -1662,9 +1438,8 @@ class MainWindow(QMainWindow):
                                       'template': self._active_template,
                                       'template_name': self._active_partname},
                     })
-                    # Push PG TIDAK di sini — sampling 1-dari-30 ini khusus
-                    # penyimpanan gambar+history lokal (mahal di disk).
-                    # PostgreSQL menerima SETIAP part OK, di blok verdict OK.
+                    # Sampling 1-dari-30 ini khusus simpan gambar+history lokal.
+                    # Push PG bukan di sini — PG terima SETIAP part OK.
 
         except Exception as e:
             logger.warning("Inference result error: %s", e)
@@ -1680,25 +1455,8 @@ class MainWindow(QMainWindow):
                 or self._current_user.get("username", ""))
 
     def _build_push_entry(self, score: float) -> dict:
-        """Bangun kwargs untuk ``PostgresDB.push_inspection`` — 5 kolom saja.
-
-        Tabel `qc_inspection_push` adalah skema milik sistem produksi, dan
-        hanya menerima hasil OK dari operator view. Yang dikirim:
-
-          partname    nama template aktif
-          datecheckmc waktu INSPEKSI (diambil di sini, bukan saat insert —
-                      kalau PG mati dan outbox menumpuk, memakai jam insert
-                      akan menggeser semua baris tertunda ke waktu pulih)
-          mpcheck     MP/ManPower = nama akun operator yang login. BUKAN
-                      verdict: tabel ini hanya berisi OK, jadi verdict-nya
-                      tersirat. (Kode lama mengisinya dengan OK/NG — itu
-                      salah baca arti kolomnya.)
-          data1       skor part-check
-          data2       skor ROI penentu
-
-        Gambar, threshold, latensi, verdict, dan koreksi TIDAK dikirim —
-        semuanya tersimpan lengkap di SQLite lokal.
-        """
+        """Bangun kwargs `PostgresDB.push_inspection` — 5 kolom: partname, datecheckmc
+        (waktu INSPEKSI), mpcheck (akun operator), data1/data2 (skor)."""
         operator = ""
         if self._current_user:
             operator = (self._current_user.get("display_name")
@@ -1720,13 +1478,8 @@ class MainWindow(QMainWindow):
         }
 
     def _push_inspection_async(self, entry: dict) -> None:
-        """Enqueue hasil inspeksi ke outbox SQLite, lalu flush ke PostgreSQL (C3).
-
-        Outbox tahan-restart: bila PG/jaringan bermasalah, entry tetap
-        tersimpan dan di-retry oleh ``_flush_pg_outbox`` (dipanggil dari
-        thread ini, QTimer 30 detik, dan saat startup). Hasil tidak pernah
-        hilang diam-diam.
-        """
+        """Enqueue hasil ke outbox SQLite lalu flush ke PG. Outbox tahan-restart:
+        entry di-retry oleh _flush_pg_outbox, tidak pernah hilang diam-diam."""
         if not self._pg.is_enabled:
             return
         try:
@@ -1737,12 +1490,8 @@ class MainWindow(QMainWindow):
         threading.Thread(target=self._flush_pg_outbox, daemon=True).start()
 
     def _flush_pg_outbox(self) -> None:
-        """Kirim batch outbox ke PostgreSQL; sukses → hapus (nol duplikat).
-
-        Satu worker + batch berbatas (PRD R4): tidak ada satu koneksi per
-        frame, tidak ada thread menumpuk. Antrian bounded: bila membengkak,
-        entry tertua dibuang dan dicatat.
-        """
+        """Kirim batch outbox ke PG; sukses → hapus (nol duplikat). Satu worker,
+        batch berbatas, antrian bounded (yang tertua dibuang + dicatat)."""
         if not self._pg.is_enabled:
             return
         try:
@@ -1783,11 +1532,8 @@ class MainWindow(QMainWindow):
             ts = time.strftime("%Y%m%d_%H%M%S")
             img_dir = self._data_dir / "inspection_images"
             img_dir.mkdir(parents=True, exist_ok=True)
-            # JPG, bukan PNG. Terukur di frame 1920x1080:
-            #   PNG    148,9 ms · 4,49 MB
-            #   JPG 90  18,5 ms · 0,81 MB   ← 8x lebih cepat, 5,5x lebih kecil
-            # Selisih kualitasnya tidak berarti untuk tuning/koreksi, sementara
-            # 149 ms di GUI thread ikut menunda tampilan & pembacaan frame.
+            # JPG, bukan PNG — terukur di 1080p: 18,5 ms/0,81 MB vs 148,9 ms/4,49 MB.
+            # Selisih kualitas tak berarti untuk tuning; 149 ms di GUI thread berat.
             fname = f"{ts}_{uuid.uuid4().hex[:8]}.jpg"
             dest = img_dir / fname
             # Tulis di thread background — GUI thread tidak menunggu disk.
@@ -1824,16 +1570,8 @@ class MainWindow(QMainWindow):
 
     def _save_ng_evidence(self, frame, worst_score: float, roi_results: list,
                            avg_latency: float):
-        """Simpan bukti NG (gambar + entry SQLite) untuk tuning.
-
-        Diekstrak dari _on_inference_result (2026-09-02) supaya bisa dipakai
-        dari dua jalur: NG langsung (continuous/non-trigger, satu frame =
-        satu vonis) dan NG hasil retry mode plc_trigger (dipanggil dari
-        _finish_trigger_cycle saat timeout, pakai bukti percobaan terakhir
-        yang disimpan di _last_ng_evidence). NG TIDAK dikirim ke PostgreSQL —
-        tabel produksi di sana hanya menampung hasil OK; bukti cacat (gambar,
-        skor per ROI, threshold, koreksi) tetap lengkap di SQLite lokal.
-        """
+        """Simpan bukti NG (gambar + entry SQLite) untuk tuning. Dipakai jalur NG
+        langsung & NG hasil retry trigger. NG TIDAK dikirim ke PostgreSQL."""
         img_path = self._save_inspection_frame(
             frame, "NG", worst_score, roi_results, avg_latency)
         roi_region = json.dumps([{
@@ -1841,9 +1579,8 @@ class MainWindow(QMainWindow):
             "width": r["roi"][2], "height": r["roi"][3],
             "label": r.get("label", f"ROI{i + 1}"),
             "score": r["score"], "judgement": r["judgement"],
-            # Threshold per ROI ikut disimpan: kolom `threshold` di tabel
-            # hanya muat SATU nilai, sedangkan tiap ROI bisa punya ambang
-            # sendiri. Tanpa ini, entry lama tidak bisa ditelusuri.
+            # Threshold per ROI ikut disimpan — kolom `threshold` cuma muat SATU
+            # nilai, padahal tiap ROI bisa punya ambang sendiri.
             "threshold": r.get("threshold"),
             "margin": r.get("margin"),
         } for i, r in enumerate(roi_results)])
@@ -1864,10 +1601,8 @@ class MainWindow(QMainWindow):
             },
         })
 
-    # CATATAN: _on_ng_interval_tick() dan timernya DIHAPUS. Fungsi itu
-    # menambah counter NG tiap tick selama anomali bertahan — yang diukur
-    # DURASI kondisi NG, bukan jumlah part NG. Penggantinya adalah
-    # _should_count_part(): satu part = satu hitungan, sama untuk OK dan NG.
+    # _on_ng_interval_tick() + timernya DIHAPUS (mengukur DURASI NG, bukan jumlah).
+    # Penggantinya _should_count_part(): satu part = satu hitungan.
 
     def _on_cycle_delay_tick(self):
         """Cycle delay timer tick — ready for next inspection cycle."""
@@ -1897,13 +1632,8 @@ class MainWindow(QMainWindow):
             logger.warning("Part check config save error: %s", e)
 
     def _on_training_config_changed(self):
-        """Save Training Profile UI state (algorithm/backbone/coreset) to
-        template config. Training itself always rebuilds the model from all
-        images in the template's folder (see TrainingPipeline.train) — so
-        there's no incremental-learning corruption risk from switching
-        backbone. The only thing worth flagging is that the model file
-        currently on disk still reflects the OLD setting until the user
-        clicks TRAIN again."""
+        """Simpan state Training Profile ke config template. Model di disk masih
+        memakai setelan LAMA sampai user menekan TRAIN lagi."""
         if not self._active_template:
             return
         updates = self._teach_page.get_training_config()
@@ -1911,11 +1641,8 @@ class MainWindow(QMainWindow):
             old_cfg = self._pm.get_template_config(
                 self._active_program, self._active_template)
 
-            # Pengaman input_size: mengubah ukuran input pada template yang
-            # sudah punya model membuat model itu TIDAK valid (skala skor
-            # PatchCore beda tiap ukuran, norm.json tidak cocok). Minta
-            # konfirmasi SEBELUM menyimpan. Config lama tanpa field
-            # input_size (=256, nilai bawaan) tidak dianggap berubah.
+            # Ubah input_size pada template bermodel = model jadi TIDAK valid
+            # (norm.json tak cocok) → minta konfirmasi SEBELUM menyimpan.
             old_input = int(old_cfg.get("input_size", 256) or 256)
             new_input = int(updates.get("input_size", 256) or 256)
             input_changed = old_cfg.get("trained") and old_input != new_input
@@ -1931,15 +1658,8 @@ class MainWindow(QMainWindow):
                     self._teach_page.set_training_config(old_cfg)
                     return
 
-            # Field penentu model berbeda per algoritma — ikuti apa yang
-            # benar-benar berlaku di TEACH page:
-            #   yolo                  → yolo_pretrained (backbone disembunyikan
-            #                           di UI dan nilainya sisa PatchCore)
-            #   patchcore/efficientad → backbone
-            # Sebelum ini `backbone` selalu dibandingkan: template YOLO bisa
-            # ditandai "perlu latih ulang" gara-gara field yang tidak dipakai,
-            # sementara ganti yolo_pretrained (yang BENAR-BENAR mengubah model)
-            # justru lolos tanpa penanda.
+            # Field penentu model beda per algoritma: yolo → `yolo_pretrained`,
+            # patchcore/efficientad → `backbone` (ikuti yang berlaku di TEACH).
             old_algo = str(old_cfg.get("algorithm", "") or "").lower()
             new_algo = str(updates.get("algorithm", "") or "").lower()
             model_fields = ["algorithm"]
@@ -1970,9 +1690,8 @@ class MainWindow(QMainWindow):
             logger.warning("Training config save error: %s", e)
 
     def _on_augmentation_config_changed(self):
-        """Save Augmentasi Data UI state to template config. Actual generation
-        happens on the next TRAIN click (training_worker._do_training) — this
-        just persists what should be generated, mirroring _on_training_config_changed."""
+        """Simpan state Augmentasi Data ke config template — generasi sesungguhnya
+        baru jalan saat TRAIN berikutnya (training_worker._do_training)."""
         if not self._active_template:
             return
         updates = self._teach_page.get_augmentation_config()
@@ -2099,14 +1818,12 @@ class MainWindow(QMainWindow):
     # ---- Programs / Templates ----
 
     def _new_template_defaults(self) -> dict:
-        """Config overrides seeded into a newly created template, sourced
-        from the global Settings 'Model' section. Settings no longer edits
-        existing templates directly — per-template tuning lives in the
-        Training Profile panel on the TEACH tab."""
+        """Config awal template baru — semua tuning model per-template diatur lewat
+        Training Profile di tab TEACH; ini hanya titik mulai."""
         return {
-            "algorithm": self._config.get("model.algorithm", "patchcore"),
-            "backbone": self._config.get("model.backbone", "resnet18"),
-            "input_size": self._config.get("model.input_size", 256),
+            "algorithm": "yolo",
+            "backbone": "resnet18",
+            "input_size": 256,
         }
 
     def _init_programs(self):
@@ -2132,10 +1849,8 @@ class MainWindow(QMainWindow):
                     self._active_template = templates[0]["id"]
                     self._pm.set_active_template(self._active_program, self._active_template)
 
-        # Cache nama template untuk push PostgreSQL (partname). Saat startup
-        # _active_template di-set langsung tanpa lewat _activate_template, jadi
-        # _active_partname harus di-isi di sini — kalau tidak, push memakai
-        # fallback nama program ("Default") alih-alih nama template.
+        # Cache nama template untuk push PG (partname) — saat startup
+        # _active_template di-set tanpa lewat _activate_template.
         if self._active_template:
             _tc = self._pm.get_template_config(
                 self._active_program, self._active_template)
@@ -2147,20 +1862,11 @@ class MainWindow(QMainWindow):
         logger.info("Active program: %s, template: %s", self._active_program, self._active_template)
 
     # ══════════════════════ PLC — FX Computer Link ══════════════════════
-    # Protokol yang sama dengan GX Works2, lewat port pemrograman FX.
-    # Nomor coil di "plc.io_map" dipakai langsung sebagai nomor relay M
-    # (coil 1 → M1), jadi ladder dan config memakai penomoran yang sama.
-    #
-    # MODBUS tidak dipakai: FX3U menuntut adaptor -MB khusus, dan pada unit
-    # yang tidak memilikinya D8400/D8401 tetap nol berapa kali pun
-    # di-power-cycle. Jalur FX terbukti bekerja di lapangan.
+    # Jalur GX Works2; nomor coil io_map = nomor relay M (coil 1 → M1).
 
     def _build_plc_config(self) -> dict:
-        """Konfigurasi PLC dari Config → dict untuk FXPLCManager.
-
-        Format serial TIDAK disertakan: fxplc mengunci 7E1 (format port
-        pemrograman FX). Hanya baudrate yang bisa diatur.
-        """
+        """Konfigurasi PLC dari Config → dict untuk FXPLCManager. Format serial tidak
+        disertakan: fxplc mengunci 7E1, hanya baudrate yang bisa diatur."""
         return {
             "port": self._config.get("plc.port", "COM1"),
             "baudrate": self._config.get("plc.baudrate", 9600),
@@ -2185,10 +1891,8 @@ class MainWindow(QMainWindow):
             logger.error("PLC init error: %s", e)
             return
         self._plc_link.set_on_status_change(self._on_plc_status_change)
-        # WAJIB: tanpa ini _monitor_source di halaman I/O tetap None, sehingga
-        # I/O Monitor tidak pernah polling (selalu "unknown") dan tombol uji
-        # tulis tidak akan pernah hidup. Dipasang SEBELUM connect() supaya
-        # halaman sudah punya sumbernya saat status pertama diumumkan.
+        # WAJIB dipasang SEBELUM connect() — tanpa ini _monitor_source tetap None
+        # dan I/O Monitor selalu "unknown" + tombol uji tulis mati.
         try:
             self._io_page.set_monitor_source(self._plc_link)
         except Exception as e:
@@ -2203,11 +1907,8 @@ class MainWindow(QMainWindow):
     def _start_plc_polling(self):
         if self._plc_poll_timer is None:
             self._plc_poll_timer = QTimer(self)
-            # 2 Hz. Satu siklus poll FX terukur ±42 ms (borongan baca +
-            # tulis heartbeat) dan berjalan SINKRON di thread GUI; di 200 ms
-            # itu memakan seperlima waktu GUI. Di rancangan self-trigger tak
-            # ada input yang mendesak — trigger datang dari tahap 1, sisanya
-            # dipicu manusia.
+            # 2 Hz: satu siklus poll FX ±42 ms dan SINKRON di thread GUI.
+            # Tak ada input mendesak (trigger datang dari tahap 1).
             self._plc_poll_timer.setInterval(500)
             self._plc_poll_timer.timeout.connect(self._on_plc_poll_tick)
         self._plc_poll_timer.start()
@@ -2217,13 +1918,8 @@ class MainWindow(QMainWindow):
             self._plc_poll_timer.stop()
 
     def _start_plc_reconnect(self):
-        """Timer pemulihan koneksi PLC.
-
-        Dibutuhkan karena circuit breaker di FXPLCManager memutus
-        komunikasi begitu PLC berhenti menjawab — tanpa timer ini, koneksi
-        tidak akan pernah pulih sendiri sampai aplikasi di-restart.
-        Manager yang menahan lajunya; tick di sini murah kalau belum waktunya.
-        """
+        """Timer pemulihan koneksi PLC — circuit breaker FXPLCManager memutus saat PLC
+        diam, tanpa timer ini koneksi tak pernah pulih sampai restart."""
         if self._plc_reconnect_timer is None:
             self._plc_reconnect_timer = QTimer(self)
             interval = max(1.0, float(
@@ -2248,10 +1944,8 @@ class MainWindow(QMainWindow):
     def _on_plc_status_change(self, connected: bool):
         """Status PLC berubah — update label di RUN page + mulai/henti poll."""
         try:
-            # Blueprint §T6/Fase 4: bedakan "port terbuka" dari "PLC menjawab".
-            # Callback dipanggil SETELAH transport ditutup pada jalur gagal,
-            # jadi port_open=False di sini berarti benar-benar tidak ada
-            # jalur serial — bukan sekadar PLC diam.
+            # Bedakan "port terbuka" dari "PLC menjawab": port_open=False di sini
+            # berarti benar-benar tidak ada jalur serial, bukan PLC diam.
             port_open = bool(
                 self._plc_link is not None and self._plc_link.port_open)
             self._run_page.set_plc_status(connected, port_open)
@@ -2266,9 +1960,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         if connected:
-            # Bersihkan coil hasil saat koneksi terbentuk. Kalau aplikasi mati
-            # setelah menulis hasil, coil itu tetap ON di PLC — tanpa reset,
-            # part pertama setelah restart akan dibaca memakai vonis lama.
+            # Bersihkan coil hasil saat konek — coil tetap ON kalau aplikasi mati
+            # setelah menulis, dan part pertama setelah restart pakai vonis lama.
             try:
                 if self._plc_link:
                     self._plc_link.reset_outputs()
@@ -2311,13 +2004,8 @@ class MainWindow(QMainWindow):
 
     def _on_plc_poll_tick(self):
         """Poll input PLC tiap 500 ms — deteksi trigger/reset/switch program."""
-        # Heartbeat dievaluasi SETIAP tick, di atas guard tab (blueprint §T4 /
-        # Fase 2): satu-satunya tempat definisi "sistem sehat" hidup adalah di
-        # dalam _tick_heartbeat itu sendiri — dan menurut Keputusan A,
-        # kemampuan menginspeksi memang bagian dari definisi itu (lihat
-        # can_inspect di sana). Dulu pemanggilannya di bawah guard sehingga
-        # sesi admin membuat evaluasi kesehatan tidak pernah jalan sama
-        # sekali — keputusan sehat/tidak jadi implisit pada posisi kode.
+        # Heartbeat dievaluasi SETIAP tick, di ATAS guard tab: definisi "sistem
+        # sehat" hidup di satu tempat (_tick_heartbeat), bukan di posisi kode.
         self._tick_heartbeat()
         # Bacaan input hanya relevan saat mode RUN — tab lain tidak memakai
         # hasilnya (sinkronisasi coil busy pun ikut di bawah guard ini).
@@ -2339,14 +2027,11 @@ class MainWindow(QMainWindow):
             self._on_plc_trigger()
         if events.get("reset_result"):
             self._on_plc_reset()
-        # Ganti TEMPLATE aktif. Satu cabang saja walau config lama memakai
-        # nama "switch_program" pada alamat yang sama — kalau dua-duanya ada
-        # di io_map, coil yang sama terbaca dua kali dan tanpa penggabungan
-        # ini handler akan terpanggil dobel.
+        # Ganti TEMPLATE aktif — satu cabang saja walau config lama pakai nama
+        # "switch_program" di alamat yang sama (kalau tidak, handler dobel).
         if events.get("switch_template") or events.get("switch_program"):
-            # Mode "cycle": PLC cukup punya satu tombol "next" — nomor
-            # template tidak perlu dikirim sama sekali. Register hanya dibaca
-            # kalau memang mode "register".
+            # Mode "cycle": PLC cukup satu tombol "next", nomor template tidak
+            # perlu dikirim. Register hanya dibaca di mode "register".
             if self._template_switch_mode() == "register":
                 num = self._plc_link.read_program_register()
                 if num is not None:
@@ -2357,37 +2042,14 @@ class MainWindow(QMainWindow):
             self._on_plc_ng()
 
     def _tick_heartbeat(self):
-        """TOGGLE coil heartbeat ±1 Hz selama sistem sehat.
-
-        Sengaja di-toggle, bukan di-ON-kan. Kalau aplikasi mati atau macet,
-        coil level akan tertinggal di nilai terakhirnya dan tampak normal;
-        yang berubah-ubah tidak bisa dipalsukan oleh proses yang berhenti.
-        Ladder memantau PERUBAHANnya: tidak berubah > N detik = sistem rusak.
-
-        "Sehat" = sistem SEDANG bisa menginspeksi (Keputusan A, blueprint
-        §5): operator di tab RUN + model termuat + kamera benar-benar
-        mem-polling frame. Tanpa itu, tidak ada yang mungkin menghasilkan
-        vonis — dan tanpa heartbeat, PLC akan membaca keadaan itu sebagai
-        part cacat beruntun, lalu membuang seluruh produksi bagus tanpa ada
-        yang tahu sebabnya.
-        """
-        # Dipanggil dari _on_plc_poll_tick SEBELUM guard tab/koneksi.
-        # Pasca-Keputusan A hasilnya sama saja bila dipanggil di bawah guard
-        # (can_inspect sudah memuat syarat tab), tapi dipangkatkan ke atas
-        # dengan sengaja: DEFINISI "sistem sehat" hidup di SATU tempat saja
-        # (_tick_heartbeat), tidak tersebar antara susunan pemanggilan dan
-        # isi fungsi. Tanpa cek link ini, panggilan pertama setelah PLC
-        # hilang akan meledak di AttributeError (link None) atau menulis ke
-        # port yang sudah dilepas circuit breaker.
+        """TOGGLE (bukan ON) coil heartbeat ±1 Hz selama sistem sehat — level yang diam
+        bisa dipalsukan proses mati. "Sehat" = SEDANG bisa menginspeksi."""
+        # Dipanggil SEBELUM guard tab/koneksi — cek link di sini wajib, kalau
+        # tidak panggilan pertama setelah PLC hilang meledak AttributeError.
         if self._plc_link is None or not self._plc_link.is_connected:
             return
-        # Keputusan A (blueprint §5): heartbeat berarti "sistem SEDANG bisa
-        # menginspeksi". Tab RUN disembunyikan untuk admin (_apply_role_visibility)
-        # → inferensi mustahil jalan (_on_frame_for_inference hanya melayani
-        # tab 0) → PLC TIDAK BOLEH diberi tahu sehat. Dulu hanya cek model +
-        # kamera, sehingga sesi admin teaching/training berpuluh menit tetap
-        # "sehat" di mata ladder — persis mode gagal T3: part lewat tanpa ada
-        # yang memvonis, tapi lampu fault tidak menyala.
+        # Heartbeat = "sistem SEDANG bisa menginspeksi". Tab RUN tersembunyi
+        # (sesi admin) → inferensi mustahil → PLC TIDAK boleh dibilang sehat.
         can_inspect = self._tabs.currentIndex() == 0
         healthy = bool(
             can_inspect
@@ -2407,27 +2069,16 @@ class MainWindow(QMainWindow):
             logger.debug("Heartbeat write gagal: %s", e)
 
     def _on_plc_ng(self):
-        """PLC memvonis NG (tidak ada OK dalam jendela waktunya).
-
-        Dua hal yang dilakukan:
-        1. Tambah counter NG — inilah SATU-SATUNYA sumber counter NG sekarang,
-           supaya angka di layar tidak pernah berbeda dari lampu. Vonis NG
-           model sendiri sengaja tidak menghitung; kalau keduanya menghitung,
-           satu part terhitung dua kali.
-        2. Bersihkan state siklus → siap menerima trigger part berikutnya.
-           Part yang ini sudah ditolak PLC; tidak ada yang perlu diperiksa
-           ulang (kalau sistem ikut infer ulang, NG berikutnya memicu NG lagi
-           dan jadi lingkaran tanpa henti).
-        """
+        """PLC memvonis NG: tambah counter NG (SATU-SATUNYA sumbernya, supaya cocok
+        dengan lampu) + bersihkan state siklus untuk part berikutnya."""
         if self._replay_test_mode:
             return          # replay uji: jangan sentuh counter produksi
         self._inspection_ng += 1
         self._run_page.update_counters(self._inspection_ok, self._inspection_ng)
         self._run_page.update_judgement("NG", self._last_worst_score)
         self._run_page.set_status_message("PLC: NG — siap part berikutnya")
-        # Siklus dianggap tuntas: lepas freeze, matikan batas waktu, buang
-        # trigger yang mungkin masih tertunda supaya tidak "bocor" ke part
-        # berikutnya.
+        # Siklus tuntas: lepas freeze, matikan batas waktu, buang trigger
+        # tertunda supaya tidak "bocor" ke part berikutnya.
         self._plc_trigger_pending = False
         self._gate_rejected = False
         if self._trigger_cycle_active:
@@ -2463,19 +2114,8 @@ class MainWindow(QMainWindow):
         return m if m in ("cycle", "register") else "cycle"
 
     def _on_plc_switch_template(self, template_number: Optional[int] = None):
-        """IN switch template — ganti TEMPLATE aktif.
-
-        `template_number=None` → mode "cycle": MAJU satu template, dan
-        kembali ke template pertama setelah yang terakhir. PLC cukup punya
-        satu tombol "next"; tidak perlu mengirim nomor.
-
-        `template_number=N` → mode "register": langsung ke template ke-N
-        (1 = template pertama, urutannya sama dengan daftar di TEACH).
-
-        Ganti template = ganti model, jadi ditolak saat siklus trigger sedang
-        berjalan — kalau tidak, vonis bisa keluar dari model yang berbeda
-        dengan frame yang dinilai.
-        """
+        """IN switch template. `None` → mode "cycle" (maju 1, memutar); `N` → mode
+        "register" (langsung ke ke-N). Ditolak saat siklus trigger berjalan."""
         try:
             if self._trigger_cycle_active:
                 logger.warning(
@@ -2535,50 +2175,13 @@ class MainWindow(QMainWindow):
         """I/O behaviour mode aktif (dari config plc.io_mode, selalu lengkap)."""
         return build_io_mode(self._config.get("plc"))
 
-    # ---- YOLO class filter (Fase D) ----
-
-    def _yolo_cfg(self) -> dict:
-        cfg = self._config.get("yolo")
-        return cfg if isinstance(cfg, dict) else {}
-
-    def _ensure_yolo_detector(self):
-        """Lazy-load YOLODetector dari config yolo.model_path (None bila gagal)."""
-        if self._yolo_det is not None:
-            return self._yolo_det
-        cfg = self._yolo_cfg()
-        path = str(cfg.get("model_path") or "").strip()
-        if not cfg.get("enabled") or not path:
-            return None
-        try:
-            det = YOLODetector(path)
-            if not det.available:
-                logger.warning("YOLO filter nonaktif: %s", det.error)
-                return None
-            self._yolo_det = det
-            logger.info(
-                "YOLO filter aktif: %s | kelas: %s | min_conf: %s",
-                path, cfg.get("expected_classes"), cfg.get("min_conf"))
-        except Exception as e:
-            logger.warning("YOLO load error: %s", e)
-            return None
-        return self._yolo_det
-
     #: Periode toggle heartbeat. Ladder harus memakai ambang beberapa kali
     #: nilai ini (mis. 5 dtk) supaya jitter polling tidak memicu alarm palsu.
     _HEARTBEAT_PERIOD_SEC = 1.0
 
     def _publish_result(self, judgement: str):
-        """Publikasi hasil OK ke PLC sesuai `plc.io_mode.output_mode`.
-
-        HANYA "OK" yang boleh dikirim. NG diputuskan PLC dari KETIADAAN sinyal
-        OK dalam jendela waktunya sendiri — mengirim NG dari sini akan
-        menduakan sumber keputusan.
-
-        - one_shot: pulse — tunda `one_shot_delay_ms`, lalu ON selama
-          `one_shot_on_time_ms`.
-        - latching: coil di-hold sebagai LEVEL sampai hasil berikutnya.
-        PLC yang memegang timing antar part; aplikasi hanya melapor OK.
-        """
+        """Publikasi hasil OK ke PLC (one_shot = pulse, latching = LEVEL). HANYA "OK"
+        yang boleh dikirim — NG diputuskan PLC dari ketiadaan sinyal OK."""
         # SAFETY: saat replay video (mode uji), TIDAK PERNAH menulis ke PLC —
         # video uji jangan sampai menyalakan actuator reject/accept di lini nyata.
         if self._replay_test_mode:
@@ -2586,9 +2189,8 @@ class MainWindow(QMainWindow):
         if not self._plc_link or not self._plc_link.is_connected:
             return
         if judgement != "OK":
-            # Penjaga terakhir: kalau ada jalur lama yang masih memanggil
-            # dengan "NG", jangan diteruskan — cukup dicatat supaya jalur itu
-            # bisa ditemukan dan dibersihkan.
+            # Penjaga terakhir: jalur lama yang memanggil dengan "NG" jangan
+            # diteruskan — cukup dicatat supaya bisa ditemukan & dibersihkan.
             logger.warning(
                 "_publish_result('%s') diabaikan — sistem hanya mengirim OK; "
                 "NG adalah wewenang PLC.", judgement)
@@ -2606,12 +2208,8 @@ class MainWindow(QMainWindow):
             self._publish_latching(judgement)
 
     def _log_publish(self, coil_name: str, ok: bool):
-        """Satu baris INFO per vonis — jejak audit jalur aplikasi → PLC.
-
-        Insiden "OK tidak sampai ke PLC" (blueprint §T7) butuh berjam-jam
-        karena jalur ini tidak meninggalkan jejak: history SQLite mencatat
-        vonis model, tapi TIDAK membuktikan pulse benar tertulis ke coil.
-        """
+        """Satu baris INFO per vonis — jejak audit jalur aplikasi → PLC. History SQLite
+        mencatat vonis model, tapi tidak membuktikan pulse tertulis ke coil."""
         logger.info(
             "Vonis OK → coil %s (%s) [template=%s]",
             coil_name,
@@ -2650,13 +2248,7 @@ class MainWindow(QMainWindow):
 
     def _plc_pulse(self, name: str):
         """Pulse coil output tanpa memblokir UI: ON → QTimer singleShot → OFF.
-
-        Diagnostik (2026-09-02): tidak seperti _publish_result yang punya
-        _log_publish, fungsi ini dulu SAMA SEKALI tidak meninggalkan jejak —
-        insiden "part_ready terkirim tapi towerlamp diam" tidak bisa
-        dibuktikan dari log mana pun. Baris log di bawah murni observasi,
-        tidak mengubah perilaku pulse itu sendiri.
-        """
+        Log di bawah murni observasi, tidak mengubah perilaku pulse."""
         if self._replay_test_mode:
             return  # safety: replay video — jangan sentuh PLC
         if not self._plc_link or not self._plc_link.is_connected:
@@ -2672,23 +2264,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(ms, lambda: self._safe_plc_output_off(name))
 
     def _plc_reset_session(self):
-        """Opt-in (`plc.reset_on_run_entry`): minta ladder bersihkan state
-        basi sesi sebelumnya — pulse `session_reset` (M9).
-
-        Dipanggil di TIGA titik batas sesi: operator masuk RUN
-        (`_apply_role_visibility`), logout (`_on_logout`), dan keluar
-        aplikasi (`closeEvent`, sebelum `_shutdown_plc()` memutus koneksi —
-        setelah disconnect, pulse ini tidak akan sampai ke PLC).
-
-        SENGAJA tidak ada guard "sedang di tengah siklus?" di sisi sini:
-        ladder yang menjaga lewat kontak `/M100` (M9 diabaikan kalau M100
-        ON), supaya satu-satunya sumber kebenaran soal "aman untuk direset"
-        tetap PLC, bukan tebakan aplikasi lewat race read-then-write. Kalau
-        app tertutup/logout tepat di tengah siklus, PLC tetap menuntaskan
-        sendiri (T0 jalan terus tanpa app) — reset berikutnya (login lagi)
-        yang akan membersihkannya.
-        Lihat blueprint .claude/blueprint/kenapa-ok-tidak-sampai-plc.md.
-        """
+        """Opt-in (`plc.reset_on_run_entry`): pulse `session_reset` (M9) di tiap batas
+        sesi. Tanpa guard siklus — ladder yang menjaga lewat kontak /M100."""
         if not self._config.get("plc.reset_on_run_entry", False):
             return
         self._plc_pulse("session_reset")
@@ -2720,12 +2297,8 @@ class MainWindow(QMainWindow):
                     info.get("stage"), info.get("ok"))
 
     def _on_plc_test_coil(self, name: str, value: bool):
-        """Uji tulis satu coil dari I/O Monitor (commissioning).
-
-        Sengaja memakai jalur yang SAMA dengan produksi (`set_output`) supaya
-        yang diuji benar-benar jalur yang dipakai nanti — bukan jalur khusus
-        yang bisa berperilaku beda.
-        """
+        """Uji tulis satu coil dari I/O Monitor (commissioning). Sengaja lewat jalur
+        yang SAMA dengan produksi (`set_output`)."""
         if self._plc_link is None or not self._plc_link.is_connected:
             self._io_page.set_test_result(name, value, False)
             self.set_status("PLC belum terhubung — uji tulis dibatalkan", 3000)
@@ -2808,8 +2381,7 @@ class MainWindow(QMainWindow):
             self._plc_link = None
 
     # ═══════════════════════════ Flask API (opsional) ═══════════════════════════
-    # REST API lokal di 127.0.0.1 untuk integrasi eksternal.
-    # Aktif hanya jika "Enable Flask API" di Settings dicentang.
+    # REST API lokal 127.0.0.1; aktif hanya kalau dicentang di Settings.
 
     def _init_flask(self):
         """Init FlaskAPI dari config saat startup. Bind HANYA 127.0.0.1."""
@@ -2978,10 +2550,8 @@ class MainWindow(QMainWindow):
                 self._current_all_rois = [r.rect() for r in enabled]
                 self._current_all_roi_uids = [r.uid for r in enabled]
                 self._current_all_roi_labels = [r.label for r in enabled]
-                # Sejajar dengan list di atas — dipakai infer() supaya
-                # piksel di luar polygon dinolkan SAMA PERSIS seperti saat
-                # training (lihat roi_mask.py). None = ROI ini tidak
-                # bermask, infer() akan no-op untuk ROI itu.
+                # Dipakai infer() supaya piksel di luar polygon dinolkan SAMA
+                # PERSIS seperti saat training. None = ROI tanpa mask (no-op).
                 self._current_all_roi_mask_polygons = [r.mask_polygon for r in enabled]
             else:
                 self._current_roi = None
@@ -3008,14 +2578,8 @@ class MainWindow(QMainWindow):
                     self._active_program, self._active_template))
 
     def _count_all_images(self, label: str) -> int:
-        """Total gambar training untuk label ini — gabungan foto legacy
-        (images/<label>/, di-crop rata ke semua ROI saat training) + crop
-        per-ROI dari CaptureReviewDialog (images/<label>_per_roi/, sudah
-        benar per-ROI). Dipakai di mana pun butuh "berapa banyak data
-        OK/NG yang sebenarnya ada", bukan cuma folder lama — supaya
-        template yang datanya semua lewat review per-ROI (2+ ROI) tidak
-        salah dianggap "belum ada gambar OK" padahal folder legacy-nya
-        memang sengaja kosong."""
+        """Total gambar training label ini: foto legacy (images/<label>/) + crop per-ROI
+        (images/<label>_per_roi/) — template multi-ROI bisa punya legacy kosong."""
         if not self._active_template:
             return 0
         base = self._pm.count_template_images(
@@ -3048,17 +2612,8 @@ class MainWindow(QMainWindow):
     # ---- Capture ----
 
     def _maybe_review_and_save_per_roi(self, frame, default_label: str) -> bool:
-        """Kalau template ini punya 2+ ROI aktif, buka dialog review per-ROI
-        sebelum menyimpan — satu foto bisa punya kondisi campuran antar ROI
-        (mis. ROI1 OK, ROI2 NG), dan semua ROI berbagi satu memory
-        bank/model yang sama, jadi label yang salah pada satu ROI bisa
-        mencemari model yang dipakai ROI lain juga. Dengan 0-1 ROI tidak
-        ada ambiguitas untuk direview (foto = ROI itu sendiri).
-
-        Return True kalau ditangani di sini (baik tersimpan maupun
-        dibatalkan user) — caller harus langsung return. Return False
-        kalau caller harus lanjut pakai alur simpan foto-utuh yang lama.
-        """
+        """Template 2+ ROI aktif → buka review per-ROI sebelum simpan (satu foto bisa
+        campuran OK/NG). True = sudah ditangani di sini, caller harus return."""
         if len(self._current_all_rois) < 2:
             return False
 
@@ -3073,9 +2628,8 @@ class MainWindow(QMainWindow):
         # get_labeled_crops() SUDAH menyaring crop yang dibuang operator —
         # yang dibuang tidak pernah menyentuh disk.
         for roi, crop, lbl, mask_polygon in dialog.get_labeled_crops():
-            # Mask dibakar SEKARANG, sebelum disimpan — folder *_per_roi
-            # disalin apa adanya saat training (tidak di-crop ulang), jadi
-            # ini satu-satunya kesempatan mask diterapkan untuk jalur ini.
+            # Mask dibakar SEKARANG sebelum disimpan — folder *_per_roi disalin
+            # apa adanya saat training, jadi ini satu-satunya kesempatan.
             crop = apply_polygon_mask(crop, mask_polygon)
             self._pm.save_template_image(
                 self._active_program, self._active_template,
@@ -3098,12 +2652,8 @@ class MainWindow(QMainWindow):
         return True
 
     def _on_capture(self, label: str):
-        """Capture frame from camera — or in import mode, save current import image.
-
-        Full frame disimpan untuk ditampilkan di galeri (kecuali template
-        punya 2+ ROI, lihat _maybe_review_and_save_per_roi).
-        ROI cropping dilakukan saat training (lihat TrainingWorker).
-        """
+        """Capture frame kamera (atau simpan gambar import di mode import). Full frame
+        disimpan untuk galeri; ROI cropping baru dilakukan saat training."""
         # === IMPORT REVIEW MODE ===
         if self._is_import_mode:
             self._save_current_import_image(label)
@@ -3200,9 +2750,8 @@ class MainWindow(QMainWindow):
         self.set_status(f"Import: {current}/{total}", 2000)
 
     def _save_current_import_image(self, label: str):
-        """Save the current import image under 'ok' or 'ng' and advance.
-        Uses cached numpy array from _show_import_image to avoid re-reading disk.
-        Accumulates counts in memory for batch config update."""
+        """Simpan gambar import sekarang sebagai 'ok'/'ng' lalu maju. Pakai cache numpy
+        dari _show_import_image; counter diakumulasi di memori."""
         if self._import_cancelled:
             self._exit_import_mode()
             return
@@ -3214,9 +2763,8 @@ class MainWindow(QMainWindow):
         if img is not None:
             path = self._import_files[self._import_index]
             if self._maybe_review_and_save_per_roi(img, label):
-                # Tersimpan (atau dibatalkan) lewat review per-ROI — tidak
-                # pakai counter num_ok/num_ng batch import (per-ROI save
-                # selalu update_count=False, dihitung via glob folder saja).
+                # Tersimpan/dibatalkan lewat review per-ROI — tidak pakai counter
+                # num_ok/num_ng batch import (dihitung via glob folder).
                 pass
             else:
                 # Save to disk (batch mode — count diakumulasi dan ditulis sekali di akhir)
@@ -3290,9 +2838,8 @@ class MainWindow(QMainWindow):
     # ---- Test Model (batch foto statis) ----
 
     def _get_reference_resolution(self):
-        """Dimensi acuan (w, h) untuk cek resolusi foto uji — diambil dari
-        gambar OK asli template (dijamin sama dengan resolusi ROI digambar),
-        fallback ke config kamera kalau tidak ada gambar OK sama sekali."""
+        """Dimensi acuan (w, h) untuk cek resolusi foto uji — dari gambar OK asli
+        template, fallback ke config kamera kalau tidak ada."""
         if self._active_template:
             ok_images = self._pm.list_template_images(
                 self._active_program, self._active_template, "ok")
@@ -3306,10 +2853,8 @@ class MainWindow(QMainWindow):
         return (w, h) if w and h else None
 
     def _on_test_model(self):
-        """Uji model terhadap batch foto statis dari disk — sanity check
-        read-only. Bypass Part Presence gate/NG-debounce/cycle-delay (semua
-        itu soal kamera live), dan TIDAK ditulis ke inspection_history/
-        counter/PLC — murni untuk admin melihat apakah model bekerja baik."""
+        """Uji model terhadap batch foto statis — sanity check read-only. Bypass gate/
+        cycle-delay, TIDAK ditulis ke history/counter/PLC."""
         if not self._inference_engine.is_loaded:
             self.set_status("Model belum dimuat. Latih atau load model dulu.", 3000)
             return
@@ -3355,10 +2900,8 @@ class MainWindow(QMainWindow):
                     "width": roi_rect[2], "height": roi_rect[3],
                     "uid": (self._current_all_roi_uids[idx]
                             if idx < len(self._current_all_roi_uids) else None),
-                    # WAJIB sama dengan jalur RUN live (inference_worker.py) —
-                    # tanpa ini, "Test Model" akan menilai foto TANPA mask
-                    # padahal produksi sungguhan pakai mask, hasilnya
-                    # menyesatkan (skor tidak sebanding).
+                    # WAJIB sama dengan jalur RUN live — tanpa ini "Test Model"
+                    # menilai foto TANPA mask dan skornya tidak sebanding.
                     "mask_polygon": (self._current_all_roi_mask_polygons[idx]
                                      if idx < len(self._current_all_roi_mask_polygons)
                                      else None),
@@ -3413,12 +2956,8 @@ class MainWindow(QMainWindow):
     # ---- Test Model via Video Replay (jalur live — Opsi B) ----
 
     def _start_replay(self):
-        """Uji model via file video — replay lewat jalur live ("kamera virtual").
-        Semua logika live (part-check, loop ROI, debounce, overlay, YOLO)
-        berjalan persis seperti kamera asli, TAPI dengan _replay_test_mode=True:
-        PLC publish, counter produksi, dan history SQLite/PG di-bypass total.
-        Frame OK/NG diexport ke data/video_test_exports/<sesi>/ok|ng/ untuk
-        koreksi dataset (jawaban user #3)."""
+        """Uji model via file video lewat jalur live ("kamera virtual"). Semua logika
+        live jalan, tapi PLC/counter/history di-bypass (_replay_test_mode)."""
         if self._replay_test_mode:
             self.set_status("Replay sedang berjalan. Stop dulu.", 3000)
             return
@@ -3507,9 +3046,8 @@ class MainWindow(QMainWindow):
         self._replay_export_sample = 0
         self._last_replay_judgement = None
 
-        # ── Thread + worker replay (pola CameraThread; open() di GUI thread
-        # sebelum moveToThread agar VideoCapture dibuat di thread yang sama
-        # dengan pembaca) ──
+        # ── Thread + worker replay (pola CameraThread): open() di GUI thread
+        # sebelum moveToThread agar VideoCapture sethread dengan pembacanya ──
         self._replay_thread = QThread(self)
         self._replay_worker = VideoReplayWorker()
         try:
@@ -3556,13 +3094,8 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _release_probe(probe) -> None:
-        """Tutup VideoCapture milik worker probe.
-
-        ``deleteLater()`` saja TIDAK melepas handle file 1080p — capture
-        tetap terbuka sampai objek benar-benar dikumpulkan GC. Log
-        menunjukkan file video dibuka dua kali (probe + worker asli), jadi
-        yang probe harus ditutup eksplisit.
-        """
+        """Tutup VideoCapture milik worker probe — `deleteLater()` saja tidak melepas
+        handle file, jadi harus ditutup eksplisit."""
         try:
             probe.stop()
         except Exception:
@@ -3570,10 +3103,8 @@ class MainWindow(QMainWindow):
         probe.deleteLater()
 
     def _on_replay_frame_raw(self, frame):
-        """Slot frame replay → jalur infer live yang sama persis (Tugas 3:
-        submit ke worker async), lalu export + ack SETELAH hasil diproses.
-        Token replay TIDAK pernah hilang: kalau infer di-skip oleh guard
-        live (mis. cycle delay), ack dikirim manual di sini."""
+        """Slot frame replay → jalur infer live yang sama, lalu export + ack setelah
+        hasil diproses. Kalau infer di-skip guard, ack dikirim manual."""
         self._replay_awaiting_result = True
         submitted = self._on_frame_for_inference(frame)
         if not submitted:
@@ -3582,11 +3113,8 @@ class MainWindow(QMainWindow):
             self._replay_finish_if_pending()
 
     def _replay_finish_if_pending(self):
-        """Ack token replay bila ada infer yang masih menunggu hasil.
-
-        Dipanggil di SEMUA jalur keluar _on_inference_result (termasuk
-        early-return part-check/error) — dijamin token tidak pernah hilang.
-        """
+        """Ack token replay bila ada infer yang menunggu hasil. Dipanggil di SEMUA
+        jalur keluar _on_inference_result — token dijamin tidak hilang."""
         if not self._replay_awaiting_result:
             return
         self._replay_awaiting_result = False
@@ -3598,10 +3126,8 @@ class MainWindow(QMainWindow):
         hasil infer diproses di _on_inference_result (thread GUI)."""
         if not self._replay_test_mode:
             return  # sudah di-stop di tengah — jangan lanjutkan
-        # Export frame OK/NG (fitur koreksi dataset — jawaban user #3).
-        # TIDAK tiap frame (cv2.imwrite di GUI thread = berat): simpan saat
-        # judgement BERUBAH (transisi OK→NG / NG→OK = momen penting) +
-        # sampling tiap 10 frame untuk variasi OK/NG berkelanjutan.
+        # Export frame OK/NG untuk koreksi dataset — TIDAK tiap frame (imwrite
+        # berat): saat judgement BERUBAH + sampling tiap 10 frame.
         if self._replay_export_enabled and self._last_replay_result is not None:
             res = self._last_replay_result
             jdg = res["judgement"]
@@ -3618,10 +3144,8 @@ class MainWindow(QMainWindow):
                                  Qt.QueuedConnection)
 
     def _export_replay_frame(self, res: dict):
-        """Simpan frame hasil uji ke folder export OK/NG (sesi berjalan).
-
-        Tugas 6b: cv2.imwrite dipindah ke thread background — queue bounded;
-        kalau penuh, frame tertua dibuang (frame terbaru lebih penting)."""
+        """Simpan frame hasil uji ke folder export OK/NG. cv2.imwrite di thread
+        background; queue bounded — kalau penuh, frame tertua dibuang."""
         try:
             self._replay_export_counter += 1
             n = self._replay_export_counter
@@ -3634,12 +3158,8 @@ class MainWindow(QMainWindow):
             logger.warning("Replay export frame error: %s", e)
 
     def _enqueue_image_write(self, dest, frame, params=None) -> None:
-        """Antre tulis gambar ke disk (thread background).
-
-        Dipakai jalur inspeksi maupun export replay. Antrean BOUNDED: kalau
-        penuh, item tertua dibuang dan dicatat — lebih baik kehilangan satu
-        gambar daripada memblokir jalur inspeksi.
-        """
+        """Antre tulis gambar ke disk (thread background). Antrean BOUNDED: item tertua
+        dibuang — lebih baik kehilangan 1 gambar daripada memblokir inspeksi."""
         try:
             if self._export_queue.full():
                 try:
@@ -3685,11 +3205,8 @@ class MainWindow(QMainWindow):
             self._replay_worker.seek_to(frame_idx)
 
     def _on_replay_frame_step(self, n: int):
-        """Tugas 6a: cakupan uji — periksa 1 dari tiap N frame.
-
-        Boleh diubah saat replay berjalan; worker menerapkannya pada
-        pembacaan frame berikutnya (frame yang dilewati hanya di-grab,
-        tanpa decode penuh)."""
+        """Cakupan uji — periksa 1 dari tiap N frame. Boleh diubah saat replay jalan;
+        frame yang dilewati hanya di-grab (tanpa decode penuh)."""
         if self._replay_worker is not None:
             self._replay_worker.set_frame_step(int(n))
 
@@ -3724,11 +3241,8 @@ class MainWindow(QMainWindow):
             self._stop_replay()
 
     def _stop_replay(self):
-        """Cleanup menyeluruh sesi replay — dipanggil dari MANA PUN jalur
-        keluarnya (video selesai, stop manual, dialog ditutup, error).
-        WAJIB reset flag test-mode di sini: kalau lupa, PLC/counter/history
-        tetap mati setelah replay — itu sama berbahayanya dengan terpicu
-        palsu. Idempoten (aman dipanggil ganda)."""
+        """Cleanup menyeluruh sesi replay dari MANA PUN jalur keluarnya (idempoten).
+        WAJIB reset flag test-mode di sini, kalau lupa PLC/counter tetap mati."""
         if self._replay_worker is None and not self._replay_test_mode:
             return  # sudah bersih
         was_active = self._replay_test_mode
@@ -3769,9 +3283,8 @@ class MainWindow(QMainWindow):
             thread.quit()
             thread.wait(3000)
 
-        # Dialog: jangan di-close paksa — user boleh melihat ringkasan akhir.
-        # Tombol kontrol sudah di-disable via set_finished(); referensi
-        # dibersihkan saat dialog ditutup (closed signal).
+        # Dialog jangan di-close paksa — user boleh lihat ringkasan akhir.
+        # Tombol sudah di-disable via set_finished().
         if self._replay_dialog is not None:
             self._replay_dialog.set_finished()
 
@@ -3804,13 +3317,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Error", str(e))
 
     def _on_rename_template(self):
-        """Rename active template: folder + config.
-
-        Model OpenVINO di-unload dulu: folder berisi model.bin yang sedang
-        di-mmap — Windows menolak rename folder berisi file yang di-lock
-        proses sendiri (WinError 5 Access is denied, terutama di Windows
-        native). Setelah rename, model di-load ulang dari folder baru.
-        """
+        """Rename template aktif (folder + config). Model di-unload dulu — Windows
+        menolak rename folder berisi model.bin yang sedang di-mmap."""
         if not self._active_program or not self._active_template:
             QMessageBox.warning(self, "Rename Template",
                                 "Pilih template terlebih dahulu.")
@@ -3923,9 +3431,8 @@ class MainWindow(QMainWindow):
                 # OpenVINO model — load into inference engine
                 try:
                     self._inference_engine.load_model(model_path, threshold=threshold)
-                    # Threshold per ROI (dari config template) dipasang SETELAH
-                    # load_model — load_model membersihkannya supaya tidak
-                    # bocor dari template sebelumnya.
+                    # Threshold per ROI dipasang SETELAH load_model — load_model
+                    # membersihkannya supaya tidak bocor dari template sebelumnya.
                     self._inference_engine.set_roi_thresholds(
                         self._roi_thresholds_from_config(tmpl_cfg))
                     self._teach_page.set_threshold(threshold)
@@ -4006,13 +3513,8 @@ class MainWindow(QMainWindow):
         self._teach_page.get_roi_editor().select_roi(index)
 
     def _refresh_roi_panel(self, rois):
-        """Bangun ulang daftar ROI, seleksi dipertahankan lewat uid.
-
-        `_save_rois()` hanya menulis config — teks di daftar TIDAK ikut
-        diperbarui. Tanpa pemanggilan ini, mengubah threshold satu ROI (atau
-        mengembalikannya ke global) tidak terlihat sama sekali: barisnya
-        tetap menampilkan angka lama.
-        """
+        """Bangun ulang daftar ROI (seleksi dipertahankan lewat uid). `_save_rois()`
+        hanya menulis config — tanpa ini teks di daftar tidak ikut diperbarui."""
         editor = self._teach_page.get_roi_editor()
         sel = getattr(editor, "selected_roi", None)
         sel_idx = -1
@@ -4038,11 +3540,8 @@ class MainWindow(QMainWindow):
             3000)
 
     def _on_roi_mask_draw_requested(self, index: int):
-        """Tombol "Gambar Mask" di panel — mulai mode gambar polygon di
-        ROIEditor untuk ROI terpilih. Penyimpanan otomatis lewat
-        `rois_changed` (dipicu `_finish_drawing_mask()`), jalur yang sama
-        dengan drag/resize rectangle — tidak ada penulisan config baru
-        di sini."""
+        """Tombol "Gambar Mask" — mulai mode gambar polygon di ROIEditor untuk ROI
+        terpilih. Penyimpanan otomatis lewat `rois_changed`."""
         editor = self._teach_page.get_roi_editor()
         rois = editor.get_rois()
         if not (0 <= index < len(rois)):
@@ -4094,9 +3593,8 @@ class MainWindow(QMainWindow):
             self._teach_page.get_roi_editor().delete_selected_roi()
             self._on_rois_changed()
 
-    # Karakter yang diizinkan di label ROI: huruf/angka + - _ $ | (tanpa spasi).
-    # Label dipakai sebagai nama folder per-ROI ({label}_per_roi), jadi karakter
-    # ilegal Windows otomatis dibuang.
+    # Karakter label ROI: huruf/angka + - _ $ | (tanpa spasi). Label jadi nama
+    # folder {label}_per_roi, jadi karakter ilegal Windows dibuang.
     _ROI_LABEL_RE = re.compile(r"[^A-Za-z0-9_$\-|]")
 
     def _sanitize_roi_label(self, raw: str) -> str:
@@ -4208,9 +3706,8 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _parse_roi_uid_from_filename(path: str) -> Optional[str]:
-        """Ekstrak `roi_uid` dari nama file `{ts}_roi-{uid}_{uuid8}.png`
-        (lihat program.py::save_template_image). File lama (sebelum
-        segmen ini ada) atau foto legacy non-per-ROI → None."""
+        """Ekstrak `roi_uid` dari nama file `{ts}_roi-{uid}_{uuid8}.png`.
+        File lama / foto legacy non-per-ROI → None."""
         stem = Path(path).stem
         if "_roi-" not in stem:
             return None
@@ -4221,22 +3718,8 @@ class MainWindow(QMainWindow):
         return uid or None
 
     def _on_thumbnail_mask_requested(self, image_path: str):
-        """Tombol ⬠ di thumbnail galeri — adjust mask polygon KHUSUS foto
-        ini (outlier, mis. part kebetulan geser lebih dari biasanya).
-        Mayoritas foto tidak perlu ini — cukup pakai mask default ROI.
-
-        Galeri menggabungkan dua jenis foto (lihat _list_all_images) yang
-        butuh penanganan BEDA:
-          - `*_per_roi/` — crop FINAL dari CaptureReviewDialog, sudah
-            berbentuk potongan satu ROI. training_worker.py menyalin
-            folder ini apa adanya (tidak di-crop/mask ulang), jadi
-            satu-satunya cara adjust berlaku adalah TIMPA file di disk
-            langsung sekarang — override lazy tidak akan pernah terbaca.
-          - `ok`/`ng` legacy — full-frame, di-crop nanti saat training,
-            jadi cukup simpan override lazy di config (dibaca
-            _crop_images_to_rois). Perlu tahu persis ROI mana → cuma
-            didukung kalau template punya SATU ROI aktif.
-        """
+        """Tombol ⬠ thumbnail — adjust mask KHUSUS foto ini (outlier). Crop `_per_roi`
+        ditimpa langsung; foto legacy disimpan sebagai override lazy di config."""
         if not self._active_template:
             return
         is_per_roi = Path(image_path).parent.name.endswith("_per_roi")
@@ -4269,11 +3752,8 @@ class MainWindow(QMainWindow):
             self._adjust_mask_legacy_file(image_path, rois[0])
 
     def _adjust_mask_per_roi_file(self, image_path: str, roi: ROIData):
-        """Adjust mask untuk crop `_per_roi` — file SUDAH berupa crop final
-        (bukan full-frame), jadi dimuat apa adanya tanpa crop ulang. Hasil
-        DITIMPA langsung ke file yang sama, permanen — tidak ada versi
-        asli yang disimpan terpisah (konsisten dengan mask yang dibakar
-        saat review capture pertama kali)."""
+        """Adjust mask crop `_per_roi` — file sudah crop final, dimuat apa adanya.
+        Hasil DITIMPA permanen ke file yang sama."""
         img = cv2.imread(image_path)
         if img is None:
             self.set_status(f"Gagal baca gambar: {image_path}", 3000)
@@ -4295,10 +3775,8 @@ class MainWindow(QMainWindow):
             f"(ROI {roi.label or roi.uid}) — permanen.", 4000)
 
     def _adjust_mask_legacy_file(self, image_path: str, roi: ROIData):
-        """Adjust mask untuk foto legacy full-frame — crop dulu pakai ROI
-        (sama seperti _crop_images_to_rois), hasil disimpan sebagai
-        override LAZY di config (bukan menimpa foto full-frame-nya),
-        dibaca balik saat training crop foto ini."""
+        """Adjust mask foto legacy full-frame — crop dulu pakai ROI, hasil disimpan
+        sebagai override LAZY di config (bukan menimpa foto aslinya)."""
         img = cv2.imread(image_path)
         if img is None:
             self.set_status(f"Gagal baca gambar: {image_path}", 3000)
@@ -4349,12 +3827,8 @@ class MainWindow(QMainWindow):
         self.set_status(f"Threshold: {threshold:.3f}", 2000)
 
     def _on_threshold_released(self):
-        """Persist manually-tuned threshold to template config on slider release.
-
-        Tanpa ini, geseran slider hanya mengubah engine live dan hilang saat
-        restart (config hanya di-set saat training). Disimpan on-release agar
-        tidak menulis file tiap tick geseran.
-        """
+        """Simpan threshold hasil tuning manual ke config template saat slider dilepas
+        (bukan tiap tick) — tanpa ini geseran hilang saat restart."""
         if not self._active_template:
             return
         threshold = self._teach_page.get_threshold_slider().value() / 1000.0
@@ -4372,20 +3846,14 @@ class MainWindow(QMainWindow):
     # ---- Training ----
 
     def _on_train(self):
-        """Start training for active template.
-
-        Auto-routing:
-          - PyTorch available → TrainingWorker (QThread, normal flow)
-          - PyTorch blocked (Windows policy) + WSL available → training via WSL
-          - Neither → SimpleThreshold fallback (existing)
-        """
+        """Mulai training template aktif. Auto-routing: PyTorch ada → TrainingWorker;
+        diblokir + ada WSL → training via WSL; keduanya tidak → SimpleThreshold."""
         if not self._active_template:
             self.set_status("Pilih template dulu!", 3000)
             return
 
-        # Tugas 4: PC edge (edge_mode=true) adalah mesin inference-only —
-        # torch sengaja TIDAK pernah dimuat di sana. Training dilakukan di
-        # PC dev, lalu model diimport. Pesan jelas, bukan error samar.
+        # PC edge (edge_mode=true) = inference-only, torch tak pernah dimuat.
+        # Training di PC dev lalu model diimport — beri pesan jelas.
         if self._config.get("edge_mode", False):
             QMessageBox.information(
                 self, "Training",
@@ -4422,9 +3890,8 @@ class MainWindow(QMainWindow):
         logger.info("Training dimulai: program=%s, template=%s",
                      self._active_program, self._active_template)
 
-        # Lepaskan model yang sedang dimuat agar file-nya (model.bin di-mmap
-        # OpenVINO) tidak terkunci saat ditimpa hasil training baru
-        # (WinError 32). Model di-reload otomatis di _on_training_finished.
+        # Lepas model yang dimuat supaya model.bin (di-mmap OpenVINO) tidak
+        # terkunci saat ditimpa hasil training (WinError 32).
         import gc
         self._inference_engine.unload_model()
         gc.collect()
@@ -4437,12 +3904,8 @@ class MainWindow(QMainWindow):
 
     # ---- Training via WSL (fallback saat PyTorch diblokir Windows) ----
 
-    # Batas waktu total pipeline WSL (venv setup + pip install requirements.txt
-    # + download dataset/pretrained-weights EfficientAd + training). 30 menit
-    # — jauh lebih longgar dari 600s sebelumnya, karena semua langkah itu bisa
-    # perlu unduhan besar (torch/anomalib/openvino + imagenette ~1.3GB +
-    # pretrained teacher weights) terutama di venv/percobaan pertama atau
-    # koneksi yang lambat/dibatasi kebijakan jaringan korporat.
+    # Batas waktu total pipeline WSL (venv + pip install + download dataset/
+    # weights + training). Longgar: unduhan pertama bisa >1 GB.
     _WSL_TRAIN_TIMEOUT_SEC = 1800
 
     def _train_via_wsl(self):
@@ -4477,13 +3940,8 @@ class MainWindow(QMainWindow):
                     f".venv/bin/python tools/train_cli.py "
                     f"--program '{prog}' --template '{tmpl}'"
                 ]
-                # Popen + baca stdout baris-per-baris (bukan subprocess.run yang
-                # menunggu diam sampai proses selesai total) — supaya tiap baris
-                # output WSL/pip/train_cli bisa langsung ditampilkan sebagai
-                # progress feedback, bukan layar diam sampai akhir.
-                # encoding eksplisit UTF-8 (bukan ikut locale default Windows
-                # yang kadang cp1252) — tanpa ini decoding bisa crash begitu
-                # ada karakter non-ASCII di output pip/apt.
+                # Popen + baca stdout baris-per-baris supaya progress terlihat
+                # (bukan layar diam). UTF-8 eksplisit: locale Windows bisa cp1252.
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace", bufsize=1)
@@ -4495,12 +3953,8 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
 
-                # Timer terpisah dari loop baca output — sengaja begitu, karena
-                # kalau cuma cek elapsed-time di dalam loop `for line in
-                # proc.stdout`, proses yang diam lama TANPA output (mis. lagi
-                # download file besar tanpa progress bar per-baris) tidak akan
-                # pernah memicu pengecekan itu sampai ada baris baru masuk —
-                # timeout jadi tidak pernah kena walau sudah lama sekali diam.
+                # Timer TERPISAH dari loop baca output — proses yang diam lama tanpa
+                # output tidak akan pernah memicu cek elapsed di dalam loop.
                 timer = threading.Timer(self._WSL_TRAIN_TIMEOUT_SEC, _kill_on_timeout)
                 timer.daemon = True
                 timer.start()
@@ -4532,13 +3986,8 @@ class MainWindow(QMainWindow):
                         "  sudo apt install python3-venv\n\n"
                         "Lalu coba TRAIN lagi.")
                 else:
-                    # Log lengkap ke file (lihat logs/app.log) untuk diagnosa
-                    # penuh. Untuk pesan di UI, ambil bagian EKOR output, bukan
-                    # awal — traceback/pesan error sebenarnya nyaris selalu di
-                    # baris-baris terakhir sebelum proses exit, sedangkan awal
-                    # output sering cuma notice rutin pip/apt (mis. "versi pip
-                    # baru tersedia") yang menutupi error aslinya kalau dipotong
-                    # dari depan.
+                    # Log penuh ke app.log. Pesan UI ambil EKOR output — error asli
+                    # ada di baris terakhir, awal cuma notice rutin pip/apt.
                     logger.error("WSL training gagal (output lengkap):\n%s", out)
                     err = out[-600:] if out else f"exit code {returncode}"
                     self._wsl_train_error_signal.emit(f"WSL training gagal: {err}")
@@ -4557,9 +4006,8 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def _on_wsl_train_progress(self, line: str):
-        """Tampilkan baris output WSL terbaru sebagai progress feedback, biar
-        pipeline yang panjang (venv setup / pip install / download dataset /
-        training) tidak kelihatan diam selama itu."""
+        """Tampilkan baris output WSL terbaru sebagai progress feedback, supaya
+        pipeline panjang (venv/pip/download/training) tidak kelihatan diam."""
         display = line if len(line) <= 120 else line[:117] + "..."
         self._teach_page.set_training_progress(10, f"WSL: {display}")
 
@@ -4646,9 +4094,8 @@ class MainWindow(QMainWindow):
             self._db.mark_correction(entry_id, correct_judgement)
             self._db.add_audit(self._active_program, "correction",
                          {"entry_id": entry_id, "from": original, "to": correct_judgement})
-            # Koreksi TIDAK dipropagasi ke PostgreSQL: tabel di sana hanya
-            # menampung hasil OK dan tidak lagi punya kolom penopangnya
-            # (local_id/corrected/...). Koreksi tetap tercatat penuh di SQLite.
+            # Koreksi TIDAK dipropagasi ke PG (tabelnya hanya menampung OK dan
+            # kolom penopangnya sudah tak ada). Tetap tercatat penuh di SQLite.
             self._refresh_history()
             self.set_status(f"Entry #{entry_id} dikoreksi ke {correct_judgement}", 3000)
         except Exception as e:
@@ -4687,12 +4134,8 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _parse_roi_region(value) -> list:
-        """Parse kolom `roi_region` DB → list dict per-ROI.
-
-        Robust terhadap double-encode (entry lama tersimpan sebagai JSON
-        string di dalam JSON string — `'"[{...}]"'`) dan tipe tak terduga:
-        None/"" → [], dict → [dict], list → list-of-dict, garbage → [].
-        """
+        """Parse kolom `roi_region` DB → list dict per-ROI. Robust terhadap
+        double-encode & tipe tak terduga (None/dict/garbage → [])."""
         if not value:
             return []
         data = value
@@ -4720,20 +4163,8 @@ class MainWindow(QMainWindow):
         return " · ".join(parts)
 
     def _on_tuning_requested(self, entry_id: int):
-        """Open Tuning dialog for a history entry, apply per-ROI corrections.
-
-        CRITICAL: Tuning always runs on the SAME template that produced the
-        inference result — NOT the currently active template. This prevents
-        mixing training data between models (model A trained on ROI crops
-        from model B's inference).
-
-        Flow:
-          1. Load entry from DB → extract template_id from metadata
-          2. Activate that template (switches active model if needed)
-          3. Load saved image + per-ROI data from disk
-          4. Show TuningDialog — user clicks ROI, registers OK/NG
-          5. On save: crop corrected ROIs → save to template → retrain
-        """
+        """Buka dialog Tuning untuk satu entry history + terapkan koreksi per-ROI.
+        SELALU pakai template yang MENGHASILKAN entry itu, bukan yang aktif."""
         # Fetch full entry from DB (need metadata + image_path + roi_region)
         entry = self._db.get_history_entry(entry_id)
         if not entry:
@@ -4826,9 +4257,7 @@ class MainWindow(QMainWindow):
                 logger.warning("Tuning: gagal simpan ROI crop: %s", e)
 
         # ── Update history entry: judgement terkoreksi + per-ROI terbaru ──
-        # (sebelumnya TIDAK ada — entry di tabel tidak pernah berubah setelah
-        #  koreksi; mark_correction hanya menyimpan di kolom terpisah, kolom
-        #  judgement asli tetap utuh dan tampilan memakai COALESCE)
+        # judgement asli tetap utuh di kolomnya; tampilan memakai COALESCE.
         if corrections:
             new_overall = "NG" if any(
                 roi.current_judgement == "NG" for roi in dialog._rois
@@ -4881,10 +4310,8 @@ class MainWindow(QMainWindow):
 
         # Get corrected entries from DB
         try:
-            # HANYA koreksi milik template ini. Tanpa filter template, gambar
-            # koreksi dari template lain ikut tersalin ke folder corrections/
-            # template ini dan menetap di sana — ikut setiap training
-            # berikutnya, sehingga model tidak pernah stabil.
+            # HANYA koreksi milik template ini — tanpa filter, gambar koreksi
+            # template lain ikut tersalin dan model tidak pernah stabil.
             corrected = self._db.get_history(
                 program=self._active_program, judgement="OK", limit=500,
                 template=self._active_template or None)
@@ -4934,15 +4361,11 @@ class MainWindow(QMainWindow):
             self._on_train()
 
     def _refresh_history(self, judgement: Optional[str] = None):
-        """Refresh history page from local SQLite (PG hanya untuk push eksternal).
-
-        Args:
-            judgement: Filter — None=tampil semua, "OK"=hanya OK, "NG"=hanya NG.
-        """
+        """Refresh halaman history dari SQLite lokal (PG hanya untuk push eksternal).
+        `judgement`: None = semua, "OK"/"NG" = filter."""
         try:
-            # Hanya hasil template AKTIF. Sebelumnya semua template dalam satu
-            # program tercampur, sehingga nomor entry, koreksi, dan tuning bisa
-            # menunjuk template yang berbeda dari yang sedang dilihat operator.
+            # Hanya hasil template AKTIF — kalau tercampur, nomor entry/koreksi/
+            # tuning bisa menunjuk template lain dari yang dilihat operator.
             entries = self._db.get_history(
                 program=self._active_program, judgement=judgement, limit=100,
                 template=self._active_template or None)
@@ -4970,24 +4393,6 @@ class MainWindow(QMainWindow):
             self._history_page.set_status(f"{len(entries)} entries")
         except Exception as ex:
             logger.warning("History refresh error: %s", ex)
-
-    # ---- Performance ----
-
-    def _start_perf_monitor(self):
-        self._perf_timer.start(2000)
-
-    def _update_performance(self):
-        # Tugas 2: hanya berarti saat tab Diagnostics terlihat — tab lain
-        # tidak menampilkan angka ini, jadi jangan buang CPU tiap 2 dtk.
-        if self._tabs.currentIndex() != 4:
-            return
-        try:
-            ram_mb = self._process.memory_info().rss / 1024 / 1024
-            cpu_percent = self._process.cpu_percent()
-            fps = self._camera_worker.fps if self._camera_worker else 0.0
-            self._diagnostics_page.update_performance(ram_mb, cpu_percent, fps, 0.0, 0.0)
-        except Exception as e:
-            logger.warning("Perf monitor error: %s", e)
 
     # ---- Slots ----
 
@@ -5041,10 +4446,6 @@ class MainWindow(QMainWindow):
                 logger.warning("Gagal mengganti device inferensi: %s", e)
                 self.set_status(f"Gagal mengganti device inferensi: {e}", 6000)
 
-        # YOLO config bisa berubah di Settings → muat ulang detektor (lazy)
-        # pada frame berikutnya, tanpa perlu restart aplikasi
-        self._yolo_det = None
-        self._last_class_filter_ng = False
         self._statusbar.showMessage(self._tr.tr("settings_saved"), 3000)
 
         lang = settings.get("language", "id")
@@ -5106,8 +4507,7 @@ class MainWindow(QMainWindow):
         self._apply_flask_settings(settings)
 
     def _on_tab_changed(self, index: int):
-        page_names = ["Run", "Teach", "History", "Settings", "Diagnostics",
-                      "Akun", "I/O Settings"]
+        page_names = ["Run", "Teach", "History", "Settings", "Akun", "I/O Settings"]
         name = page_names[index] if index < len(page_names) else f"Tab {index}"
         logger.debug("Switched to %s tab", name)
 
@@ -5116,9 +4516,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._go_fullscreen)
         else:
             QTimer.singleShot(0, self._go_windowed)
-            # Keluar dari RUN: hasil inferensi yang masih diproses di
-            # thread lain tidak boleh lagi memulsa part_ready/OK ke PLC
-            # begitu selesai — lihat _bump_run_session_epoch().
+            # Keluar dari RUN: hasil inferensi yang masih diproses tidak boleh
+            # lagi memulsa part_ready/OK ke PLC (_bump_run_session_epoch).
             self._bump_run_session_epoch()
 
         # Refresh teach preview
@@ -5134,14 +4533,8 @@ class MainWindow(QMainWindow):
         elif index == 6:
             self._io_page.refresh_monitor_connection()
 
-        # Tugas 2: polling kamera hanya saat ada konsumen frame (RUN/TEACH).
-        # KOREKSI: saat replay, sumber frame adalah file video — kamera
-        # SUDAH di-stop di _start_replay. Kondisi lama ("... or
-        # _replay_test_mode") justru menyalakan kembali timer 30 Hz di atas
-        # kamera yang sudah tertutup (log: "Camera polling ON" tepat setelah
-        # replay mulai) — 30 tick/detik sia-sia yang merebut CPU dari
-        # inference. Polling juga tidak ada gunanya kalau kamera tidak
-        # sedang berjalan.
+        # Polling kamera hanya saat ada konsumen frame (RUN/TEACH) DAN kamera
+        # jalan — saat replay kamera sudah di-stop, polling cuma buang CPU.
         if self._camera_worker:
             self._camera_worker.set_polling(
                 index in (0, 1)
@@ -5198,13 +4591,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export Model Error", str(e))
 
     def _import_model_dialog(self):
-        """Dialog untuk import model dari file .zip.
-
-        Import SELALU membuat template BARU — tidak pernah menimpa template
-        yang sedang aktif. Karena tujuannya folder kosong, seluruh isi config
-        dari PC training (ROI, part-check, threshold, dst) boleh dipulihkan
-        apa adanya tanpa merusak template yang sudah dikalibrasi di mesin ini.
-        """
+        """Dialog import model dari file .zip. Import SELALU membuat template BARU —
+        tidak pernah menimpa template yang sedang aktif."""
         program = self._active_program
         if not program:
             QMessageBox.warning(self, "Import Model",
@@ -5288,9 +4676,8 @@ class MainWindow(QMainWindow):
     def _update_runtime_status(self):
         """Update inference runtime indicator in Settings page."""
         has_ov = self._inference_engine._use_ov if hasattr(self._inference_engine, '_use_ov') else False
-        # Tugas 4: jangan `import torch` hanya untuk label — cek apakah sudah
-        # termuat (nol biaya, dan justru lebih benar: yang relevan adalah
-        # apakah torch TERMUAT, bukan apakah terinstall).
+        # Jangan `import torch` hanya untuk label — cek apakah sudah TERMUAT
+        # (nol biaya, dan itu memang yang relevan).
         has_torch = "torch" in sys.modules
 
         # Deteksi GPU/CUDA (tanpa import tambahan)
@@ -5334,7 +4721,6 @@ class MainWindow(QMainWindow):
         self._tabs.setTabText(1, self._tr.tr("nav_teach"))
         self._tabs.setTabText(2, self._tr.tr("nav_history"))
         self._tabs.setTabText(3, self._tr.tr("nav_settings"))
-        self._tabs.setTabText(4, self._tr.tr("nav_diagnostics"))
         self.setWindowTitle(self._tr.tr("app_title"))
 
     @staticmethod
@@ -5365,9 +4751,6 @@ class MainWindow(QMainWindow):
     def get_settings_page(self) -> SettingsPage:
         return self._settings_page
 
-    def get_diagnostics_page(self) -> DiagnosticsPage:
-        return self._diagnostics_page
-
     def get_camera_worker(self):
         return self._camera_worker
 
@@ -5381,7 +4764,6 @@ class MainWindow(QMainWindow):
         logger.info("Application closing...")
         if self._camera_worker:
             self._camera_worker.stop_camera()
-        self._perf_timer.stop()
         # Hentikan thread export frame replay (daemon) — item tersisa tetap
         # ditulis (get() → put(None) = sentinel bersih).
         self._export_stop = True

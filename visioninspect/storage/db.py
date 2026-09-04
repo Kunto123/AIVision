@@ -17,11 +17,7 @@ logger = get_logger("app")
 
 
 class Database:
-    """
-    SQLite database untuk riwayat inspeksi.
-    Thread-safe dengan single connection dan lock.
-    Menggunakan WAL mode untuk konkurensi read/write.
-    """
+    """SQLite riwayat inspeksi — WAL mode, thread-safe (1 connection + lock)."""
 
     def __init__(self, db_path: Path):
         self._db_path = db_path
@@ -86,20 +82,12 @@ class Database:
             ON inspection_history(judgement)
         """)
 
-        # ── Migrasi: kolom `template` ──────────────────────────────────────
-        # Sebelumnya identitas template hanya tersimpan di dalam blob JSON
-        # `metadata`, sehingga history TIDAK BISA disaring per template —
-        # semua template dalam satu program tercampur, dan rebuild menarik
-        # gambar koreksi milik template lain. Kolom ini memakai FOLDER ID
-        # (bukan nama tampilan), karena nama terbukti bisa tertukar akibat
-        # import yang menimpa config.
+        # ── Migrasi kolom `template` (FOLDER ID, bukan nama tampilan) ──────
+        # Tanpa kolom ini history tidak bisa disaring per template.
         self._migrate_template_column(cursor)
 
-        # ── Migrasi: kolom `operator` ──────────────────────────────────────
-        # Nama operator dulu hanya ditulis ke file .json pendamping gambar,
-        # jadi history lokal tidak bisa menjawab "siapa yang memeriksa part
-        # ini". Sekarang PostgreSQL hanya menerima hasil OK, sehingga jejak
-        # operator untuk part NG SEPENUHNYA bergantung pada database lokal.
+        # ── Migrasi kolom `operator` ───────────────────────────────────────
+        # PG hanya menerima OK → jejak operator part NG cuma ada di sini.
         self._migrate_simple_column(cursor, "operator", "TEXT")
 
         # Program counters (cached for fast access)
@@ -190,11 +178,8 @@ class Database:
             logger.info("Migrasi history: kolom `%s` ditambahkan", name)
 
     def _migrate_template_column(self, cursor) -> None:
-        """Tambah kolom `template` + index, lalu backfill dari metadata lama.
-
-        Idempotent: aman dipanggil tiap startup. Baris lama yang metadata-nya
-        tidak berisi template dibiarkan NULL — bukan ditebak.
-        """
+        """Tambah kolom `template` + index, backfill dari metadata lama (idempotent).
+        Baris tanpa template di metadata dibiarkan NULL — bukan ditebak."""
         cols = [r[1] for r in cursor.execute(
             "PRAGMA table_info(inspection_history)").fetchall()]
         if "template" not in cols:
@@ -277,12 +262,8 @@ class Database:
         offset: int = 0,
         template: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Get inspection history with optional filters.
-
-        `template` = FOLDER ID template. Tanpa filter ini, semua template
-        dalam satu program tercampur — dan rebuild akan menarik gambar
-        koreksi milik template lain.
-        """
+        """Riwayat inspeksi dengan filter opsional. `template` = FOLDER ID —
+        tanpa filter ini semua template dalam satu program tercampur."""
         query = "SELECT * FROM inspection_history WHERE 1=1"
         params = []
 
@@ -290,9 +271,8 @@ class Database:
             query += " AND program = ?"
             params.append(program)
         if template:
-            # Baris lama (sebelum migrasi) bisa punya template NULL sementara
-            # metadata-nya berisi id — cocokkan keduanya supaya history lama
-            # tidak hilang dari tampilan.
+            # Baris lama bisa punya template NULL tapi id-nya ada di metadata
+            # — cocokkan keduanya supaya history lama tidak hilang.
             query += (" AND (template = ? OR (template IS NULL"
                       " AND metadata LIKE ?))")
             params.append(template)
@@ -325,12 +305,8 @@ class Database:
         return self.conn.execute(query, params).fetchone()[0]
 
     def mark_correction(self, entry_id: int, correct_judgement: str) -> None:
-        """Mark a history entry as corrected.
-
-        Catatan: kolom `judgement` (hasil asli inspeksi) TIDAK ditimpa —
-        nilai koreksi disimpan di `correct_judgement`. Tampilan tabel
-        memakai COALESCE(correct_judgement, judgement).
-        """
+        """Tandai entry history terkoreksi. `judgement` asli TIDAK ditimpa —
+        koreksi disimpan di `correct_judgement` (tampilan pakai COALESCE)."""
         self.conn.execute("""
             UPDATE inspection_history
             SET corrected = 1,
@@ -466,11 +442,8 @@ class Database:
         return [dict(row) for row in cursor.fetchall()]
 
     def list_users_full(self) -> List[Dict[str, Any]]:
-        """List all users INCL. password_hash & must_change_password.
-
-        Dipakai khusus migrasi/sinkronisasi (mis. PostgresDB.sync_users_from
-        _sqlite) — jangan dipakai untuk tampilan UI.
-        """
+        """List user TERMASUK password_hash & must_change_password.
+        Khusus migrasi/sinkronisasi — JANGAN dipakai untuk tampilan UI."""
         cursor = self.conn.execute(
             "SELECT id, username, password_hash, display_name, role, "
             "COALESCE(must_change_password, 0) AS must_change_password "
@@ -561,12 +534,8 @@ class Database:
     # ---- Push Outbox (C3 — antrian tahan-restart) ----
 
     def add_outbox(self, entry: dict) -> int:
-        """Simpan satu entry push ke antrian outbox SQLite.
-
-        Entry adalah dict kwargs untuk ``PostgresDB.push_inspection``.
-        Tahan-restart: bila aplikasi mati sebelum sink selesai, entry tetap
-        ada dan di-flush saat startup berikutnya.
-        """
+        """Simpan 1 entry push (kwargs PostgresDB.push_inspection) ke outbox.
+        Tahan-restart: entry tersisa di-flush saat startup berikutnya."""
         self.conn.execute("""
             INSERT INTO push_outbox (entry_json, created_at)
             VALUES (?, ?)
@@ -614,11 +583,8 @@ class Database:
             "SELECT COUNT(*) AS c FROM push_outbox").fetchone()["c"]
 
     def drop_oldest_outbox(self, n: int) -> None:
-        """Buang n entry tertua dari outbox (antrian bounded, C3).
-
-        Dilakukan hanya bila antrian membengkak (mis. PG mati berhari-hari);
-        entry terbaru dipertahankan. Baris yang dibuang dicatat ke audit log.
-        """
+        """Buang n entry tertua dari outbox (antrian bounded) — hanya saat
+        antrian membengkak. Yang dibuang dicatat ke audit log."""
         if n <= 0:
             return
         rows = self.conn.execute(

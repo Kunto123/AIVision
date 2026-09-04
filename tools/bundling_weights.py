@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-VisionInspect — Weight Bundling Script (Offline Deployment)
+VisionInspect — Weight Bundling Script
 Download pretrained backbone weights untuk offline install di edge PC.
 
 Dua jalur:
@@ -58,7 +58,7 @@ def _find_venv_python():
 
 
 def _is_running_in_project_venv():
-    """Cek apakah kita sudah jalan dari dalam virtual environment proyek."""
+    """Cek apakah sudah jalan dari dalam virtual environment proyek."""
     venv = os.environ.get("VIRTUAL_ENV")
     if venv and _PROJECT_ROOT in Path(venv).parents:
         return True

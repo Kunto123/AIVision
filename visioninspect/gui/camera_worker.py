@@ -29,9 +29,8 @@ class CameraWorker(QObject):
     #: ~0,5 detik — cukup lama untuk melewati kedipan sesaat.
     _BAD_FRAME_WARN = 15
 
-    #: Frame gagal beruntun sebelum kamera dibuka ulang sendiri (~1,5 detik).
-    #: Sengaja jauh lebih longgar dari ambang peringatan: membuka ulang device
-    #: memakan waktu, jadi jangan dilakukan untuk gangguan sekejap.
+    #: Frame gagal beruntun sebelum kamera dibuka ulang (~1,5 dtk). Longgar —
+    #: membuka ulang device mahal, jangan untuk gangguan sekejap.
     _BAD_FRAME_RECOVER = 45
 
     """
@@ -67,13 +66,8 @@ class CameraWorker(QObject):
     # ---- F2: kamera config dari Settings ----
 
     def set_camera_config(self, cfg: dict) -> None:
-        """Terapkan config kamera (exposure/gain/WB) dari Settings (F2).
-
-        Sebelum fix ini, CameraConfig hanya dibuat dari device_index —
-        exposure/gain/white_balance di Settings TIDAK pernah sampai ke
-        kamera (semua auto). Param ini diteruskan ke CameraConfig saat
-        start; dipanggil ulang setelah save settings (restart kamera).
-        """
+        """Terapkan config kamera (exposure/gain/WB) dari Settings.
+        Diteruskan ke CameraConfig saat start; panggil ulang setelah save."""
         self._camera_params = {}
         # Key config kamera: resolution_width/resolution_height — petakan ke
         # param CameraConfig (width/height). Key lain langsung cocok.
@@ -92,15 +86,8 @@ class CameraWorker(QObject):
 
     @Slot()
     def _ensure_timer_running(self):
-        """Start timer at target interval.
-
-        KOREKSI: komentar lama ("aman dipanggil dari thread mana pun karena
-        QTimer dibuat bersama parent di __init__") SALAH. Yang ikut pindah
-        lewat moveToThread adalah kepemilikan/affinity-nya; start/stop QTimer
-        tetap WAJIB terjadi di thread pemilik timer. Memanggilnya dari GUI
-        thread menghasilkan "QObject::killTimer: Timers cannot be stopped
-        from another thread" dan timer bisa gagal berhenti (polling terus
-        jalan walau kamera sudah stop). Karena itu di-dispatch sendiri."""
+        """Start timer di interval target. start/stop QTimer WAJIB di thread
+        pemilik timer (dari GUI thread → killTimer error) → self-dispatch."""
         if self.thread() is not QThread.currentThread():
             QMetaObject.invokeMethod(
                 self, "_ensure_timer_running", Qt.QueuedConnection)
@@ -183,9 +170,8 @@ class CameraWorker(QObject):
         self._ensure_timer_stopped()
         self._running = False
         self._consec_bad = 0
-        # Batalkan pemulihan yang mungkin sedang tertunda. Tanpa ini,
-        # QTimer.singleShot dari _note_capture_failure akan menghidupkan
-        # kembali kamera yang baru saja sengaja dimatikan operator.
+        # Batalkan pemulihan tertunda — tanpa ini singleShot dari
+        # _note_capture_failure menyalakan lagi kamera yang sengaja dimatikan.
         self._recovering = False
         if self._camera:
             self._camera.close()
@@ -224,10 +210,8 @@ class CameraWorker(QObject):
 
     @Slot(bool)
     def set_polling(self, enabled: bool):
-        """Jeda/lanjut polling frame TANPA menutup kamera (Tugas 2 — hemat
-        CPU saat tidak ada konsumen frame: tab non-RUN/TEACH & bukan replay).
-        Kamera tetap terbuka, jadi kembali ke RUN langsung jalan tanpa
-        restart. Aman dipanggil dari thread mana pun (self-dispatch)."""
+        """Jeda/lanjut polling frame TANPA menutup kamera (hemat CPU saat tak
+        ada konsumen frame). Aman dari thread mana pun (self-dispatch)."""
         if self.thread() is not QThread.currentThread():
             QMetaObject.invokeMethod(
                 self, "set_polling", Qt.QueuedConnection,
@@ -250,14 +234,8 @@ class CameraWorker(QObject):
 
     @property
     def is_polling_frames(self) -> bool:
-        """True bila timer grab frame benar-benar berjalan.
-
-        `is_running` hanya berarti kamera terbuka — polling bisa sengaja
-        dihentikan (`set_polling(False)` saat tab non-RUN/replay, Tugas 2)
-        tanpa menutup device. Heartbeat PLC harus mengikuti polling: kalau
-        frame tidak lagi diambil, tidak ada yang bisa dinilai, jadi "sehat"
-        juga bohon.
-        """
+        """True bila timer grab frame benar-benar jalan (`is_running` cuma berarti
+        device terbuka). Heartbeat PLC harus ikut ini, bukan is_running."""
         return bool(self._timer is not None and self._timer.isActive())
 
     @property
@@ -269,29 +247,16 @@ class CameraWorker(QObject):
     # ---- Internal: grab frame ----
 
     def _frame_is_blank(self, frame) -> bool:
-        """True bila frame benar-benar kosong (semua piksel nol).
-
-        Kegagalan kamera USB yang paling menipu: device tetap "terbuka",
-        cap.read() tetap mengembalikan ret=True, tapi isinya nol semua.
-        Layar jadi hitam sementara ROI tetap tergambar dengan rasio benar —
-        persis gejala yang dilaporkan.
-
-        Sensor sungguhan selalu punya derau, jadi frame yang BENAR-BENAR nol
-        tidak pernah sah. Diperiksa dengan subsampel supaya murah: 1080p
-        jadi ~500 piksel, bukan 2 juta.
-        """
+        """True bila frame semua-nol — gejala kamera USB "terbuka tapi mati"
+        (ret=True, isi nol). Sensor asli selalu berderau; dicek via subsampel."""
         try:
             return not frame[::48, ::48].any()
         except Exception:
             return False
 
     def _note_capture_failure(self, sebab: str) -> None:
-        """Hitung kegagalan beruntun; pulihkan sendiri bila melewati batas.
-
-        Sebelum ini `_grab_frame` hanya `return` tanpa jejak: kamera bisa
-        lepas dan aplikasi diam saja sampai operator sadar dan menekan
-        stop/start sendiri.
-        """
+        """Hitung kegagalan beruntun; buka ulang kamera sendiri bila lewat batas
+        (tanpa ini kamera lepas = aplikasi diam sampai operator sadar)."""
         self._consec_bad += 1
         if self._consec_bad == self._BAD_FRAME_WARN:
             self.status_message.emit(

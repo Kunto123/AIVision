@@ -61,11 +61,8 @@ class ThumbnailWidget(QWidget):
         """)
         self._del_btn.clicked.connect(lambda: self.deleted.emit(self._path))
 
-        # Tombol mask — pojok kiri-atas (beda sudut dari ✕ di kanan-atas).
-        # BUKAN double-click: klik tunggal di badan thumbnail sudah membuka
-        # ROIAdjustDialog secara MODAL (lihat main_window._on_thumbnail_
-        # clicked) — double-click tidak akan pernah terdeteksi benar kalau
-        # klik pertamanya sendiri sudah memblokir lewat dialog modal.
+        # Tombol mask di pojok kiri-atas (✕ di kanan-atas). BUKAN double-click:
+        # klik tunggal di badan thumbnail sudah membuka dialog modal.
         self._mask_btn = QPushButton("⬠", img_container)
         self._mask_btn.setGeometry(2, 2, 20, 20)
         self._mask_btn.setToolTip(

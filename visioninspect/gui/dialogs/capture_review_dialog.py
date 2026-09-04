@@ -34,12 +34,8 @@ GREY = "#64748B"
 
 
 class _ROICropToggle(QFrame):
-    """Satu crop ROI: klik badan = toggle OK/NG, tombol ✕ = buang crop ini.
-
-    "Buang" TIDAK menghapus file apa pun — pada tahap ini belum ada yang
-    tersimpan. Yang dibuang hanya dikeluarkan dari daftar yang akan ditulis
-    ke dataset, dan bisa dikembalikan lagi selama dialog masih terbuka.
-    """
+    """Satu crop ROI: klik badan = toggle OK/NG, ✕ = buang crop ini.
+    "Buang" tidak menghapus file — cuma dikeluarkan dari daftar simpan."""
 
     toggled_label = Signal()
 
@@ -49,9 +45,8 @@ class _ROICropToggle(QFrame):
         self.crop = crop_bgr
         self.label = label      # "ok" | "ng" — state saat ini, bisa di-toggle
         self.excluded = False   # True = tidak ikut disimpan ke dataset
-        # None = pakai mask default milik ROI (roi.mask_polygon) apa
-        # adanya. Diisi HANYA kalau operator sengaja adjust polygon khusus
-        # foto ini (outlier — part kebetulan geser lebih dari biasanya).
+        # None = pakai mask default ROI. Diisi HANYA kalau operator sengaja
+        # adjust polygon khusus foto ini (outlier).
         self.mask_polygon_override: Optional[List[Tuple[int, int]]] = None
 
         self.setFixedWidth(120)
@@ -118,9 +113,8 @@ class _ROICropToggle(QFrame):
         self._refresh_style()
 
     def _adjust_mask(self):
-        """Buka dialog kecil buat adjust polygon mask khusus crop ini —
-        seed dari override yang sudah ada (kalau sudah pernah di-adjust),
-        atau dari mask default milik ROI."""
+        """Adjust polygon mask khusus crop ini — seed dari override yang sudah
+        ada, atau dari mask default milik ROI."""
         seed = (self.mask_polygon_override if self.mask_polygon_override
                 else getattr(self.roi, "mask_polygon", None))
         dlg = PolygonMaskDialog(self.crop, seed,
@@ -165,9 +159,8 @@ class _ROICropToggle(QFrame):
         self._status_label.setStyleSheet(
             f"font-weight: bold; font-size: 12px; color: {color}; "
             f"background: transparent;")
-        # Isi penuh (bukan outline) = foto ini punya mask khusus sendiri,
-        # beda dari default ROI — penanda visual supaya operator tahu
-        # tanpa perlu buka dialog lagi.
+        # Isi penuh (bukan outline) = foto ini punya mask khusus sendiri —
+        # penanda visual tanpa perlu buka dialog.
         mask_color = "#FBBF24" if self.mask_polygon_override else "#94A3B8"
         self._mask_btn.setStyleSheet(
             f"QPushButton {{ background: transparent; border: none; "
@@ -176,11 +169,8 @@ class _ROICropToggle(QFrame):
 
 
 class CaptureReviewDialog(QDialog):
-    """
-    Review per-ROI sebelum foto disimpan sebagai data training. Muncul
-    hanya kalau template punya 2+ ROI aktif (lihat main_window._on_capture)
-    — dengan 0-1 ROI tidak ada ambiguitas untuk direview.
-    """
+    """Review per-ROI sebelum foto disimpan jadi data training.
+    Muncul hanya kalau template punya 2+ ROI aktif."""
 
     def __init__(self, frame: np.ndarray, rois: List[ROIData], default_label: str,
                  parent=None):
@@ -280,18 +270,8 @@ class CaptureReviewDialog(QDialog):
             self._save_btn.setText(f"Simpan {len(kept)} crop")
 
     def get_labeled_crops(self) -> List[Tuple[ROIData, np.ndarray, str, Optional[list]]]:
-        """(roi, crop_bgr, label, mask_polygon) untuk crop yang AKAN disimpan.
-
-        Crop yang ditandai dibuang tidak ikut — inilah satu-satunya sumber
-        kebenaran yang dipakai pemanggil untuk menulis ke dataset.
-
-        `mask_polygon` = override khusus foto ini kalau operator sempat
-        adjust (lihat _adjust_mask), else mask default milik ROI, else
-        None. Pemanggil (main_window._maybe_review_and_save_per_roi) yang
-        menerapkannya via apply_polygon_mask SEBELUM menyimpan — supaya
-        hasil di disk sudah ter-mask (folder *_per_roi tidak di-crop ulang
-        saat training, lihat training_worker.py).
-        """
+        """(roi, crop_bgr, label, mask_polygon) untuk crop yang AKAN disimpan —
+        crop yang dibuang tidak ikut. Mask diterapkan pemanggil sebelum simpan."""
         return [(t.roi, t.crop, t.label,
                  t.mask_polygon_override or getattr(t.roi, "mask_polygon", None))
                 for t in self._toggles if not t.excluded]

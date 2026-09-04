@@ -25,17 +25,8 @@ def _crop_images_to_rois(
     input_size: int = 256,
     mask_overrides: Optional[dict] = None,
 ) -> int:
-    """Crop all images in *src_dir* to each enabled ROI, resize, and save to *dst_dir*.
-
-    Returns number of cropped images saved.
-    Handles multiple ROIs: 1 image × N ROIs = N training images.
-    Used so training data matches inference pipeline (ROI-crop → mask → resize).
-
-    `mask_overrides` = `tmpl_cfg.get("image_mask_overrides")`, struktur
-    `{roi_uid: {"ok/<nama_file>.png": [[x,y],...]}}` — override manual per
-    gambar (outlier), fallback ke `roi["mask_polygon"]` kalau tidak ada
-    entry untuk gambar itu. Mayoritas gambar tidak punya entry sama sekali.
-    """
+    """Crop semua gambar src_dir ke tiap ROI aktif → mask → resize → dst_dir
+    (1 gambar × N ROI = N data training). `mask_overrides` = override per gambar."""
     import cv2
     import uuid
 
@@ -56,10 +47,8 @@ def _crop_images_to_rois(
             w = max(1, min(int(roi.get("width", 256)), w_img - x))
             h = max(1, min(int(roi.get("height", 256)), h_img - y))
             crop = img[y:y + h, x:x + w].copy()
-            # Mask polygon (opsional) SEBELUM resize — koordinat ROI-lokal
-            # tetap valid berapa pun input_size yang dipilih. ROI tanpa
-            # mask_polygon dan tanpa override → no-op, identik dengan
-            # perilaku sebelum fitur ini ada.
+            # Mask polygon SEBELUM resize — koordinat ROI-lokal tetap valid
+            # berapa pun input_size. ROI tanpa mask → no-op.
             roi_overrides = (mask_overrides or {}).get(roi.get("uid"))
             polygon = resolve_polygon_for_image(roi, roi_overrides, image_key)
             crop = apply_polygon_mask(crop, polygon)
@@ -73,9 +62,8 @@ def _crop_images_to_rois(
 
 
 def _merge_dirs(dirs: List[Path]) -> Path:
-    """Copy all images from multiple directories into one fresh temp dir.
-    Used for the no-ROI training path so augmented images (kept in their own
-    persisted folder) still end up alongside originals for training."""
+    """Salin gambar dari beberapa folder ke satu temp dir baru — dipakai jalur
+    training tanpa ROI supaya hasil augmentasi ikut bersama gambar asli."""
     import shutil
     import tempfile
 
@@ -122,12 +110,8 @@ class TrainingWorker(QObject):
 
     def _do_training(self, program: str, template_id: str,
                       force_regenerate_augmentation: bool = False):
-        """Internal: jalankan training dengan ROI cropping otomatis.
-
-        Full-frame images dari galeri di-crop ke setiap enabled ROI
-        sebelum training, sehingga data training identik dengan yang
-        dilihat inference pipeline (ROI-crop → resize). Support multi-ROI.
-        """
+        """Jalankan training dengan ROI cropping otomatis (support multi-ROI),
+        supaya data training identik dengan yang dilihat pipeline inferensi."""
         # Get template config
         tmpl_cfg = self._pm.get_template_config(program, template_id)
         if not tmpl_cfg:
@@ -139,10 +123,8 @@ class TrainingWorker(QObject):
         ng_dir = tmpl_dir / "images" / "ng"
         ok_per_roi_dir = tmpl_dir / "images" / "ok_per_roi"
 
-        # Gambar OK bisa berasal dari foto legacy (images/ok) ATAU dari crop
-        # per-ROI hasil CaptureReviewDialog (images/ok_per_roi) — template
-        # yang semua datanya dicapture lewat review per-ROI (2+ ROI) akan
-        # punya images/ok kosong secara sah, jadi keduanya harus dihitung.
+        # Gambar OK bisa dari images/ok (legacy) ATAU images/ok_per_roi —
+        # template multi-ROI bisa punya images/ok kosong secara sah.
         ok_legacy_count = len(list(ok_dir.glob("*.png")) + list(ok_dir.glob("*.jpg"))) if ok_dir.exists() else 0
         ok_per_roi_count = len(list(ok_per_roi_dir.glob("*.png"))) if ok_per_roi_dir.exists() else 0
         if ok_legacy_count + ok_per_roi_count == 0:
@@ -173,15 +155,8 @@ class TrainingWorker(QObject):
                 len(list(ng_dir.glob("*"))), n_ng,
             )
 
-            # ── Gabungkan crop per-ROI yang sudah dilabeli benar lewat
-            # CaptureReviewDialog (images/ok_per_roi, images/ng_per_roi) —
-            # ini sudah berbentuk crop ROI jadi (sudah di-resize ke
-            # input_size), jadi cukup disalin langsung, JANGAN di-crop ulang
-            # (itu akan meng-crop hasil crop, merusaknya). Beda dengan foto
-            # legacy di atas yang labelnya berlaku rata ke semua ROI, crop
-            # per-ROI ini sudah pasti benar untuk ROI spesifiknya masing-
-            # masing — lihat diskusi soal kenapa 1 foto bisa punya ROI1=OK
-            # ROI2=NG dan kenapa itu krusial dilabeli terpisah.
+            # ── Gabungkan crop per-ROI (images/{ok,ng}_per_roi): sudah crop
+            # + resize, JANGAN di-crop ulang. Labelnya pasti benar per ROI.
             ng_per_roi_dir = tmpl_dir / "images" / "ng_per_roi"
             n_ok_pr = n_ng_pr = 0
             if ok_per_roi_dir.exists():
@@ -196,20 +171,8 @@ class TrainingWorker(QObject):
                 logger.info("Crop per-ROI (CaptureReviewDialog): +%d OK, +%d NG",
                             n_ok_pr, n_ng_pr)
 
-            # ── Augmentasi (opsional) — jalan SETELAH ROI-crop, bukan
-            # sebelumnya. Kalau rotasi/flip/translasi dijalankan di
-            # full-frame lalu di-crop pakai kotak ROI yang sama, isinya
-            # sudah geser/tercermin ke posisi lain relatif kotak crop yang
-            # diam di tempat — hasilnya bukan "part yang sama, sedikit
-            # berubah", tapi crop yang salah sasaran (bisa nangkap
-            # background, atau part malah terpotong). Augmentasi harus
-            # jalan di atas hasil crop ROI itu sendiri supaya part tetap
-            # utuh & center di tiap variannya. Disimpan ke folder terpisah
-            # (persisten, di-skip kalau belum berubah) — hash-nya ikut
-            # sertakan fingerprint ROI saat ini, jadi kalau ROI
-            # digeser/diubah ukurannya, cache augmentasi lama otomatis
-            # dianggap basi juga, bukan cuma kalau setting augmentasi
-            # sendiri yang berubah.
+            # ── Augmentasi WAJIB setelah ROI-crop (di full-frame lalu di-crop
+            # = salah sasaran). Cache-nya ikut hash fingerprint ROI.
             if aug_enabled:
                 self.progress.emit(15, "Memeriksa augmentasi...")
                 ng_crop_has_files = any(ng_crop_dir.glob("*.png"))
@@ -223,9 +186,8 @@ class TrainingWorker(QObject):
                     self._pm.update_augmentation_config(program, template_id, {
                         "generated_config_hash": aug_result["config_hash"],
                         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")})
-                # Augmented images sudah berbentuk crop ROI jadi (sudah
-                # di-resize ke input_size) — cukup disalin langsung, JANGAN
-                # di-crop ulang (itu akan meng-crop hasil crop, merusaknya).
+                # Hasil augmentasi sudah crop + resize — salin langsung,
+                # JANGAN di-crop ulang.
                 import shutil as _shutil
                 if ok_aug_dir.exists():
                     for f in ok_aug_dir.glob("*.png"):
@@ -238,10 +200,8 @@ class TrainingWorker(QObject):
             ng_dir = ng_crop_dir
         else:
             logger.info("Tidak ada ROI — training dengan full-frame images")
-            # Tanpa ROI, seluruh frame itu sendiri "ROI"-nya — tidak ada
-            # kotak crop tetap yang bisa salah sasaran, jadi augmentasi di
-            # full-frame di sini aman dijalankan langsung, tanpa fingerprint
-            # ROI (tidak ada ROI untuk di-fingerprint).
+            # Tanpa ROI, seluruh frame adalah "ROI"-nya → augmentasi full-frame
+            # aman, tanpa fingerprint ROI.
             if aug_enabled:
                 self.progress.emit(3, "Memeriksa augmentasi...")
                 aug_result = generate_augmentations(
@@ -357,9 +317,8 @@ class TrainingWorker(QObject):
             output_dir=output_dir,
         )
 
-        # Kalibrasi normalisasi skor PER-ROI (skor PatchCore mentah beda skala
-        # tiap ROI; 1 ref global tak cukup untuk multi-ROI). Tulis norm.json ke
-        # output_dir SEBELUM disalin ke template oleh save_template_model.
+        # Kalibrasi skor PER-ROI (skala skor beda tiap ROI; 1 ref global tak
+        # cukup). norm.json ditulis SEBELUM disalin save_template_model.
         try:
             norm_ok, norm_ng = self._calibrate_per_roi(
                 program, template_id, tmpl_cfg, output_dir)
@@ -380,14 +339,8 @@ class TrainingWorker(QObject):
         self.finished.emit(result)
 
     def _calibrate_per_roi(self, program, template_id, tmpl_cfg, output_dir):
-        """Hitung score_ref per ROI & tulis norm.json.
-
-        Skor PatchCore mentah punya skala berbeda tiap ROI, jadi 1 ref global
-        salah untuk multi-ROI (bisa lewatkan semua NG). Untuk tiap ROI: crop
-        gambar OK/NG asli ke ROI itu → skor via model OpenVINO → hitung ref.
-        Returns (norm_ok_scores, norm_ng_scores) untuk histogram (dinormalisasi
-        per ROI, 0.5 = ambang), atau ([], []) bila tak bisa dikalibrasi.
-        """
+        """Hitung score_ref per ROI & tulis norm.json (1 ref global salah untuk
+        multi-ROI). Return (ok_scores, ng_scores) ternormalisasi untuk histogram."""
         import tempfile
         import json
         import shutil
@@ -400,10 +353,8 @@ class TrainingWorker(QObject):
         tmpl_dir = self._pm._get_template_dir(program) / template_id
         ok_src = tmpl_dir / "images" / "ok"
         ng_src = tmpl_dir / "images" / "ng"
-        # Crop per-ROI yang disimpan lewat CaptureReviewDialog (nama file
-        # mengandung roi<uid[:4]>) — sudah pasti berlaku untuk ROI ini
-        # spesifik (bukan tebakan dari foto full-frame yang labelnya
-        # berlaku rata ke semua ROI), jadi lebih akurat untuk kalibrasi.
+        # Crop per-ROI (nama file mengandung roi<uid[:4]>) pasti berlaku untuk
+        # ROI ini — lebih akurat untuk kalibrasi daripada foto full-frame.
         ok_per_roi_src = tmpl_dir / "images" / "ok_per_roi"
         ng_per_roi_src = tmpl_dir / "images" / "ng_per_roi"
         input_size = tmpl_cfg.get("input_size", 256)
@@ -417,8 +368,7 @@ class TrainingWorker(QObject):
             ngd = Path(tempfile.mkdtemp(prefix="vi_cal_ng_"))
             try:
                 # Foto legacy full-frame: fallback best-effort — labelnya
-                # berlaku rata ke semua ROI karena data lama tidak punya
-                # info kondisi per-ROI yang lebih akurat.
+                # berlaku rata ke semua ROI.
                 _crop_images_to_rois(ok_src, [roi], okd, input_size)
                 if ng_src.exists():
                     _crop_images_to_rois(ng_src, [roi], ngd, input_size)

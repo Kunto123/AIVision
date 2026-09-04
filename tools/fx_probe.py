@@ -1,23 +1,7 @@
 """Probe FX Computer Link (protokol port pemrograman) — alternatif MODBUS.
 
-Latar: FX3U MODBUS menuntut adaptor -MB khusus dan blok setup M8411. Kalau
-unit tidak mendukungnya, jalur lain adalah protokol yang dipakai GX Works2
-sendiri — protokol port pemrograman FX. Library `fxplc` mengimplementasikannya
-dan bisa membaca/menulis device X, Y, M, S, T, D secara langsung.
-
-Kalau ini jalan, SELURUH ladder yang sudah dirancang tetap terpakai apa adanya,
-karena kontraknya memang memakai relay M. Yang berubah hanya transport di
-aplikasi.
-
-Uji ini sengaja membaca blok special relay M8000+ lewat ALAMAT ASLINYA
-(0x01E0) memakai read_bytes — BUKAN read_bit("M8000"). Peta alamat fxplc
-itu LINEAR (FXPLCClient.py:32): "M": (0x0100, 8) → 0x0100 + nomor//8, sehingga
-read_bit("M8000") mengarah ke 0x04E8 yang tidak ada isinya dan tidak pernah
-dijawab PLC (terverifikasi lapangan 2026-08-26: read_bytes(0x01E0,1)=0x09 saat
-PLC RUN, read_bit("M8000") selalu NoResponseError).
-
     python tools/fx_probe.py --port COM11
-    python tools/fx_probe.py --port COM11 --baud 9600
+    python tools/fx_probe.py --port COM11 --baud 38400
 """
 from __future__ import annotations
 
@@ -53,9 +37,7 @@ async def probe(port: str, baud: int, timeout: float) -> int:
     client = FXPLCClient(transport)
     ok_any = False
 
-    # ── 1. Blok special relay M8000+ — baca RAW di alamat aslinya ──────
-    # (Bukan read_bit("M8000"): peta linear fxplc tidak pernah sampai ke
-    # sini. Lihat catatan docstring di atas.)
+    # ── 1. Blok special relay M8000+ — baca RAW di alamat aslinya.
     print(f"\n[1] Special relay M8000+ — read_bytes(0x{SPECIAL_M_BASE:04X}, 2)")
     try:
         raw = await client.read_bytes(SPECIAL_M_BASE, 2)
@@ -70,9 +52,7 @@ async def probe(port: str, baud: int, timeout: float) -> int:
     except Exception as e:
         print(f"    GAGAL: {e!r}")
 
-    # ── 2. M8013 — clock 1 detik; harus BERUBAH ────────────────────────
-    # Sama seperti [1]: dibaca dari byte blok special relay (byte ke-2,
-    # bit 5), bukan lewat read_bit.
+    # ── 2. M8013 — clock 1 detik
     print("\n[2] M8013 (clock 1 detik) — diamati 3 detik")
     seen = set()
     try:
@@ -89,7 +69,7 @@ async def probe(port: str, baud: int, timeout: float) -> int:
     except Exception as e:
         print(f"    GAGAL: {e!r}")
 
-    # ── 3. Device yang dipakai kontrak kita ────────────────────────────
+    # ── 3. Device yang dipakai kontrak.
     print("\n[3] Relay kontrak VisionInspector")
     labels = [("M1", "result_ok"), ("M3", "part_ready"),
               ("M7", "heartbeat"), ("M8", "ng_from_plc")]
@@ -101,7 +81,7 @@ async def probe(port: str, baud: int, timeout: float) -> int:
         except Exception as e:
             print(f"    {label:5s} ({nama:12s}) GAGAL: {e!r}")
 
-    # ── 4. Tulis — yang paling menentukan untuk kita ───────────────────
+    # ── 4. Tulis — yang paling menentukan untuk.
     print("\n[4] Uji TULIS ke M1 (coil result_ok)")
     try:
         awal = await client.read_bit("M1")
@@ -134,12 +114,8 @@ async def probe(port: str, baud: int, timeout: float) -> int:
 
 
 async def bench(port: str, baud: int, timeout: float) -> int:
-    """Ukur waktu satu siklus poll sungguhan.
-
-    Ini menentukan apakah jalur FX sanggup menggantikan Modbus: satu tick
-    membaca 4 coil input dan menulis 1 coil heartbeat. Kalau totalnya
-    mendekati interval poll (200 ms), jalurnya tidak sanggup dan kita perlu
-    menurunkan laju poll atau membaca banyak bit sekaligus.
+    """
+    Ukur waktu satu siklus poll
     """
     print(f"Membuka {port} @ {baud} …")
     try:
@@ -221,9 +197,6 @@ M_BASE = 0x0100
 
 async def batch(port: str, baud: int, timeout: float) -> int:
     """Buktikan satu read_bytes bisa menggantikan empat read_bit.
-
-    Membandingkan hasilnya bit-per-bit supaya optimasi ini tidak dipakai
-    berdasarkan asumsi, lalu mengukur selisih waktunya.
     """
     print(f"Membuka {port} @ {baud} …")
     try:
@@ -233,7 +206,7 @@ async def batch(port: str, baud: int, timeout: float) -> int:
         return 1
     client = FXPLCClient(transport)
 
-    CEK = [0, 1, 3, 5, 6, 7, 8]          # relay yang dipakai kontrak kita
+    CEK = [0, 1, 3, 5, 6, 7, 8]          # relay yang dipakai kontrak
     rc = 2
     try:
         print(f"\n[1] Borongan: read_bytes(0x{M_BASE:04X}, 2) → M0-M15")
@@ -260,10 +233,6 @@ async def batch(port: str, baud: int, timeout: float) -> int:
             print("    COCOK SEMUA — borongan sah dipakai.")
             rc = 0
 
-        # ── Verifikasi yang BENAR-BENAR membedakan ─────────────────────
-        # Membandingkan nol dengan nol akan cocok walau perhitungan bit
-        # meleset. Jadi tulis pola yang diketahui, lalu periksa byte-nya
-        # persis. M1 (bit 1) dan M3 (bit 3) → byte0 harus 0b00001010 = 0x0A.
         print("\n[4] Verifikasi pola: set M1 dan M3, byte0 harus 0x0A")
         awal = {n: await client.read_bit(f"M{n}") for n in (1, 3)}
         try:

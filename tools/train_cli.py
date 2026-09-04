@@ -50,10 +50,8 @@ def train(program: str, template_id: str):
     tmpl_dir = pm._get_template_dir(program) / template_id
     ok_dir = tmpl_dir / "images" / "ok"
     ng_dir = tmpl_dir / "images" / "ng"
-    # Gambar OK bisa dari foto legacy (images/ok) ATAU crop per-ROI hasil
-    # CaptureReviewDialog (images/ok_per_roi) — template yang semua datanya
-    # dicapture lewat review per-ROI (2+ ROI) akan punya images/ok kosong
-    # secara sah, jadi keduanya harus dihitung.
+    # Gambar OK bisa dari images/ok (legacy) ATAU images/ok_per_roi — template
+    # multi-ROI bisa punya images/ok kosong secara sah, jadi hitung keduanya.
     ok_per_roi_dir = tmpl_dir / "images" / "ok_per_roi"
     ng_per_roi_dir = tmpl_dir / "images" / "ng_per_roi"
 

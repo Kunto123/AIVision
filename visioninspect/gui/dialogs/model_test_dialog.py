@@ -51,12 +51,8 @@ def _bgr_to_pixmap(image: np.ndarray) -> QPixmap:
 # ── Per-photo detail (read-only) ────────────────────────────────────────
 
 class PhotoDetailDialog(QDialog):
-    """
-    Tampilkan satu foto uji dengan overlay kotak ROI + breakdown per-ROI.
-    Read-only — tidak ada tombol koreksi/simpan (beda dengan TuningDialog,
-    yang punya alur Register-as-OK/NG + Additional Learning yang tidak
-    relevan untuk sekadar sanity-check foto statis).
-    """
+    """Satu foto uji + overlay kotak ROI & breakdown per-ROI.
+    Read-only — tanpa tombol koreksi/simpan (beda dengan TuningDialog)."""
 
     def __init__(self, photo_result: dict, parent=None):
         super().__init__(parent)

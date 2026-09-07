@@ -90,35 +90,46 @@ class TeachPage(QWidget):
         title_row.addStretch()
         left_layout.addLayout(title_row)
 
-        # Template selector
+        # Template selector — combo di baris atas, tombol aksi di baris bawah
+        # (jangan satu baris: panel kiri sempit, label tombol ke-clip).
         tmpl_bar = QFrame()
         tmpl_bar.setObjectName("cardPanel")
-        tmpl_bar.setMaximumHeight(44)
-        tmpl_layout = QHBoxLayout(tmpl_bar)
-        tmpl_layout.setContentsMargins(8, 4, 8, 4)
-        tmpl_layout.setSpacing(6)
+        tmpl_col = QVBoxLayout(tmpl_bar)
+        tmpl_col.setContentsMargins(8, 6, 8, 6)
+        tmpl_col.setSpacing(6)
 
-        tmpl_layout.addWidget(QLabel("Template:"))
+        combo_row = QHBoxLayout()
+        combo_row.setSpacing(6)
+        combo_row.addWidget(QLabel("Template:"))
         self._template_combo = QComboBox()
         self._template_combo.setMinimumWidth(160)
         self._template_combo.setToolTip("Pilih template aktif")
-        tmpl_layout.addWidget(self._template_combo, 1)
+        combo_row.addWidget(self._template_combo, 1)
+        tmpl_col.addLayout(combo_row)
+
+        # Tombol aksi template: padding rapat, ukur otomatis ke teks.
+        _tmpl_btn_css = "QPushButton { padding: 5px 12px; }"
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
 
         self._add_template_btn = QPushButton("+ Baru")
-        self._add_template_btn.setFixedWidth(72)
         self._add_template_btn.setObjectName("successButton")
+        self._add_template_btn.setStyleSheet(_tmpl_btn_css)
         self._add_template_btn.setToolTip("Buat template baru")
-        tmpl_layout.addWidget(self._add_template_btn)
+        btn_row.addWidget(self._add_template_btn)
 
         self._rename_template_btn = QPushButton("Ubah")
-        self._rename_template_btn.setFixedWidth(54)
+        self._rename_template_btn.setStyleSheet(_tmpl_btn_css)
         self._rename_template_btn.setToolTip("Ubah nama template")
-        tmpl_layout.addWidget(self._rename_template_btn)
+        btn_row.addWidget(self._rename_template_btn)
 
         self._clear_btn = QPushButton("Hapus")
-        self._clear_btn.setFixedWidth(60)
+        self._clear_btn.setStyleSheet(_tmpl_btn_css)
         self._clear_btn.setToolTip("Hapus template aktif")
-        tmpl_layout.addWidget(self._clear_btn)
+        btn_row.addWidget(self._clear_btn)
+
+        btn_row.addStretch(1)
+        tmpl_col.addLayout(btn_row)
 
         left_layout.addWidget(tmpl_bar)
 

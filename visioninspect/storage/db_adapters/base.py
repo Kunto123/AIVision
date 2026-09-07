@@ -62,7 +62,9 @@ class BaseAdapter:
     # ── util eksekusi ──────────────────────────────────────────────────
 
     def _run(self, sql: str, params=(), fetch: Optional[str] = None):
-        """fetch: None (rowcount) | 'one' | 'all' | 'id' (lastrowid/rowcount)."""
+        """fetch: None | 'one' | 'all' | 'affected' (jumlah baris; 1 bila driver
+        tak melaporkan). JANGAN pakai cursor.lastrowid — psycopg2 mengembalikan
+        0 (OID) untuk tabel biasa, itu bikin INSERT sukses dianggap gagal."""
         conn = self._connect()
         try:
             cur = conn.cursor()
@@ -75,12 +77,12 @@ class BaseAdapter:
                 rows = cur.fetchall()
                 conn.commit()
                 return rows
-            if fetch == "id":
-                rid = getattr(cur, "lastrowid", None)
-                conn.commit()
-                return rid if rid is not None else cur.rowcount
             conn.commit()
-            return cur.rowcount
+            rc = cur.rowcount
+            if fetch == "affected":
+                # -1/None = driver tak melapor (mis. pyodbc NOCOUNT) → anggap 1
+                return 1 if rc in (-1, None) else rc
+            return rc
         finally:
             try:
                 conn.close()
@@ -98,17 +100,18 @@ class BaseAdapter:
             return False, str(e).strip()
 
     def insert(self, table: str, cols: List[str], vals: List[object],
-               server_time_cols: List[str]) -> Optional[int]:
-        """INSERT dinamis; kolom di-quote per engine, nilai parameterized."""
+               server_time_cols: List[str]) -> int:
+        """INSERT dinamis; kolom di-quote per engine, nilai parameterized.
+        Return jumlah baris masuk (1 = sukses)."""
         all_cols = list(cols) + list(server_time_cols)
         if not all_cols:
-            return None
+            return 0
         placeholders = ([self.ph] * len(cols)
                         + [self.server_now()] * len(server_time_cols))
         sql = (f"INSERT INTO {self.q(table)} "
                f"({', '.join(self.q(c) for c in all_cols)}) "
                f"VALUES ({', '.join(placeholders)})")
-        return self._run(sql, tuple(vals), fetch="id")
+        return self._run(sql, tuple(vals), fetch="affected")
 
     def _select_user(self, table: str, where_col: str, value) -> Optional[dict]:
         sql = (f"SELECT {', '.join(self.q(c) for c in USER_TABLE_COLUMNS)} "

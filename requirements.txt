@@ -85,6 +85,14 @@ werkzeug>=3.0,<4.0
 
 # ===== Optional =====
 flask>=3.0,<4.0
-psycopg2-binary>=2.9,<3.0
 psutil>=5.9,<8.0
 pytest>=8.0,<10.0
+
+# ===== DB eksternal (db.txt) =====
+# psycopg2 = PostgreSQL (dipakai juga oleh postgres_db.py lama) — selalu dipasang.
+# Driver lain HANYA dipasang saat engine itu dipakai (adapter lazy-import):
+#   MySQL/MariaDB : pip install "pymysql>=1.1,<2.0"
+#   SQL Server    : pip install "pyodbc>=5.1,<6.0"  +  Microsoft ODBC Driver 18
+#                   (installer .msi, di luar pip, hak admin di PC edge)
+#   SQLite        : stdlib — tidak perlu apa-apa
+psycopg2-binary>=2.9,<3.0

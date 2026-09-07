@@ -30,7 +30,7 @@ python -m venv .vision
 
 > ⚠️ Jangan pakai launcher `py`. Selalu `.vision\Scripts\python.exe` atau aktifkan venv dulu (`.vision\Scripts\activate`).
 
-Login pertama kali (tanpa PostgreSQL): user `admin`, password `admin` — wajib ganti saat login pertama. Kalau PostgreSQL aktif, akun diambil dari `qc_user_accounts` (tambah user lewat `tools/pg_add_user.py`).
+Login pertama kali: user `admin`, password `admin` — wajib ganti saat login pertama. Akun disimpan lokal (tabel SQLite `users`, atau `data\users.json` kalau `db.txt` aktif). DB eksternal untuk auth + push diatur lewat `db.txt` (lihat di bawah).
 
 ## Persyaratan
 
@@ -60,9 +60,22 @@ run.bat                                    :: cara normal
 .vision\Scripts\python.exe run.py --log-level DEBUG
 ```
 
-Opsi CLI (`run.py` / `visioninspect/main.py`): `--config <path>`, `--data-dir <path>`, `--log-level DEBUG|INFO|WARNING|ERROR`, `--version`.
+Opsi CLI (`run.py` / `visioninspect/main.py`): `--config <path>`, `--data-dir <path>`, `--log-level DEBUG|INFO|WARNING|ERROR`, `--version`, `--check-db`, `--encrypt-secret <teks>`.
 
 **edge_mode** — set `"edge_mode": true` di `data\config.json` supaya `torch` tidak ikut dimuat saat start. PC edge inference-only wajib pakai ini.
+
+## Database eksternal (db.txt)
+
+Satu-satunya jalur DB eksternal. Kalau file **`db.txt`** ada di folder yang sama dengan `VisionInspect.exe` (root proyek saat dev), aplikasi push hasil inspeksi OK ke tabel DB customer dan mengecek login ke tabel user di DB itu. **Tanpa `db.txt`**: auth hanya tabel SQLite `users` lokal, tidak ada push. (Tidak ada lagi setting PostgreSQL di tab Settings — semua di `db.txt`.)
+
+- **Engine**: PostgreSQL, MySQL/MariaDB, SQL Server, atau SQLite. Driver: `psycopg2` sudah ada; `pip install pymysql` / `pyodbc` (SQL Server juga butuh *Microsoft ODBC Driver 18* di-install manual).
+- **Konfigurasi + pemetaan kolom** semua di `db.txt` — salin `db.txt.example`, isi, lalu:
+  ```batch
+  .vision\Scripts\python.exe run.py --check-db          :: validasi tanpa buka GUI
+  .vision\Scripts\python.exe run.py --encrypt-secret "passwordDB"   :: -> token enc:v2: untuk DB_PASSWORD
+  ```
+- **Login dua sumber**: akun lokal (`data\users.json`, migrasi otomatis dari SQLite saat pertama) **dan** tabel `DB_USER_TABLE`. Cocok di salah satu = masuk. Manajemen akun di tab Akun menulis ke store lokal; akun DB dibuat via `run.py --db-user-add <user> <pass> [role]`.
+- Detail desain: lihat dokumen desain terpisah.
 
 ## Training
 

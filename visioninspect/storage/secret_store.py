@@ -30,6 +30,9 @@ from visioninspect.utils.logging_setup import get_logger
 logger = get_logger("app")
 
 PREFIX = "enc:v1:"
+# v2: Fernet + key-file di SEMUA platform (bukan DPAPI). Reversible & portabel
+# asal file secret.key ikut disalin — dipakai untuk DB_PASSWORD di db.txt.
+PREFIX_V2 = "enc:v2:"
 _KEY_DIR = Path.home() / ".visioninspect"
 _KEY_FILE = _KEY_DIR / "secret.key"
 
@@ -136,11 +139,29 @@ def encrypt(plaintext: str) -> str:
     return PREFIX + base64.b64encode(_encrypt_bytes(plaintext.encode("utf-8"))).decode("ascii")
 
 
+def encrypt_portable(plaintext: str) -> str:
+    """Enkripsi -> token ``enc:v2:`` (Fernet + secret.key, lintas-platform).
+    Tanpa cryptography: fallback ke enc:v1:. String kosong -> kosong."""
+    if not plaintext:
+        return ""
+    if not HAS_FERNET:
+        return encrypt(plaintext)
+    key = _get_machine_key()
+    tok = Fernet(base64.urlsafe_b64encode(key)).encrypt(plaintext.encode("utf-8"))
+    return PREFIX_V2 + tok.decode("ascii")
+
+
 def decrypt(token: str) -> str:
-    """Dekripsi token ``enc:v1:`` -> plaintext. Token plaintext lama
+    """Dekripsi token ``enc:v1:``/``enc:v2:`` -> plaintext. Token plaintext lama
     (tanpa prefix) di-pass-through untuk migrasi."""
     if not token:
         return ""
+    if token.startswith(PREFIX_V2):
+        if not HAS_FERNET:
+            raise RuntimeError("Token enc:v2: butuh paket 'cryptography'")
+        key = _get_machine_key()
+        return Fernet(base64.urlsafe_b64encode(key)).decrypt(
+            token[len(PREFIX_V2):].encode("ascii")).decode("utf-8")
     if not token.startswith(PREFIX):
         return token
     raw = base64.b64decode(token[len(PREFIX):])
@@ -148,4 +169,4 @@ def decrypt(token: str) -> str:
 
 
 def is_encrypted(token: str) -> bool:
-    return bool(token) and token.startswith(PREFIX)
+    return bool(token) and (token.startswith(PREFIX) or token.startswith(PREFIX_V2))

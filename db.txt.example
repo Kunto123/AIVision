@@ -1,0 +1,41 @@
+# ============================================================================
+#  db.txt - konfigurasi database eksternal VisionInspect
+#  Letakkan file ini di folder yang sama dengan VisionInspect.exe.
+#  Hapus / kosongkan DB_ENGINE untuk mematikan fitur (perilaku lama dipakai).
+#  Cek konfigurasi tanpa buka aplikasi:  VisionInspect.exe --check-db
+# ============================================================================
+
+# ---- Koneksi ----
+DB_ENGINE=postgresql            # postgresql | mysql | sqlserver | sqlite
+DB_HOST=127.0.0.1
+DB_PORT=5432
+DB_NAME=qc_central             # sqlite: isi path file .db
+DB_USER=visioninspect
+DB_PASSWORD=                   # plain, atau token enc:v2: dari --encrypt-secret
+DB_EXTRA=                      # k=v;k=v  (SQL Server: TrustServerCertificate=yes)
+DB_CONNECT_TIMEOUT=10
+
+# ---- Tabel ----
+DB_INSPECTION_TABLE=production_qc_log
+DB_USER_TABLE=vi_user_accounts
+
+# ---- Identitas stasiun ----
+STATION_ID=STN-01
+
+# ---- Pemetaan kolom: MAP_<kolom_db>=<source> ----
+# source = nama field di bawah, atau @server_now, atau @const:<teks>
+#   partname program template_id operator judgement
+#   score_worst score_avg threshold part_check_score latency_ms num_rois
+#   station_id timestamp_edge
+# Kolom DB yang tidak di-MAP tidak dikirim (pakai DEFAULT / NULL milik DB).
+MAP_part_name=partname
+MAP_checked_at=@server_now
+MAP_operator=operator
+MAP_qc_score=score_worst
+MAP_gate_score=part_check_score
+MAP_station=station_id
+
+
+#run.py --encrypt-secret "passwordDB"    :: -> token enc:v2: untuk DB_PASSWORD
+#run.py --check-db                       :: validasi (koneksi, tiap MAP, kolom NOT NULL, tabel user)
+#run.py --db-user-add <username> <password> [role] :: buat akun di tabel user DB

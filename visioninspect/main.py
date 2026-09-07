@@ -102,6 +102,18 @@ def parse_args() -> argparse.Namespace:
         help="Logging level override",
     )
     parser.add_argument(
+        "--check-db", action="store_true",
+        help="Validasi konfigurasi db.txt lalu keluar",
+    )
+    parser.add_argument(
+        "--encrypt-secret", type=str, default="", metavar="TEKS",
+        help="Enkripsi TEKS jadi token enc:v2: untuk DB_PASSWORD di db.txt",
+    )
+    parser.add_argument(
+        "--db-user-add", nargs="+", default=None, metavar="ARG",
+        help="Tambah akun ke tabel user DB: <username> <password> [role]",
+    )
+    parser.add_argument(
         "--version", action="version", version=f"{APP_NAME} v{APP_VERSION}"
     )
     return parser.parse_args()
@@ -109,6 +121,13 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     args = parse_args()
+
+    # 0. Sub-perintah db.txt (idealnya sudah ditangani run.py sebelum import berat)
+    if args.encrypt_secret or args.check_db or args.db_user_add:
+        from visioninspect.storage import db_cli
+        if args.db_user_add:
+            return db_cli.db_user_add(args.db_user_add)
+        return db_cli.main(args)
 
     # 1. Config
     try:

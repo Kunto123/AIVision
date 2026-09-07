@@ -56,7 +56,6 @@ from visioninspect.gui.pages.settings_page import SettingsPage
 from visioninspect.gui.pages.io_settings_page import IOSettingsPage
 from visioninspect.gui.pages.account_page import AccountPage
 from visioninspect.gui.dialogs.login_dialog import LoginDialog
-from visioninspect.storage import secret_store
 
 logger = get_logger("app")
 
@@ -99,34 +98,41 @@ class MainWindow(QMainWindow):
 
         # Database (shared instance for history, counters, corrections, users)
         from visioninspect.storage.db import Database
-        from visioninspect.storage.postgres_db import PostgresDB
-        from visioninspect.storage import secret_store
         self._db = Database(data_dir / "database.db")
-        # PostgreSQL (opsional). WAJIB sub-dict "postgresql" — get_all() meneruskan
-        # config penuh sehingga "enabled" tak ketemu dan PG keliru dianggap mati.
-        self._pg = PostgresDB(self._config.get("postgresql", {}))
-        if self._pg.is_enabled:
-            # Pastikan DB siap pakai (tabel ada, admin ter-seed) begitu terhubung
-            self._pg.ensure_ready()
-            # PostgreSQL = SATU-SATUNYA sumber akun (sync SQLite→PG dibuang).
-            # SQLite hanya fallback autentikasi saat PG mati.
 
-        # C4: migrasi kredensial — password PG plaintext lama dienkripsi sekali
-        pg_cfg = self._config.get("postgresql", {})
-        pg_pw = pg_cfg.get("password", "")
-        if pg_pw and not secret_store.is_encrypted(pg_pw):
-            try:
-                self._config.set("postgresql.password", secret_store.encrypt(pg_pw))
-                self._config.save()
-                logger.info("Migrasi C4: password PostgreSQL dienkripsi (bukan plaintext)")
-            except Exception as e:
-                logger.warning("Migrasi enkripsi password PG gagal: %s", e)
-
-        # C3: flush sisa outbox saat startup + tick berkala 30 detik
+        # Outbox push: flush sisa saat startup + tick berkala 30 detik.
         self._pg_flush_timer = QTimer(self)
         self._pg_flush_timer.timeout.connect(self._flush_pg_outbox)
         self._pg_flush_timer.start(30000)
         QTimer.singleShot(1500, self._flush_pg_outbox)
+
+        # ── DB eksternal via db.txt (opsional) ────────────────────────────
+        # Satu-satunya jalur DB eksternal. Tanpa db.txt / DB_ENGINE kosong →
+        # _extdb None: auth SQLite lokal saja, tidak ada push.
+        from visioninspect.storage import db_txt
+        from visioninspect.storage.user_file import UserFileStore
+        self._db_settings = db_txt.load()
+        self._extdb = None
+        self._user_file = None
+        self._auth = None
+        for _e in self._db_settings.errors:
+            logger.error("[db.txt] %s", _e)
+        if self._db_settings.is_configured:
+            from visioninspect.storage.external_db import ExternalDB
+            from visioninspect.storage.multi_auth import MultiAuth
+            try:
+                self._extdb = ExternalDB(self._db_settings)
+            except Exception as e:
+                logger.error("[db.txt] inisialisasi DB eksternal gagal: %s", e)
+                self._extdb = None
+            self._user_file = UserFileStore(data_dir / "users.json", self._db)
+            self._auth = MultiAuth(self._user_file, self._extdb)
+            logger.info("[db.txt] DB eksternal aktif (engine=%s, mapping=%d kolom)",
+                        self._db_settings.engine, len(self._db_settings.mapping))
+            # Validasi (connect + ensure_user_table + cek mapping) di thread —
+            # DB tak terjangkau tidak boleh menahan startup.
+            if self._extdb is not None:
+                threading.Thread(target=self._check_extdb_async, daemon=True).start()
 
         # Authentication state
         self._current_user: Optional[dict] = None
@@ -239,7 +245,7 @@ class MainWindow(QMainWindow):
         self._last_part_ready = False
         self._pc_active_for_overlay = False
         self._last_gate_roi: Optional[dict] = None
-        # Part check score untuk push ke PG
+        # Part check score untuk push ke DB eksternal
         self._last_part_check_score = 1.0
         # Worst score terakhir untuk NG tick
         self._last_worst_score = 0.0
@@ -248,7 +254,7 @@ class MainWindow(QMainWindow):
         self._roi_col_judgement: dict = {}        # {idx: "OK"/"NG"}
         self._roi_col_timestamp: float = 0.0       # time.monotonic() terakhir update
         self._roi_col_duration: float = 3.0        # detik sebelum balik orange
-        # Part name untuk push ke PG (di-set saat ganti template)
+        # Part name untuk push ke DB eksternal (di-set saat ganti template)
         self._active_partname = ""
 
         # ── Replay video (uji model — "kamera virtual") ──
@@ -352,8 +358,9 @@ class MainWindow(QMainWindow):
         self._teach_page = TeachPage(self._tr)
         self._history_page = HistoryPage(self._tr)
         self._settings_page = SettingsPage(self._tr, self._config)
-        auth_db = self._pg if self._pg.is_enabled else self._db
-        self._account_page = AccountPage(auth_db)
+        # db.txt aktif → akun dikelola di store lokal (users.json) via MultiAuth.
+        # Selain itu → tabel SQLite `users`.
+        self._account_page = AccountPage(self._auth or self._db)
         self._io_page = IOSettingsPage(self._tr, self._config)
 
         # Tab: RUN(0) TEACH(1) HISTORY(2) SETTINGS(3) Akun(4) I/O(5)
@@ -442,15 +449,9 @@ class MainWindow(QMainWindow):
 
     def _show_login(self):
         """Show login dialog, apply role visibility after success."""
-        # is_enabled cuma flag config → cek koneksi hidup; PG tak terjangkau =
-        # fallback auth SQLite. timeout=None (jangan kecil: false-negative IPv6).
-        if self._pg.is_enabled and self._pg.is_alive():
-            auth_db = self._pg
-        else:
-            if self._pg.is_enabled:
-                logger.warning(
-                    "PostgreSQL tidak terjangkau — fallback autentikasi SQLite lokal (C2)")
-            auth_db = self._db
+        # db.txt aktif → MultiAuth (users.json lokal + tabel DB, cek keduanya).
+        # Selain itu → tabel SQLite `users` lokal.
+        auth_db = self._auth or self._db
         dialog = LoginDialog(auth_db, self)
         if dialog.exec():
             self._current_user = dialog.user
@@ -1279,7 +1280,7 @@ class MainWindow(QMainWindow):
                     # Transisi part belum-ready → ready: pulse coil part_ready
                     # ke PLC (opsional — default hanya OK/NG, io_mode)
                     self._plc_pulse("part_ready")
-                # Capture part check score untuk PG push
+                # Capture part check score untuk push DB eksternal
                 if result.get("part_check_score") is not None:
                     self._last_part_check_score = result["part_check_score"]
 
@@ -1300,7 +1301,7 @@ class MainWindow(QMainWindow):
                 self._roi_col_judgement[idx] = r.get("judgement", "OK")
             self._roi_col_timestamp = time.monotonic()
 
-            # Push PG TIDAK di sini (per-frame = boros, tanpa backpressure) —
+            # Push DB TIDAK di sini (per-frame = boros, tanpa backpressure) —
             # dilakukan per verdict-event lewat outbox.
 
             avg_latency = float(avg_latency) if avg_latency is not None else 0.0
@@ -1366,10 +1367,11 @@ class MainWindow(QMainWindow):
                         self._inspection_ok, self._inspection_ng)
                     # Feedback ke PLC: publikasi hasil OK
                     self._publish_result("OK")
-                    # Push PG untuk SETIAP part OK, bukan sampel — tabel ini HITUNGAN
-                    # part bagus. Lewat outbox, jadi aman kalau PG mati.
-                    self._push_inspection_async(
-                        self._build_push_entry(worst_score))
+                    # Push SETIAP part OK ke DB eksternal (db.txt + mapping), bukan
+                    # sampel. Lewat outbox (aman kalau DB mati). Tanpa db.txt: tidak push.
+                    if self._extdb is not None and self._db_settings.has_mapping:
+                        self._push_inspection_async(self._build_source_snapshot(
+                            worst_score, roi_results, avg_latency))
 
             else:  # raw_judgement == "NG"
                 # NG diperlakukan SAMA dengan OK: satu part = satu vonis.
@@ -1439,7 +1441,7 @@ class MainWindow(QMainWindow):
                                       'template_name': self._active_partname},
                     })
                     # Sampling 1-dari-30 ini khusus simpan gambar+history lokal.
-                    # Push PG bukan di sini — PG terima SETIAP part OK.
+                    # Push DB bukan di sini — DB eksternal terima SETIAP part OK.
 
         except Exception as e:
             logger.warning("Inference result error: %s", e)
@@ -1448,39 +1450,40 @@ class MainWindow(QMainWindow):
             self._replay_finish_if_pending()
 
     def _current_operator_name(self) -> str:
-        """Nama akun yang sedang login (untuk history lokal & mpcheck PG)."""
+        """Nama akun yang sedang login (untuk history lokal & source `operator`)."""
         if not self._current_user:
             return ""
         return (self._current_user.get("display_name")
                 or self._current_user.get("username", ""))
 
-    def _build_push_entry(self, score: float) -> dict:
-        """Bangun kwargs `PostgresDB.push_inspection` — 5 kolom: partname, datecheckmc
-        (waktu INSPEKSI), mpcheck (akun operator), data1/data2 (skor)."""
-        operator = ""
-        if self._current_user:
-            operator = (self._current_user.get("display_name")
-                        or self._current_user.get("username", ""))
-        if not operator:
-            # Tetap dikirim: hitungan produksi lebih berharga daripada baris
-            # yang hilang. Tapi dicatat supaya ketahuan kalau sering terjadi.
-            logger.warning("Push PG tanpa operator — mpcheck akan kosong.")
-        # Part-check tidak aktif → tidak ada yang diukur. Kirim 0, jangan
-        # nilai awal 1.0 yang terlihat seperti hasil pengukuran.
-        data1 = (float(self._last_part_check_score)
-                 if self._pc_active_for_overlay else 0.0)
+    def _build_source_snapshot(self, score: float, roi_results: list = None,
+                               latency: float = None) -> dict:
+        """Snapshot semua source field saat inspeksi (db.txt). Mapping ke kolom DB
+        di-resolve nanti saat flush — perbaikan db.txt ikut kepakai untuk antrian."""
+        rr = roi_results or []
+        scores = [r.get("score", 0.0) for r in rr]
         return {
+            "__snapshot__": True,
             "partname": self._active_partname or self._active_program,
-            "datecheckmc": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "mpcheck": operator,
-            "data1": data1,
-            "data2": float(score),
+            "program": self._active_program,
+            "template_id": self._active_template,
+            "operator": self._current_operator_name(),
+            "judgement": "OK",
+            "score_worst": float(score),
+            "score_avg": float(sum(scores) / len(scores)) if scores else float(score),
+            "threshold": float(self._inference_engine.threshold),
+            "part_check_score": (float(self._last_part_check_score)
+                                 if self._pc_active_for_overlay else 0.0),
+            "latency_ms": float(latency) if latency is not None else 0.0,
+            "num_rois": len(rr),
+            "station_id": self._db_settings.station_id,
+            "timestamp_edge": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
     def _push_inspection_async(self, entry: dict) -> None:
-        """Enqueue hasil ke outbox SQLite lalu flush ke PG. Outbox tahan-restart:
+        """Enqueue hasil ke outbox SQLite lalu flush. Outbox tahan-restart:
         entry di-retry oleh _flush_pg_outbox, tidak pernah hilang diam-diam."""
-        if not self._pg.is_enabled:
+        if self._extdb is None:
             return
         try:
             self._db.add_outbox(entry)
@@ -1489,10 +1492,25 @@ class MainWindow(QMainWindow):
             return
         threading.Thread(target=self._flush_pg_outbox, daemon=True).start()
 
+    def _check_extdb_async(self) -> None:
+        """Log hasil validasi db.txt (koneksi, tabel, mapping). Dipanggil di thread."""
+        try:
+            for line in self._extdb.check().lines:
+                logger.info("[db.txt] %s", line)
+        except Exception as e:
+            logger.warning("[db.txt] validasi DB eksternal gagal: %s", e)
+
+    def _flush_outbox_item(self, entry: dict):
+        """Kirim satu entry outbox ke DB eksternal (resolve mapping). Truthy = sukses.
+        Entry format lama (tanpa __snapshot__) dari antrian pra-db.txt: dilewati."""
+        if self._extdb is None or not entry.get("__snapshot__"):
+            return None
+        return self._extdb.push_row(entry)
+
     def _flush_pg_outbox(self) -> None:
-        """Kirim batch outbox ke PG; sukses → hapus (nol duplikat). Satu worker,
+        """Kirim batch outbox; sukses → hapus (nol duplikat). Satu worker,
         batch berbatas, antrian bounded (yang tertua dibuang + dicatat)."""
-        if not self._pg.is_enabled:
+        if self._extdb is None:
             return
         try:
             batch = self._db.get_outbox(limit=200)
@@ -1501,8 +1519,8 @@ class MainWindow(QMainWindow):
             ok_ids = []
             for item in batch:
                 try:
-                    rid = self._pg.push_inspection(**item["entry"])
-                    if rid is not None:
+                    rid = self._flush_outbox_item(item["entry"])
+                    if rid:
                         ok_ids.append(item["id"])
                 except Exception as e:
                     logger.warning("Push outbox item %s gagal: %s", item["id"], e)
@@ -1512,7 +1530,7 @@ class MainWindow(QMainWindow):
             if failed:
                 self._db.bump_outbox_attempts(failed)
                 logger.warning(
-                    "Outbox: %d entry tertunda (PostgreSQL tidak terjangkau?)",
+                    "Outbox: %d entry tertunda (DB eksternal tidak terjangkau?)",
                     len(failed))
                 total = self._db.count_outbox()
                 if total > 5000:
@@ -1571,7 +1589,7 @@ class MainWindow(QMainWindow):
     def _save_ng_evidence(self, frame, worst_score: float, roi_results: list,
                            avg_latency: float):
         """Simpan bukti NG (gambar + entry SQLite) untuk tuning. Dipakai jalur NG
-        langsung & NG hasil retry trigger. NG TIDAK dikirim ke PostgreSQL."""
+        langsung & NG hasil retry trigger. NG TIDAK dikirim ke DB eksternal."""
         img_path = self._save_inspection_frame(
             frame, "NG", worst_score, roi_results, avg_latency)
         roi_region = json.dumps([{
@@ -1849,7 +1867,7 @@ class MainWindow(QMainWindow):
                     self._active_template = templates[0]["id"]
                     self._pm.set_active_template(self._active_program, self._active_template)
 
-        # Cache nama template untuk push PG (partname) — saat startup
+        # Cache nama template untuk push DB eksternal (partname) — saat startup
         # _active_template di-set tanpa lewat _activate_template.
         if self._active_template:
             _tc = self._pm.get_template_config(
@@ -3385,7 +3403,7 @@ class MainWindow(QMainWindow):
         self._last_gate_roi = None
         self._last_part_check_score = 1.0
         self._last_worst_score = 0.0
-        # Cache part name for PG push
+        # Cache part name untuk push DB eksternal
         tmpl_cfg = self._pm.get_template_config(
             self._active_program, self._active_template)
         self._active_partname = tmpl_cfg.get("name", self._active_template)
@@ -4094,7 +4112,7 @@ class MainWindow(QMainWindow):
             self._db.mark_correction(entry_id, correct_judgement)
             self._db.add_audit(self._active_program, "correction",
                          {"entry_id": entry_id, "from": original, "to": correct_judgement})
-            # Koreksi TIDAK dipropagasi ke PG (tabelnya hanya menampung OK dan
+            # Koreksi TIDAK dipropagasi ke DB eksternal (tabelnya hanya menampung OK dan
             # kolom penopangnya sudah tak ada). Tetap tercatat penuh di SQLite.
             self._refresh_history()
             self.set_status(f"Entry #{entry_id} dikoreksi ke {correct_judgement}", 3000)
@@ -4116,7 +4134,7 @@ class MainWindow(QMainWindow):
             self._db.rollback_correction(entry_id)
             self._db.add_audit(self._active_program, "rollback",
                          {"entry_id": entry_id})
-            # Tidak ada yang perlu dibatalkan di PostgreSQL — koreksi memang
+            # Tidak ada yang perlu dibatalkan di DB eksternal — koreksi memang
             # tidak pernah dikirim ke sana.
             self._refresh_history()
             self.set_status(f"Koreksi entry #{entry_id} dibatalkan", 3000)
@@ -4361,7 +4379,7 @@ class MainWindow(QMainWindow):
             self._on_train()
 
     def _refresh_history(self, judgement: Optional[str] = None):
-        """Refresh halaman history dari SQLite lokal (PG hanya untuk push eksternal).
+        """Refresh halaman history dari SQLite lokal (DB eksternal hanya untuk push).
         `judgement`: None = semua, "OK"/"NG" = filter."""
         try:
             # Hanya hasil template AKTIF — kalau tercampur, nomor entry/koreksi/
@@ -4398,16 +4416,6 @@ class MainWindow(QMainWindow):
 
     def _on_settings_save(self):
         settings = self._settings_page.get_settings_dict()
-        # C4: kredensial tidak plaintext — enkripsi password PG sebelum disimpan
-        pg_settings = settings.get("postgresql", {})
-        pg_pass = pg_settings.get("password", "")
-        if pg_pass and not secret_store.is_encrypted(pg_pass):
-            try:
-                settings["postgresql"]["password"] = secret_store.encrypt(pg_pass)
-            except Exception as e:
-                logger.error("Enkripsi password PG gagal: %s", e)
-                self.set_status("Gagal mengenkripsi password PostgreSQL", 5000)
-                return
         for key, value in self._flatten_dict(settings):
             self._config.set(key, value)
         self._config.save()
@@ -4462,25 +4470,7 @@ class MainWindow(QMainWindow):
                 h.setLevel(logging.DEBUG if show_debug else logging.INFO)
         logger.info("Log debug: %s", "AKTIF" if show_debug else "NONAKTIF")
 
-        # Re-init PostgreSQL dengan config dari UI (bukan read-back dari file)
-        pg_cfg = settings.get("postgresql", {})
-        self._pg = self._pg.__class__(pg_cfg)
-        if pg_cfg.get("enabled"):
-            try:
-                conn = self._pg._connect()
-                conn.close()
-                # Pastikan tabel siap pakai setelah koneksi berhasil
-                self._pg.ensure_ready()
-                self._settings_page.set_pg_status(True, pg_cfg.get("host", ""))
-                logger.info("PostgreSQL terhubung: %s@%s:%d/%s",
-                            pg_cfg.get("user"), pg_cfg.get("host"),
-                            pg_cfg.get("port"), pg_cfg.get("dbname"))
-            except Exception as e:
-                err = str(e).split(":")[-1].strip()[:60]
-                self._settings_page.set_pg_status(False, err)
-                logger.warning("PostgreSQL connection failed: %s", e)
-        else:
-            self._settings_page.set_pg_status(False, "Tidak diaktifkan")
+        # DB eksternal dikonfigurasi lewat db.txt, bukan tab Settings.
 
         # Re-init PLC dengan config terbaru dari UI (io_map/pulse/port)
         self._shutdown_plc()
@@ -4703,18 +4693,6 @@ class MainWindow(QMainWindow):
 
         self._settings_page.set_runtime_status(has_ov, has_torch, active,
                                                 gpu_available, gpu_info)
-
-        # Update PostgreSQL connection status (gunakan self._pg langsung)
-        if self._pg.is_enabled:
-            try:
-                conn = self._pg._connect()
-                conn.close()
-                pg_cfg = self._config.get("postgresql", {})
-                self._settings_page.set_pg_status(True, pg_cfg.get("host", ""))
-            except Exception as e:
-                self._settings_page.set_pg_status(False, str(e).split(":")[-1].strip()[:60])
-        else:
-            self._settings_page.set_pg_status(False, "Tidak diaktifkan")
 
     def _retranslate_ui(self):
         self._tabs.setTabText(0, self._tr.tr("nav_run"))

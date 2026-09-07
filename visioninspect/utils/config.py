@@ -173,17 +173,8 @@ class Config:
         # Active program
         "active_program": "",
 
-        # PostgreSQL
-        "postgresql": {
-            "enabled": False,
-            "host": "localhost",
-            "port": 5432,
-            "dbname": "visioninspect",
-            "user": "postgres",
-            "password": "",
-            "sslmode": "prefer",
-            "connect_timeout": 10,
-        },
+        # DB eksternal (auth + push inspeksi) dikonfigurasi lewat file db.txt,
+        # bukan di config.json. Lihat db.txt.example + `run.py --check-db`.
     }
 
     def __init__(self, config_path: Optional[Path] = None):

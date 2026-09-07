@@ -112,7 +112,7 @@ class Database:
             )
         """)
 
-        # Push outbox (C3 — antrian tahan-restart untuk sink PostgreSQL)
+        # Push outbox (C3 — antrian tahan-restart untuk sink DB eksternal)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS push_outbox (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -534,7 +534,7 @@ class Database:
     # ---- Push Outbox (C3 — antrian tahan-restart) ----
 
     def add_outbox(self, entry: dict) -> int:
-        """Simpan 1 entry push (kwargs PostgresDB.push_inspection) ke outbox.
+        """Simpan 1 snapshot hasil inspeksi ke outbox (push DB eksternal).
         Tahan-restart: entry tersisa di-flush saat startup berikutnya."""
         self.conn.execute("""
             INSERT INTO push_outbox (entry_json, created_at)

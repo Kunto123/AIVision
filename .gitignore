@@ -23,6 +23,11 @@ data/
 !data/.gitkeep
 none/
 
+# --- Konfigurasi DB eksternal (berisi kredensial) — template .example tetap di-track ---
+db.txt
+db.key
+!db.txt.example
+
 # Generated history/NG images
 history/
 

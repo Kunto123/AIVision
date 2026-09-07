@@ -203,7 +203,7 @@ class LoginDialog(QDialog):
                     return
             self.accept()
         else:
-            # Bedakan koneksi DB gagal vs kredensial salah — PostgreSQL
+            # Bedakan koneksi DB eksternal gagal vs kredensial salah — auth DB
             # mengembalikan None untuk KEDUANYA ("password salah" menyesatkan).
             msg = "Username atau password salah!"
             connect = getattr(self._db, "_connect", None)
@@ -212,8 +212,8 @@ class LoginDialog(QDialog):
                     conn = connect()
                     conn.close()
                 except Exception:
-                    msg = ("Koneksi database (PostgreSQL) gagal.\n"
-                           "Periksa pengaturan di tab Settings.")
+                    msg = ("Koneksi database eksternal gagal & akun tidak ada di lokal.\n"
+                           "Periksa db.txt (jalankan: run.py --check-db).")
             QMessageBox.warning(self, "Login Gagal", msg)
             self._password_input.clear()
             self._password_input.setFocus()

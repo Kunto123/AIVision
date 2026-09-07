@@ -35,6 +35,14 @@ if "VISIONINSPECT_DATA" not in os.environ:
 # 3. Package root ke sys.path, lalu jalankan
 sys.path.insert(0, str(_project_root))
 
+# 4. Sub-perintah db.txt — jalan tanpa memuat Qt/torch
+if any(a in sys.argv for a in ("--check-db", "--encrypt-secret", "--db-user-add")):
+    from visioninspect.storage import db_cli
+    if "--db-user-add" in sys.argv:
+        i = sys.argv.index("--db-user-add")
+        sys.exit(db_cli.db_user_add(sys.argv[i + 1:]))
+    sys.exit(db_cli.main())
+
 from visioninspect.main import main
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 # VisionInspect - Industrial Visual Inspection System
 # Python 3.10+ required
-# NOTE: PC Dev (GPU) → pakai requirements_dev.txt
-#       PC Edge (CPU) → pakai file ini atau requirements_edge.txt
+# NOTE: PC Dev (GPU) / training → requirements_dev.txt
+#       Build PyInstaller        → requirements-build.txt
+#       PC Edge (CPU) / runtime  → file ini
 #
 # Diverifikasi (2026-08): kombinasi teruji E2E di WSL —
 #   anomalib 2.5.0, numpy 2.4.6, torch 2.13.0+cpu, ultralytics 8.4.117,
@@ -89,10 +90,9 @@ psutil>=5.9,<8.0
 pytest>=8.0,<10.0
 
 # ===== DB eksternal (db.txt) =====
-# psycopg2 = PostgreSQL (dipakai juga oleh postgres_db.py lama) — selalu dipasang.
-# Driver lain HANYA dipasang saat engine itu dipakai (adapter lazy-import):
-#   MySQL/MariaDB : pip install "pymysql>=1.1,<2.0"
-#   SQL Server    : pip install "pyodbc>=5.1,<6.0"  +  Microsoft ODBC Driver 18
-#                   (installer .msi, di luar pip, hak admin di PC edge)
-#   SQLite        : stdlib — tidak perlu apa-apa
+# psycopg2 = PostgreSQL, pymysql = MySQL/MariaDB, pyodbc = SQL Server.
+# SQL Server JUGA butuh Microsoft ODBC Driver 18 di-install manual di PC edge
+# (installer .msi, di luar pip, hak admin). SQLite: stdlib, tak perlu apa-apa.
 psycopg2-binary>=2.9,<3.0
+pymysql>=1.1,<2.0
+pyodbc>=5.1,<6.0

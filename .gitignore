@@ -79,8 +79,12 @@ datasets/
 pre_trained/
 results/
 tests/
-packaging/
 docs
+
+# packaging/: track spec + icon saja (artefak build dist/ build/ sudah di-ignore di atas)
+packaging/*
+!packaging/VisionInspect.spec
+!packaging/*.ico
 
 # --- Offline deployment bundle (built by tools/prepare_offline_bundle.bat) ---
 offline_bundle/

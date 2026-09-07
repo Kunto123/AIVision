@@ -49,9 +49,9 @@ WSL hanya dipakai untuk training (lihat *Training*). Aplikasi utama berjalan di 
 
 | File | Untuk | Isi |
 |------|-------|-----|
-| `requirements.txt` | Umum / PC edge | Inferensi OpenVINO + GUI + auth + Flask API + `fxplc`. Sudah termasuk `anomalib` + `torch` CPU (dipakai saat import). |
-| `requirements_edge.txt` | PC edge (inference-only) | Praktis sama dengan `requirements.txt`. Training YOLO tetap di PC dev. |
+| `requirements.txt` | Runtime — PC edge & umum | Inferensi OpenVINO + GUI + auth + Flask API + `fxplc` + driver DB (`psycopg2`/`pymysql`/`pyodbc`). Sudah termasuk `anomalib` + `torch` CPU. |
 | `requirements_dev.txt` | PC dev / training | Tambahan `ultralytics` (YOLO), `lightning`, `nncf` (INT8) + tooling test. |
+| `requirements-build.txt` | Build PyInstaller | `-r requirements.txt` + `pyinstaller`. |
 
 ## Menjalankan
 
@@ -64,18 +64,38 @@ Opsi CLI (`run.py` / `visioninspect/main.py`): `--config <path>`, `--data-dir <p
 
 **edge_mode** — set `"edge_mode": true` di `data\config.json` supaya `torch` tidak ikut dimuat saat start. PC edge inference-only wajib pakai ini.
 
+## Build (PyInstaller)
+
+Runner **wajib Windows**, Python 3.11, akses internet (github.com untuk `fxplc`, `download.pytorch.org` untuk torch CPU).
+
+```batch
+pip install -r requirements-build.txt
+pyinstaller packaging/VisionInspect.spec
+```
+
+Hasil di `dist\VisionInspect\` (one-folder):
+
+| File | Untuk |
+|------|-------|
+| `VisionInspect.exe` | GUI operator (windowed) |
+| `VisionInspect-cli.exe` | Konsol: `--check-db`, `--encrypt-secret "<teks>"`, `--db-user-add <u> <p> [role]` |
+| `db.txt.example` | Salin jadi `db.txt` di folder yang sama, lalu isi |
+
+Data (config, `database.db`, `users.json`) default ke `%USERPROFILE%\.visioninspect\` saat frozen — override dengan env `VISIONINSPECT_DATA`.
+
 ## Database eksternal (db.txt)
 
 Satu-satunya jalur DB eksternal. Kalau file **`db.txt`** ada di folder yang sama dengan `VisionInspect.exe` (root proyek saat dev), aplikasi push hasil inspeksi OK ke tabel DB customer dan mengecek login ke tabel user di DB itu. **Tanpa `db.txt`**: auth hanya tabel SQLite `users` lokal, tidak ada push. (Tidak ada lagi setting PostgreSQL di tab Settings — semua di `db.txt`.)
 
-- **Engine**: PostgreSQL, MySQL/MariaDB, SQL Server, atau SQLite. Driver: `psycopg2` sudah ada; `pip install pymysql` / `pyodbc` (SQL Server juga butuh *Microsoft ODBC Driver 18* di-install manual).
-- **Konfigurasi + pemetaan kolom** semua di `db.txt` — salin `db.txt.example`, isi, lalu:
+- **Engine**: PostgreSQL, MySQL/MariaDB, SQL Server, atau SQLite. Driver PostgreSQL/MySQL sudah di `requirements.txt`; SQL Server juga butuh *Microsoft ODBC Driver 18* di-install manual di PC edge.
+- **Konfigurasi + pemetaan kolom** semua di `db.txt` — salin `db.txt.example`, isi, lalu (dev pakai `run.py`, edge pakai `VisionInspect-cli.exe`):
   ```batch
-  .vision\Scripts\python.exe run.py --check-db          :: validasi tanpa buka GUI
-  .vision\Scripts\python.exe run.py --encrypt-secret "passwordDB"   :: -> token enc:v2: untuk DB_PASSWORD
+  VisionInspect-cli.exe --check-db                    :: validasi koneksi + tabel + mapping
+  VisionInspect-cli.exe --encrypt-secret "passwordDB" :: -> token enc:v2: untuk DB_PASSWORD
+  VisionInspect-cli.exe --db-user-add budi rahasia operator
   ```
-- **Login dua sumber**: akun lokal (`data\users.json`, migrasi otomatis dari SQLite saat pertama) **dan** tabel `DB_USER_TABLE`. Cocok di salah satu = masuk. Manajemen akun di tab Akun menulis ke store lokal; akun DB dibuat via `run.py --db-user-add <user> <pass> [role]`.
-- Detail desain: lihat dokumen desain terpisah.
+- **Login dua sumber**: akun lokal (`users.json`, migrasi otomatis dari SQLite saat pertama) **dan** tabel `DB_USER_TABLE`. Cocok di salah satu = masuk. Manajemen akun di tab Akun menulis ke store lokal; akun DB dibuat via `--db-user-add`.
+- **`enc:v2:`**: token terikat ke `%USERPROFILE%\.visioninspect\secret.key` di mesin tempat `--encrypt-secret` dijalankan. Jalankan di tiap PC edge, atau copy `secret.key` bareng `db.txt`. Password plain juga boleh.
 
 ## Training
 

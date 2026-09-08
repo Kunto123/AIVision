@@ -13,6 +13,7 @@ build/
 
 # --- Virtual Environment ---
 .vision/
+.buildvenv/
 venv/
 .venv/
 env/

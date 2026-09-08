@@ -1,6 +1,7 @@
 """
 VisionInspect - Account Management Page (Admin only)
-CRUD users, bind RFID (via event filter for keyboard wedge), role management.
+CRUD user + bind RFID (keyboard-wedge). db.txt aktif → list gabungan
+akun lokal (users.json) + akun DB (DB_USER_TABLE), kolom Lokasi menandai asal.
 """
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QEvent
@@ -43,11 +44,14 @@ class AccountPage(QWidget):
 
         # RFID bind mode state
         self._bind_rfid_mode = False
-        self._bind_target_id = None
+        self._bind_target = None          # dict {id, username, source} baris terpilih
         self._rfid_buffer = ""
         self._rfid_timer = QTimer(self)
         self._rfid_timer.setSingleShot(True)
         self._rfid_timer.timeout.connect(self._flush_rfid_buffer)
+
+    def _has_external(self) -> bool:
+        return bool(getattr(self._db, "has_external", False))
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -97,11 +101,11 @@ class AccountPage(QWidget):
         self._rfid_status.hide()
         layout.addWidget(self._rfid_status)
 
-        # Table
+        # Table — kolom Lokasi (Lokal/DB) di ujung
         self._table = QTableWidget()
-        self._table.setColumnCount(6)
+        self._table.setColumnCount(7)
         self._table.setHorizontalHeaderLabels([
-            "ID", "Username", "Nama", "Role", "RFID", "Tgl Buat"
+            "ID", "Username", "Nama", "Role", "RFID", "Tgl Buat", "Lokasi"
         ])
         self._table.setSelectionBehavior(QTableWidget.SelectRows)
         self._table.setSelectionMode(QTableWidget.SingleSelection)
@@ -115,8 +119,8 @@ class AccountPage(QWidget):
         # Help text
         help_text = QLabel(
             "Pilih user, klik 'Bind RFID', lalu tap kartu RFID.\n"
-            "Operator hanya bisa melihat halaman RUN.\n"
-            "Admin melihat semua halaman termasuk ini."
+            "Kolom Lokasi: 'Lokal' = users.json di PC ini, 'DB' = tabel DB_USER_TABLE.\n"
+            "Login berhasil kalau akun cocok di salah satunya."
         )
         help_text.setObjectName("secondaryText")
         help_text.setWordWrap(True)
@@ -150,13 +154,14 @@ class AccountPage(QWidget):
         self._rfid_timer.stop()
         uid = self._rfid_buffer.strip()
 
-        if not uid or not self._bind_rfid_mode:
+        if not uid or not self._bind_rfid_mode or not self._bind_target:
             self._rfid_buffer = ""
             return
 
         if RFID_MIN_LEN <= len(uid) <= RFID_MAX_LEN:
-            logger.info("RFID bind: UID=%s for user id=%d", uid, self._bind_target_id)
-            if self._db.bind_rfid(self._bind_target_id, uid):
+            t = self._bind_target
+            logger.info("RFID bind: UID=%s user=%s (%s)", uid, t["username"], t["source"])
+            if self._db.bind_rfid(t["id"], uid, **self._route(t)):
                 self._rfid_status.setText(f"RFID {uid[:12]}... berhasil di-bind!")
                 self._rfid_status.setStyleSheet("color: #22C55E; font-weight: bold; padding: 4px;")
                 self.refresh()
@@ -174,15 +179,21 @@ class AccountPage(QWidget):
     def _exit_bind_mode(self):
         """Exit RFID bind mode and remove event filter."""
         self._bind_rfid_mode = False
-        self._bind_target_id = None
+        self._bind_target = None
         self._bind_rfid_btn.setChecked(False)
         self.removeEventFilter(self)
 
     # ---- Public API ----
 
+    def _route(self, sel: dict) -> dict:
+        """kwargs source/username untuk MultiAuth; kosong kalau store tunggal."""
+        if not self._has_external():
+            return {}
+        return {"source": sel["source"], "username": sel["username"]}
+
     @Slot()
     def refresh(self):
-        """Reload user list from database."""
+        """Reload user list (lokal + DB kalau db.txt aktif)."""
         try:
             users = self._db.list_users()
         except Exception:
@@ -191,14 +202,24 @@ class AccountPage(QWidget):
         for u in users:
             row = self._table.rowCount()
             self._table.insertRow(row)
-            self._table.setItem(row, 0, QTableWidgetItem(str(u["id"])))
+            src = u.get("source", "lokal")
+            id_item = QTableWidgetItem(str(u["id"]))
+            id_item.setData(Qt.UserRole,
+                            {"id": u["id"], "username": u["username"], "source": src})
+            self._table.setItem(row, 0, id_item)
             self._table.setItem(row, 1, QTableWidgetItem(u["username"]))
             self._table.setItem(row, 2, QTableWidgetItem(u.get("display_name", "")))
             self._table.setItem(row, 3, QTableWidgetItem(u["role"]))
             rfid = u.get("rfid_uid", "")
-            rfid_display = f"{rfid[:8]}..." if rfid else "—"
+            if rfid == "Bound":
+                rfid_display = "Bound"
+            elif rfid:
+                rfid_display = f"{rfid[:8]}..."
+            else:
+                rfid_display = "—"
             self._table.setItem(row, 4, QTableWidgetItem(rfid_display))
-            self._table.setItem(row, 5, QTableWidgetItem(u.get("created_at", "")))
+            self._table.setItem(row, 5, QTableWidgetItem(str(u.get("created_at", ""))))
+            self._table.setItem(row, 6, QTableWidgetItem("DB" if src == "db" else "Lokal"))
         self._table.resizeColumnsToContents()
 
     # ---- Handlers ----
@@ -210,44 +231,47 @@ class AccountPage(QWidget):
         self._unbind_rfid_btn.setEnabled(has)
         self._bind_rfid_btn.setEnabled(has)
 
-    def _get_selected_user_id(self) -> int:
+    def _get_selected(self):
+        """dict {id, username, source, display_name, role} atau None."""
         row = self._table.currentRow()
         if row < 0:
-            return -1
-        return int(self._table.item(row, 0).text())
+            return None
+        meta = self._table.item(row, 0).data(Qt.UserRole) or {}
+        return {
+            "id": meta.get("id", int(self._table.item(row, 0).text())),
+            "username": meta.get("username", self._table.item(row, 1).text()),
+            "source": meta.get("source", "lokal"),
+            "display_name": self._table.item(row, 2).text(),
+            "role": self._table.item(row, 3).text(),
+        }
 
     def _on_add_user(self):
-        dialog = UserEditDialog(self._db, parent=self)
+        dialog = UserEditDialog(self._db, has_external=self._has_external(), parent=self)
         if dialog.exec():
             self.refresh()
             self.roles_changed.emit()
 
     def _on_edit_user(self):
-        user_id = self._get_selected_user_id()
-        if user_id < 0:
+        sel = self._get_selected()
+        if not sel:
             return
-        row = self._table.currentRow()
-        current_data = {
-            "username": self._table.item(row, 1).text(),
-            "display_name": self._table.item(row, 2).text(),
-            "role": self._table.item(row, 3).text(),
-        }
-        dialog = UserEditDialog(self._db, user_id, current_data, parent=self)
+        dialog = UserEditDialog(self._db, sel["id"], sel,
+                                has_external=self._has_external(), parent=self)
         if dialog.exec():
             self.refresh()
             self.roles_changed.emit()
 
     def _on_delete_user(self):
-        user_id = self._get_selected_user_id()
-        if user_id < 0:
+        sel = self._get_selected()
+        if not sel:
             return
-        username = self._table.item(self._table.currentRow(), 1).text()
+        loc = "DB" if sel["source"] == "db" else "lokal"
         reply = QMessageBox.question(
             self, "Hapus User",
-            f"Hapus user '{username}'?",
+            f"Hapus user '{sel['username']}' ({loc})?",
             QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
-            if self._db.delete_user(user_id):
+            if self._db.delete_user(sel["id"], **self._route(sel)):
                 self.refresh()
                 self.roles_changed.emit()
             else:
@@ -256,13 +280,12 @@ class AccountPage(QWidget):
 
     def _on_toggle_bind_rfid(self, checked: bool):
         if checked:
-            user_id = self._get_selected_user_id()
-            if user_id < 0:
+            sel = self._get_selected()
+            if not sel:
                 self._bind_rfid_btn.setChecked(False)
                 return
-            # Enter bind mode — install event filter to capture RFID wedge
             self._bind_rfid_mode = True
-            self._bind_target_id = user_id
+            self._bind_target = sel
             self._rfid_buffer = ""
             self.installEventFilter(self)
             self._rfid_status.setText("Tap kartu RFID sekarang...")
@@ -274,10 +297,10 @@ class AccountPage(QWidget):
             self._rfid_status.hide()
 
     def _on_unbind_rfid(self):
-        user_id = self._get_selected_user_id()
-        if user_id < 0:
+        sel = self._get_selected()
+        if not sel:
             return
-        self._db.unbind_rfid(user_id)
+        self._db.unbind_rfid(sel["id"], **self._route(sel))
         self.refresh()
         self._rfid_status.setText("RFID unbind berhasil")
         self._rfid_status.setStyleSheet("color: #22C55E; font-weight: bold; padding: 4px;")
@@ -286,17 +309,19 @@ class AccountPage(QWidget):
 
 
 class UserEditDialog(QDialog):
-    """Dialog for adding/editing a user."""
+    """Dialog tambah / edit user. `source` = 'lokal' | 'db' untuk baris edit."""
 
-    def __init__(self, db, user_id: int = None,
-                 current_data: dict = None, parent=None):
+    def __init__(self, db, user_id: int = None, current_data: dict = None,
+                 has_external: bool = False, parent=None):
         super().__init__(parent)
         self._db = db
         self._user_id = user_id
         self._is_edit = user_id is not None
+        self._has_external = has_external
+        self._source = (current_data or {}).get("source", "lokal")
+        self._username = (current_data or {}).get("username", "")
 
         self.setWindowTitle("Edit User" if self._is_edit else "Tambah User")
-        self.setFixedSize(380, 280 if self._is_edit else 320)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
@@ -314,13 +339,26 @@ class UserEditDialog(QDialog):
         if current_data:
             self._username_input.setText(current_data.get("username", ""))
         self._username_input.setMinimumHeight(32)
+        if self._is_edit:
+            self._username_input.setReadOnly(True)   # ganti username tidak didukung
         form.addRow("Username:", self._username_input)
+
+        # "Simpan ke" — hanya saat tambah user & DB eksternal aktif
+        self._target_combo = None
+        if not self._is_edit and has_external:
+            self._target_combo = QComboBox()
+            self._target_combo.addItems(["Lokal", "DB"])
+            form.addRow("Simpan ke:", self._target_combo)
 
         self._display_input = QLineEdit()
         if current_data:
             self._display_input.setText(current_data.get("display_name", ""))
         self._display_input.setPlaceholderText("Nama tampilan")
         self._display_input.setMinimumHeight(32)
+        # Tabel DB user tidak punya kolom nama tampilan
+        if self._is_edit and self._source == "db":
+            self._display_input.setEnabled(False)
+            self._display_input.setPlaceholderText("(akun DB tidak menyimpan nama)")
         form.addRow("Nama:", self._display_input)
 
         self._password_input = QLineEdit()
@@ -352,6 +390,7 @@ class UserEditDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
 
         layout.addLayout(btn_layout)
+        self.setMinimumWidth(380)
 
     def _on_save(self):
         username = self._username_input.text().strip()
@@ -363,15 +402,34 @@ class UserEditDialog(QDialog):
             QMessageBox.warning(self, "Validasi", "Username harus diisi!")
             return
 
-        if self._is_edit:
-            kwargs = {"display_name": display_name, "role": role}
-            if password:
-                kwargs["password"] = password
-            self._db.update_user(self._user_id, **kwargs)
-        else:
-            if not password:
-                QMessageBox.warning(self, "Validasi", "Password harus diisi!")
-                return
-            self._db.add_user(username, password, display_name, role)
+        try:
+            if self._is_edit:
+                if self._has_external:
+                    kwargs = {"role": role, "source": self._source,
+                              "username": self._username}
+                    if self._source == "lokal":
+                        kwargs["display_name"] = display_name
+                    if password:
+                        kwargs["password"] = password
+                    self._db.update_user(self._user_id, **kwargs)
+                else:
+                    kwargs = {"display_name": display_name, "role": role}
+                    if password:
+                        kwargs["password"] = password
+                    self._db.update_user(self._user_id, **kwargs)
+            else:
+                if not password:
+                    QMessageBox.warning(self, "Validasi", "Password harus diisi!")
+                    return
+                if self._target_combo is not None:
+                    src = self._target_combo.currentText().lower()  # "lokal" | "db"
+                    self._db.add_user(username, password, display_name, role,
+                                      source=src)
+                else:
+                    self._db.add_user(username, password, display_name, role)
+        except Exception as e:
+            logger.warning("Simpan user gagal: %s", e)
+            QMessageBox.critical(self, "Gagal", f"Gagal menyimpan user:\n{e}")
+            return
 
         self.accept()

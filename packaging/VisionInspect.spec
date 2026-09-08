@@ -9,7 +9,9 @@
 import sys
 from pathlib import Path
 
-root = Path(__file__).resolve().parent.parent
+# PyInstaller meng-exec spec ini TANPA __file__. SPECPATH = folder spec (absolut,
+# disuntik PyInstaller) → root proyek = induknya.
+root = Path(SPECPATH).parent          # noqa: F821  (SPECPATH global PyInstaller)
 sys.path.insert(0, str(root))
 
 block_cipher = None
@@ -46,13 +48,24 @@ _datas = [
     (str(root / 'db.txt.example'), '.'),
 ]
 
+# 3. Exclude: paket export/dev yang TIDAK dipakai runtime. Beberapa (onnxscript,
+#    sentencepiece) juga bikin subprocess analisis PyInstaller SEGFAULT (0xC0000005).
+#    Runtime edge = OpenVINO IR (.xml/.bin), engine YOLO/PatchCore/EfficientAd.
+_common_excludes = [
+    'tkinter', 'matplotlib', 'tests', 'docs',
+    'onnxscript', 'onnx', 'onnx_ir',
+    'sentencepiece', 'open_clip', 'open_clip_torch',
+    'pytest', '_pytest', 'pytest_qt', 'pytest_mock',
+]
+
 _icon = (str(root / 'packaging' / 'icon.ico')
          if (root / 'packaging' / 'icon.ico').exists() else None)
 
 
 # ── GUI ──────────────────────────────────────────────────────────────
+# Path skrip entry HARUS absolut — PyInstaller resolve relatif ke folder spec.
 a_gui = Analysis(
-    ['run.py'],
+    [str(root / 'run.py')],
     pathex=[str(root)],
     binaries=[],
     datas=_datas,
@@ -65,21 +78,20 @@ a_gui = Analysis(
         'flask', 'werkzeug', 'psutil', 'PIL', 'skimage',
     ] + _db_hidden,
     hookspath=[], hooksconfig={}, runtime_hooks=[],
-    excludes=['tkinter', 'matplotlib', 'tests', 'docs'],
+    excludes=_common_excludes,
     win_no_prefer_redirects=False, win_private_assemblies=False,
     cipher=block_cipher, noarchive=False,
 )
 
 # ── CLI (konsol, ringan — tanpa Qt/torch/cv2) ───────────────────────
 a_cli = Analysis(
-    ['visioninspect/cli.py'],
+    [str(root / 'visioninspect' / 'cli.py')],
     pathex=[str(root)],
     binaries=[],
     datas=[],
     hiddenimports=_db_hidden,
     hookspath=[], hooksconfig={}, runtime_hooks=[],
-    excludes=[
-        'tkinter', 'matplotlib', 'tests', 'docs',
+    excludes=_common_excludes + [
         'PySide6', 'shiboken6', 'torch', 'torchvision', 'anomalib',
         'cv2', 'openvino', 'nncf', 'skimage', 'PIL', 'flask', 'werkzeug',
         'pandas', 'sklearn', 'scipy', 'timm', 'huggingface_hub',

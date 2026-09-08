@@ -190,6 +190,34 @@ class BaseAdapter:
                f"WHERE {self.q('username')} = {self.ph}")
         return self._run(sql, (pw_hash, username))
 
+    def set_role(self, table: str, username: str, role: str) -> int:
+        sql = (f"UPDATE {self.q(table)} SET {self.q('role')} = {self.ph} "
+               f"WHERE {self.q('username')} = {self.ph}")
+        return self._run(sql, (role, username))
+
+    def bind_rfid(self, table: str, username: str, rfid_hash: str) -> bool:
+        """Set kolom rfid (hash). False bila hash sudah dipakai user lain."""
+        row = self._run(
+            f"SELECT {self.q('username')} FROM {self.q(table)} "
+            f"WHERE {self.q('rfid')} = {self.ph}", (rfid_hash,), fetch="one")
+        if row and row[0] != username:
+            return False
+        self._run(
+            f"UPDATE {self.q(table)} SET {self.q('rfid')} = {self.ph} "
+            f"WHERE {self.q('username')} = {self.ph}", (rfid_hash, username))
+        return True
+
+    def unbind_rfid(self, table: str, username: str) -> int:
+        sql = (f"UPDATE {self.q(table)} SET {self.q('rfid')} = NULL "
+               f"WHERE {self.q('username')} = {self.ph}")
+        return self._run(sql, (username,))
+
+    def count_admins(self, table: str) -> int:
+        row = self._run(
+            f"SELECT COUNT(*) FROM {self.q(table)} WHERE {self.q('role')} = {self.ph}",
+            ("admin",), fetch="one")
+        return int(row[0]) if row else 0
+
     def delete_user(self, table: str, username: str) -> int:
         sql = f"DELETE FROM {self.q(table)} WHERE {self.q('username')} = {self.ph}"
         return self._run(sql, (username,))

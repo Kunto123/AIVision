@@ -63,8 +63,9 @@ matplotlib>=3.7,<4.0
 
 # ===== OpenVINO =====
 openvino>=2024.0
-onnx>=1.16.0
-onnxscript
+# onnx / onnxscript: HANYA untuk export model (di PC dev, requirements_dev.txt).
+# Runtime edge = OpenVINO IR (.xml/.bin). onnxscript juga bikin PyInstaller
+# segfault saat analisis, jadi jangan dimasukkan ke build runtime.
 
 # ===== Serial / PLC =====
 pyserial>=3.5,<4.0

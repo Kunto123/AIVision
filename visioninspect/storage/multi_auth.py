@@ -3,7 +3,8 @@ MultiAuth - login dua sumber.
 
 Cek akun LOKAL dulu (users.json — offline-safe, tanpa timeout), lalu DB
 eksternal. Ketemu di salah satu = login sukses. TIDAK ada sinkronisasi
-antar-store. Manajemen akun (add/edit/hapus/RFID) diarahkan ke store lokal.
+antar-store. Manajemen akun (add/edit/hapus/RFID) diarahkan per `source`
+("lokal" | "db") — tab Akun me-list gabungan keduanya + kolom Lokasi.
 """
 
 from typing import Optional
@@ -56,22 +57,48 @@ class MultiAuth:
 
         return _Dummy()
 
-    # ── Manajemen (store lokal) ─────────────────────────────────────
+    @property
+    def has_external(self) -> bool:
+        return self._external is not None
+
+    # ── Manajemen — routing per `source` ("lokal" | "db") ──────────
 
     def list_users(self):
-        return self._local.list_users()
+        """Gabungan lokal + DB, tiap baris ditandai `source`."""
+        out = [dict(u, source="lokal") for u in self._local.list_users()]
+        if self._external is not None:
+            out += [dict(u, source="db") for u in self._external.list_users()]
+        return out
 
-    def add_user(self, *a, **kw):
-        return self._local.add_user(*a, **kw)
+    def add_user(self, username, password, display_name="", role="operator",
+                 source="lokal"):
+        if source == "db" and self._external is not None:
+            self._external.add_user(username, password, display_name, role)
+            return None
+        return self._local.add_user(username, password, display_name, role)
 
-    def update_user(self, *a, **kw):
-        return self._local.update_user(*a, **kw)
+    def update_user(self, user_id, display_name=None, password=None, role=None,
+                    source="lokal", username=None):
+        if source == "db" and self._external is not None:
+            if password is not None:
+                self._external.set_password(username, password)
+            if role is not None:
+                self._external.set_role(username, role)
+            return True
+        return self._local.update_user(user_id, display_name=display_name,
+                                       password=password, role=role)
 
-    def delete_user(self, *a, **kw):
-        return self._local.delete_user(*a, **kw)
+    def delete_user(self, user_id, source="lokal", username=None):
+        if source == "db" and self._external is not None:
+            return self._external.delete_user(username)
+        return self._local.delete_user(user_id)
 
-    def bind_rfid(self, *a, **kw):
-        return self._local.bind_rfid(*a, **kw)
+    def bind_rfid(self, user_id, rfid_uid, source="lokal", username=None):
+        if source == "db" and self._external is not None:
+            return self._external.bind_rfid(username, rfid_uid)
+        return self._local.bind_rfid(user_id, rfid_uid)
 
-    def unbind_rfid(self, *a, **kw):
-        return self._local.unbind_rfid(*a, **kw)
+    def unbind_rfid(self, user_id, source="lokal", username=None):
+        if source == "db" and self._external is not None:
+            return bool(self._external.unbind_rfid(username))
+        return self._local.unbind_rfid(user_id)

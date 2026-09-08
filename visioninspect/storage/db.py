@@ -140,14 +140,6 @@ class Database:
 
         self.conn.commit()
 
-        # C4: migrasi kolom must_change_password (SQLite ADD COLUMN sekali)
-        try:
-            self.conn.execute(
-                "ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
-            self.conn.commit()
-        except sqlite3.OperationalError:
-            pass  # kolom sudah ada
-
         # Seed default admin if no users exist
         cursor.execute("SELECT COUNT(*) FROM users")
         if cursor.fetchone()[0] == 0:
@@ -408,15 +400,15 @@ class Database:
         return hashlib.sha256(f"visioninspect_2024_{password}".encode()).hexdigest()
 
     def _seed_default_admin(self):
-        """Create default admin account on first run (C4: wajib ganti password)."""
+        """Create default admin account (admin/admin) on first run."""
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         self.conn.execute("""
             INSERT INTO users (username, password_hash, display_name, role,
-                               must_change_password, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 1, ?, ?)
+                               created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
         """, ("admin", self._hash_password("admin"), "Administrator", "admin", now, now))
         self.conn.commit()
-        logger.info("Default admin account created (admin/admin — WAJIB ganti password saat login pertama)")
+        logger.info("Default admin account created (admin/admin — ganti password lewat tab Akun)")
 
     def authenticate(self, username: str, password: str) -> Optional[dict]:
         """Verify credentials. Returns user dict or None."""
@@ -442,11 +434,9 @@ class Database:
         return [dict(row) for row in cursor.fetchall()]
 
     def list_users_full(self) -> List[Dict[str, Any]]:
-        """List user TERMASUK password_hash & must_change_password.
-        Khusus migrasi/sinkronisasi — JANGAN dipakai untuk tampilan UI."""
+        """List user TERMASUK password_hash. Khusus migrasi — bukan untuk UI."""
         cursor = self.conn.execute(
-            "SELECT id, username, password_hash, display_name, role, "
-            "COALESCE(must_change_password, 0) AS must_change_password "
+            "SELECT id, username, password_hash, display_name, role "
             "FROM users ORDER BY id")
         return [dict(row) for row in cursor.fetchall()]
 
@@ -463,8 +453,7 @@ class Database:
         return cursor.lastrowid
 
     def update_user(self, user_id: int, display_name: str = None,
-                    password: str = None, role: str = None,
-                    must_change_password: bool = None) -> bool:
+                    password: str = None, role: str = None) -> bool:
         """Update user fields. Returns True if changed."""
         fields = []
         values = []
@@ -474,14 +463,9 @@ class Database:
         if password is not None:
             fields.append("password_hash = ?")
             values.append(self._hash_password(password))
-            # Password baru di-set → flag paksa-ganti dimatikan (C4)
-            fields.append("must_change_password = 0")
         if role is not None:
             fields.append("role = ?")
             values.append(role)
-        if must_change_password is not None:
-            fields.append("must_change_password = ?")
-            values.append(1 if must_change_password else 0)
         if not fields:
             return False
         fields.append("updated_at = ?")

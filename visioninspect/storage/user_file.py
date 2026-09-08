@@ -82,11 +82,10 @@ class UserFileStore:
             "password_hash": credentials.hash_password("admin"),
             "display_name": "Administrator", "role": "admin",
             "rfid_uid": None, "rfid_bound_at": None,
-            "must_change_password": True,
             "created_at": _now(), "updated_at": _now(),
         })
         self._save()
-        logger.info("users.json: seed admin/admin (WAJIB ganti password saat login pertama)")
+        logger.info("users.json: seed admin/admin (ganti password lewat tab Akun)")
 
     def _migrate_from_sqlite(self, sqlite_db) -> int:
         """Salin tabel SQLite `users` -> users.json (dipanggil dari __init__)."""
@@ -108,7 +107,6 @@ class UserFileStore:
                 "role": u.get("role", "operator"),
                 "rfid_uid": m.get("rfid_uid") or None,
                 "rfid_bound_at": m.get("rfid_bound_at") or None,
-                "must_change_password": bool(u.get("must_change_password", 0)),
                 "created_at": m.get("created_at", _now()),
                 "updated_at": _now(),
             })
@@ -161,7 +159,6 @@ class UserFileStore:
             "password_hash": credentials.hash_password(password),
             "display_name": display_name, "role": role,
             "rfid_uid": None, "rfid_bound_at": None,
-            "must_change_password": False,
             "created_at": _now(), "updated_at": _now(),
         })
         self._save()
@@ -169,8 +166,7 @@ class UserFileStore:
         return uid
 
     def update_user(self, user_id: int, display_name: str = None,
-                    password: str = None, role: str = None,
-                    must_change_password: bool = None) -> bool:
+                    password: str = None, role: str = None) -> bool:
         u = self._find(id=user_id)
         if not u:
             return False
@@ -178,11 +174,8 @@ class UserFileStore:
             u["display_name"] = display_name
         if password is not None:
             u["password_hash"] = credentials.hash_password(password)
-            u["must_change_password"] = False
         if role is not None:
             u["role"] = role
-        if must_change_password is not None:
-            u["must_change_password"] = bool(must_change_password)
         u["updated_at"] = _now()
         self._save()
         return True

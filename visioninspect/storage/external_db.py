@@ -89,7 +89,7 @@ class ExternalDB:
             self._adapter.touch_last_login(self.s.user_table, user["id"])
         return user
 
-    # ── Manajemen user (dipakai CLI; account page pakai store lokal) ──
+    # ── Manajemen user (CLI + tab Akun) ─────────────────────────────
 
     def list_users(self) -> List[dict]:
         if not self.s.user_table:
@@ -109,8 +109,29 @@ class ExternalDB:
         return self._adapter.set_password(
             self.s.user_table, username, credentials.hash_password(password))
 
-    def delete_user(self, username: str) -> int:
-        return self._adapter.delete_user(self.s.user_table, username)
+    def set_role(self, username: str, role: str) -> int:
+        return self._adapter.set_role(self.s.user_table, username, role)
+
+    def bind_rfid(self, username: str, rfid_uid: str) -> bool:
+        return self._adapter.bind_rfid(
+            self.s.user_table, username, credentials.hash_rfid(rfid_uid))
+
+    def unbind_rfid(self, username: str) -> int:
+        return self._adapter.unbind_rfid(self.s.user_table, username)
+
+    def delete_user(self, username: str) -> bool:
+        """False bila akun ini admin terakhir di tabel DB."""
+        try:
+            rows = self._adapter.list_users(self.s.user_table)
+        except Exception:
+            rows = []
+        target = next((u for u in rows if u["username"] == username), None)
+        if target and target["role"] == "admin" \
+                and sum(1 for u in rows if u["role"] == "admin") <= 1:
+            logger.warning("DB eksternal: tolak hapus admin terakhir '%s'", username)
+            return False
+        self._adapter.delete_user(self.s.user_table, username)
+        return True
 
     def ensure_user_table(self):
         """Buat tabel user bila belum ada. (dibuat_atau_ada, ddl)."""

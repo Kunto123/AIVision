@@ -216,15 +216,6 @@ class PostgresDB:
                     data2 DOUBLE PRECISION
                 )""")
 
-            # Kolom must_change_password (akun seed). WAJIB sebelum pembersihan
-            # kolom lama — tanpa kolom ini login gagal total.
-            try:
-                self._execute(
-                    "ALTER TABLE qc_user_accounts ADD COLUMN IF NOT EXISTS "
-                    "must_change_password BOOLEAN NOT NULL DEFAULT FALSE")
-            except PostgresError as e:
-                logger.warning("Migrasi kolom must_change_password gagal: %s", e)
-
             self._drop_legacy_push_columns()
 
             # 2) Verifikasi tabel benar-benar ada
@@ -246,11 +237,10 @@ class PostgresDB:
                 self._execute(
                     """INSERT INTO qc_user_accounts
                        (username, password_hash, role, is_active,
-                        must_change_password, created_at, updated_at)
-                       VALUES (%s, %s, 'admin', TRUE, TRUE, %s, %s)""",
+                        created_at, updated_at)
+                       VALUES (%s, %s, 'admin', TRUE, %s, %s)""",
                     ("admin", _hash_password("admin"), now, now))
-                logger.info("Seed admin default ke qc_user_accounts "
-                            "(admin/admin — WAJIB ganti password saat login pertama)")
+                logger.info("Seed admin default ke qc_user_accounts (admin/admin)")
 
             logger.info("PostgreSQL SIAP: tabel qc_user_accounts & "
                         "qc_inspection_push OK")
@@ -281,21 +271,16 @@ class PostgresDB:
                 if exists:
                     self._execute(
                         """UPDATE qc_user_accounts
-                           SET password_hash = %s, role = %s,
-                               must_change_password = %s, updated_at = %s
+                           SET password_hash = %s, role = %s, updated_at = %s
                            WHERE username = %s""",
-                        (u["password_hash"], u["role"],
-                         bool(u.get("must_change_password", False)),
-                         now, u["username"]))
+                        (u["password_hash"], u["role"], now, u["username"]))
                 else:
                     self._execute(
                         """INSERT INTO qc_user_accounts
                            (username, password_hash, role, is_active,
-                            must_change_password, created_at, updated_at)
-                           VALUES (%s, %s, %s, TRUE, %s, %s, %s)""",
-                        (u["username"], u["password_hash"], u["role"],
-                         bool(u.get("must_change_password", False)),
-                         now, now))
+                            created_at, updated_at)
+                           VALUES (%s, %s, %s, TRUE, %s, %s)""",
+                        (u["username"], u["password_hash"], u["role"], now, now))
                 n += 1
             logger.info("Sinkronisasi user SQLite → PG: %d user", n)
             return n
@@ -312,7 +297,7 @@ class PostgresDB:
         pw_hash = _hash_password(password)
         try:
             user = self._execute(
-                """SELECT id, username, role, is_active, must_change_password, created_at
+                """SELECT id, username, role, is_active, created_at
                    FROM qc_user_accounts
                    WHERE username = %s AND password_hash = %s""",
                 (username, pw_hash),
@@ -465,8 +450,6 @@ class PostgresDB:
         if password is not None:
             fields.append("password_hash = %s")
             values.append(_hash_password(password))
-            # C4: password baru di-set → flag paksa-ganti dimatikan
-            fields.append("must_change_password = FALSE")
         if role is not None:
             fields.append("role = %s")
             values.append(role.lower())

@@ -1476,7 +1476,7 @@ class MainWindow(QMainWindow):
                                  if self._pc_active_for_overlay else 0.0),
             "latency_ms": float(latency) if latency is not None else 0.0,
             "num_rois": len(rr),
-            "station_id": self._db_settings.station_id,
+            "station_id": self._config.get("station_id", ""),
             "timestamp_edge": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 

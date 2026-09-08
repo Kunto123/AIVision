@@ -1,5 +1,5 @@
 """
-Kontrak adapter DB. Connection-per-call (tanpa pooling), sama gaya postgres_db.py.
+Kontrak adapter DB. Connection-per-call (tanpa pooling).
 Subclass override: _connect, ph, q(), server_now(), list_tables(), describe_table(),
 user_table_ddl().
 """

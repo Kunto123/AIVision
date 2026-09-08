@@ -51,7 +51,6 @@ huggingface_hub>=0.24,<2.0
 anomalib[core]>=1.1,<3.0
 scikit-learn>=1.3,<2.0
 requests>=2.28,<3.0
-python-dotenv
 pandas>=2.0,<4.0
 matplotlib>=3.7,<4.0
 # lightning: diimport langsung oleh core/training.py (EarlyStopping)

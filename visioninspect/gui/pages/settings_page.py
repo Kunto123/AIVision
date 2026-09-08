@@ -365,6 +365,19 @@ class SettingsPage(QWidget):
         log_layout.addWidget(self._show_debug_cb)
         main_layout.addWidget(log_group)
 
+        # === Stasiun ===
+        station_group = QGroupBox("Stasiun")
+        station_layout = QHBoxLayout(station_group)
+        station_layout.addWidget(QLabel("Station ID:"))
+        self._station_id = QLineEdit()
+        self._station_id.setPlaceholderText("mis. STN-01")
+        self._station_id.setMinimumHeight(28)
+        self._station_id.setToolTip(
+            "ID stasiun ini — dikirim ke DB via mapping `station_id` di db.txt.\n"
+            "Kosongkan kalau tidak dipakai.")
+        station_layout.addWidget(self._station_id, 1)
+        main_layout.addWidget(station_group)
+
         # === Language ===
         lang_group = QGroupBox(self._tr.tr("settings_language"))
         lang_layout = QHBoxLayout(lang_group)
@@ -432,6 +445,7 @@ class SettingsPage(QWidget):
             },
             "language": "id" if self._lang_combo.currentIndex() == 0 else "en",
             "show_debug": self._show_debug_cb.isChecked(),
+            "station_id": self._station_id.text().strip(),
         }
 
     def get_save_button(self) -> QPushButton:
@@ -582,6 +596,9 @@ class SettingsPage(QWidget):
         # Language
         lang = self._config.get("language", "id")
         self._lang_combo.setCurrentIndex(0 if lang == "id" else 1)
+
+        # Stasiun
+        self._station_id.setText(self._config.get("station_id", ""))
 
         # NG Timeout
         self._count_cooldown_spin.setValue(

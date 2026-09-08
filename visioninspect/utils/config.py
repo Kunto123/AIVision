@@ -44,6 +44,9 @@ class Config:
         "theme": "dark",
         "data_dir": str(DEFAULT_DATA_DIR),
         "show_debug": False,
+        # ID stasiun — dikirim ke DB via mapping `station_id` (db.txt).
+        # Diisi lewat tab Settings atau wizard installer.
+        "station_id": "",
 
         # Camera
         "camera": {

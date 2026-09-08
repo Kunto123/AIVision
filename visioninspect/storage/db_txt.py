@@ -35,7 +35,6 @@ SOURCE_FIELDS = (
 _SIMPLE_KEYS = (
     "DB_ENGINE", "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD",
     "DB_EXTRA", "DB_CONNECT_TIMEOUT", "DB_INSPECTION_TABLE", "DB_USER_TABLE",
-    "STATION_ID",
 )
 
 
@@ -62,7 +61,6 @@ class DbSettings:
     connect_timeout: int = 10
     inspection_table: str = ""
     user_table: str = ""
-    station_id: str = ""
     mapping: Dict[str, str] = field(default_factory=dict)   # kolom_db -> source
     source_path: str = ""
     errors: List[str] = field(default_factory=list)
@@ -156,7 +154,6 @@ def load() -> DbSettings:
     s.host = raw.get("DB_HOST", "").strip()
     s.name = raw.get("DB_NAME", "").strip()
     s.user = raw.get("DB_USER", "").strip()
-    s.station_id = raw.get("STATION_ID", "").strip()
     s.inspection_table = raw.get("DB_INSPECTION_TABLE", "").strip()
     s.user_table = raw.get("DB_USER_TABLE", "").strip()
 
@@ -243,14 +240,12 @@ DB_CONNECT_TIMEOUT=10
 DB_INSPECTION_TABLE=production_qc_log
 DB_USER_TABLE=vi_user_accounts
 
-# ---- Identitas stasiun ----
-STATION_ID=STN-01
-
 # ---- Pemetaan kolom: MAP_<kolom_db>=<source> ----
 # source = nama field di bawah, atau @server_now, atau @const:<teks>
 #   partname program template_id operator judgement
 #   score_worst score_avg threshold part_check_score latency_ms num_rois
 #   station_id timestamp_edge
+# (station_id diisi di tab Settings / wizard installer, BUKAN di file ini)
 # Kolom DB yang tidak di-MAP tidak dikirim (pakai DEFAULT / NULL milik DB).
 MAP_part_name=partname
 MAP_checked_at=@server_now

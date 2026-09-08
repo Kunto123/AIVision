@@ -5,7 +5,7 @@ SHA-256 + pepper. Sama persis dengan Database._hash_password lama.
 
 import hashlib
 
-# Pepper aplikasi — HARUS sama dengan storage/db.py & storage/postgres_db.py.
+# Pepper aplikasi — HARUS sama dengan storage/db.py (SQLite users).
 PEPPER = "visioninspect_2024_"
 
 

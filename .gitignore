@@ -18,6 +18,7 @@ venv/
 .venv/
 env/
 .env/
+.test/
 
 # --- Project Data (training images, models, DB) ---
 data/

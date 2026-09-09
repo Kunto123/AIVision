@@ -4,11 +4,8 @@ VisionInspect — CLI Training Wrapper
 Jalankan training dari command line (termasuk dari WSL) tanpa GUI/Qt.
 GUI tetap jalan di Windows, training jalan di WSL tempat PyTorch bisa load.
 
-Usage (dari WSL):
+Usage (dari WSL, venv aktif):
   python tools/train_cli.py --program Default --template template_1
-
-Usage via retrain_wsl.bat (double-click dari Windows):
-  retrain_wsl.bat
 """
 
 import argparse

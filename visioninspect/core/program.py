@@ -17,7 +17,7 @@ logger = get_logger("app")
 
 
 class ProgramError(Exception):
-    pass
+    """Kegagalan operasi program/template (folder tak ada, nama bentrok, dll)."""
 
 
 class ProgramManager:
@@ -26,6 +26,7 @@ class ProgramManager:
     """
 
     def __init__(self, base_dir: Path):
+        """base_dir = folder induk yang menampung semua program."""
         self._base_dir = base_dir
         self._base_dir.mkdir(parents=True, exist_ok=True)
 

@@ -29,6 +29,8 @@ class Column:
 
 
 class BaseAdapter:
+    """Kontrak adapter DB (koneksi per-call, tanpa pooling); disubclass per engine."""
+
     engine = ""
     ph = "%s"                     # placeholder parameter
     driver_hint = ""              # nama paket pip untuk pesan error
@@ -51,12 +53,15 @@ class BaseAdapter:
         return "CURRENT_TIMESTAMP"
 
     def list_tables(self) -> List[str]:
+        """Daftar nama tabel di database (override per engine)."""
         raise NotImplementedError
 
     def describe_table(self, name: str) -> List[Column]:
+        """Daftar Column untuk satu tabel (override per engine)."""
         raise NotImplementedError
 
     def user_table_ddl(self, name: str) -> str:
+        """SQL CREATE TABLE untuk tabel user standar (override per engine)."""
         raise NotImplementedError
 
     # ── util eksekusi ──────────────────────────────────────────────────
@@ -130,6 +135,7 @@ class BaseAdapter:
         }
 
     def authenticate(self, table: str, username: str, pw_hash: str) -> Optional[dict]:
+        """Cek username + hash password → dict user ringkas, atau None."""
         sql = (f"SELECT {', '.join(self.q(c) for c in USER_TABLE_COLUMNS)} "
                f"FROM {self.q(table)} WHERE {self.q('username')} = {self.ph} "
                f"AND {self.q('password_hash')} = {self.ph}")
@@ -140,12 +146,14 @@ class BaseAdapter:
                 "display_name": row[1], "last_login": row[5]}
 
     def get_user_by_rfid(self, table: str, rfid_hash: str) -> Optional[dict]:
+        """Cari user via hash RFID → dict (tanpa password_hash), atau None."""
         u = self._select_user(table, "rfid", rfid_hash)
         if u:
             u.pop("password_hash", None)
         return u
 
     def touch_last_login(self, table: str, user_id) -> None:
+        """Set last_login = waktu server untuk user_id (gagal di-log, tidak fatal)."""
         sql = (f"UPDATE {self.q(table)} SET {self.q('last_login')} = {self.server_now()} "
                f"WHERE {self.q('id')} = {self.ph}")
         try:
@@ -164,6 +172,7 @@ class BaseAdapter:
             return False, ddl
 
     def list_users(self, table: str) -> List[dict]:
+        """Semua user di tabel → list dict siap-UI (rfid ditandai "Bound")."""
         sql = (f"SELECT {', '.join(self.q(c) for c in USER_TABLE_COLUMNS)} "
                f"FROM {self.q(table)} ORDER BY {self.q('id')}")
         rows = self._run(sql, fetch="all") or []
@@ -175,6 +184,7 @@ class BaseAdapter:
 
     def add_user(self, table: str, username: str, pw_hash: str,
                  role: str = "operator", rfid_hash: Optional[str] = None) -> None:
+        """INSERT user baru (kolom rfid diisi bila rfid_hash diberikan)."""
         cols = ["username", "password_hash", "role"]
         vals = [username, pw_hash, role]
         if rfid_hash:
@@ -186,11 +196,13 @@ class BaseAdapter:
         self._run(sql, tuple(vals))
 
     def set_password(self, table: str, username: str, pw_hash: str) -> int:
+        """Update hash password by username → jumlah baris terpengaruh."""
         sql = (f"UPDATE {self.q(table)} SET {self.q('password_hash')} = {self.ph} "
                f"WHERE {self.q('username')} = {self.ph}")
         return self._run(sql, (pw_hash, username))
 
     def set_role(self, table: str, username: str, role: str) -> int:
+        """Update role by username → jumlah baris terpengaruh."""
         sql = (f"UPDATE {self.q(table)} SET {self.q('role')} = {self.ph} "
                f"WHERE {self.q('username')} = {self.ph}")
         return self._run(sql, (role, username))
@@ -208,16 +220,19 @@ class BaseAdapter:
         return True
 
     def unbind_rfid(self, table: str, username: str) -> int:
+        """Kosongkan kolom rfid by username → jumlah baris terpengaruh."""
         sql = (f"UPDATE {self.q(table)} SET {self.q('rfid')} = NULL "
                f"WHERE {self.q('username')} = {self.ph}")
         return self._run(sql, (username,))
 
     def count_admins(self, table: str) -> int:
+        """Jumlah user dengan role 'admin' di tabel."""
         row = self._run(
             f"SELECT COUNT(*) FROM {self.q(table)} WHERE {self.q('role')} = {self.ph}",
             ("admin",), fetch="one")
         return int(row[0]) if row else 0
 
     def delete_user(self, table: str, username: str) -> int:
+        """DELETE user by username → jumlah baris terpengaruh."""
         sql = f"DELETE FROM {self.q(table)} WHERE {self.q('username')} = {self.ph}"
         return self._run(sql, (username,))

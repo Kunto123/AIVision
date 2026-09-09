@@ -19,6 +19,5 @@ if not exist "%PROJECT_DIR%.vision\Scripts\python.exe" (
     echo ✅ Siap
 )
 
-REM 2. Jalankan (HF_HUB_OFFLINE=1 → HuggingFace tidak diakses saat runtime)
-set HF_HUB_OFFLINE=1
+REM 2. Jalankan
 "%PROJECT_DIR%.vision\Scripts\python.exe" "%PROJECT_DIR%run.py" %*

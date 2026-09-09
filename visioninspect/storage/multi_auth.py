@@ -15,13 +15,17 @@ logger = get_logger("app")
 
 
 class MultiAuth:
+    """Login dua sumber: cek UserFileStore lokal dulu, lalu ExternalDB (bila ada)."""
+
     def __init__(self, local, external=None):
+        """local = UserFileStore; external = ExternalDB atau None."""
         self._local = local           # UserFileStore
         self._external = external      # ExternalDB | None
 
     # ── Login ────────────────────────────────────────────────────────
 
     def authenticate(self, username: str, password: str) -> Optional[dict]:
+        """Login: coba lokal lalu DB; dict user + `_source`, atau None."""
         user = self._local.authenticate(username, password)
         if user:
             user["_source"] = "local"
@@ -35,6 +39,7 @@ class MultiAuth:
         return None
 
     def get_user_by_rfid(self, rfid_uid: str) -> Optional[dict]:
+        """Cari user via RFID: coba lokal lalu DB; dict + `_source`, atau None."""
         user = self._local.get_user_by_rfid(rfid_uid)
         if user:
             user["_source"] = "local"
@@ -59,6 +64,7 @@ class MultiAuth:
 
     @property
     def has_external(self) -> bool:
+        """True bila DB eksternal terpasang sebagai sumber login kedua."""
         return self._external is not None
 
     # ── Manajemen — routing per `source` ("lokal" | "db") ──────────
@@ -72,6 +78,7 @@ class MultiAuth:
 
     def add_user(self, username, password, display_name="", role="operator",
                  source="lokal"):
+        """Tambah user ke store sesuai `source` ("lokal" | "db")."""
         if source == "db" and self._external is not None:
             self._external.add_user(username, password, display_name, role)
             return None
@@ -79,6 +86,7 @@ class MultiAuth:
 
     def update_user(self, user_id, display_name=None, password=None, role=None,
                     source="lokal", username=None):
+        """Ubah user di store sesuai `source` (DB hanya password & role)."""
         if source == "db" and self._external is not None:
             if password is not None:
                 self._external.set_password(username, password)
@@ -89,16 +97,19 @@ class MultiAuth:
                                        password=password, role=role)
 
     def delete_user(self, user_id, source="lokal", username=None):
+        """Hapus user dari store sesuai `source` ("lokal" | "db")."""
         if source == "db" and self._external is not None:
             return self._external.delete_user(username)
         return self._local.delete_user(user_id)
 
     def bind_rfid(self, user_id, rfid_uid, source="lokal", username=None):
+        """Ikat kartu RFID ke user di store sesuai `source`."""
         if source == "db" and self._external is not None:
             return self._external.bind_rfid(username, rfid_uid)
         return self._local.bind_rfid(user_id, rfid_uid)
 
     def unbind_rfid(self, user_id, source="lokal", username=None):
+        """Lepas kartu RFID dari user di store sesuai `source`."""
         if source == "db" and self._external is not None:
             return bool(self._external.unbind_rfid(username))
         return self._local.unbind_rfid(user_id)

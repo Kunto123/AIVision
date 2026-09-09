@@ -24,6 +24,7 @@ class Watchdog:
         inference_timeout: float = 10.0,
         camera_timeout: float = 5.0,
     ):
+        """Semua timeout dalam detik; check_interval = periode polling."""
         self._check_interval = check_interval
         self._inference_timeout = inference_timeout
         self._camera_timeout = camera_timeout
@@ -93,6 +94,7 @@ class WatchdogComponent:
 
     def __init__(self, name: str, timeout: float,
                  on_restart: Optional[Callable] = None):
+        """timeout dalam detik; on_restart dipanggil saat komponen dianggap hang."""
         self.name = name
         self.timeout = timeout
         self.last_seen = time.monotonic()

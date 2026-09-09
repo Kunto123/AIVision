@@ -20,6 +20,7 @@ class Database:
     """SQLite riwayat inspeksi — WAL mode, thread-safe (1 connection + lock)."""
 
     def __init__(self, db_path: Path):
+        """Buka/buat SQLite di db_path (WAL) dan pastikan skema tabel ada."""
         self._db_path = db_path
         self._local = threading.local()
         self._connect()
@@ -41,6 +42,7 @@ class Database:
 
     @property
     def conn(self) -> sqlite3.Connection:
+        """Koneksi SQLite milik thread pemanggil (dibuat lazy per thread)."""
         if not hasattr(self._local, 'conn') or self._local.conn is None:
             self._connect()
         return self._local.conn

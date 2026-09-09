@@ -1,8 +1,0 @@
-# VisionInspect - dependensi BUILD (PyInstaller). Self-contained:
-#   pip install -r requirements-build.txt
-#   pyinstaller packaging/VisionInspect.spec
-#
-# Runner WAJIB Windows (build PyInstaller spesifik-platform, target Windows).
-
--r requirements.txt
-pyinstaller>=6.6,<7.0

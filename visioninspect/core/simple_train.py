@@ -21,10 +21,12 @@ class SimpleThresholdTrainer:
     OK; saat inferensi z-score per piksel → anomaly score."""
 
     def __init__(self, input_size: int = 256):
+        """input_size = sisi crop persegi (px) untuk resize gambar."""
         self._input_size = input_size
         self._progress_callback: Optional[Callable[[int, str], None]] = None
 
     def set_progress_callback(self, cb: Optional[Callable[[int, str], None]]) -> None:
+        """Set callback progres (percent, message)."""
         self._progress_callback = cb
 
     def train(self, ok_dir: Path, ng_dir: Optional[Path], output_dir: Path) -> dict:

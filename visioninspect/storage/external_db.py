@@ -16,17 +16,22 @@ logger = get_logger("app")
 
 
 class CheckReport:
+    """Kumpulan baris hasil validasi db.txt + flag `ok` keseluruhan."""
+
     def __init__(self):
         self.lines: List[str] = []
         self.ok = True
 
     def info(self, msg):
+        """Catat baris info (tidak mengubah status ok)."""
         self.lines.append(f"[ ok ] {msg}")
 
     def warn(self, msg):
+        """Catat baris peringatan (tidak mengubah status ok)."""
         self.lines.append(f"[warn] {msg}")
 
     def error(self, msg):
+        """Catat baris error dan set ok=False."""
         self.lines.append(f"[ERR ] {msg}")
         self.ok = False
 
@@ -35,17 +40,21 @@ class ExternalDB:
     """DB eksternal siap pakai. `is_enabled` selalu True bila objek ini dibuat."""
 
     def __init__(self, settings: db_txt.DbSettings):
+        """settings dari db.txt; pilih adapter sesuai DB_ENGINE."""
         self.s = settings
         self._adapter = get_adapter(settings)
 
     @property
     def is_enabled(self) -> bool:
+        """Selalu True — objek ini hanya dibuat saat DB eksternal aktif."""
         return True
 
     def test_connection(self):
+        """Tes koneksi ke DB → (ok: bool, pesan: str)."""
         return self._adapter.test_connection()
 
     def is_alive(self, timeout=None) -> bool:
+        """True bila DB merespons (timeout diabaikan, cek sinkron)."""
         ok, _ = self._adapter.test_connection()
         return ok
 
@@ -64,6 +73,7 @@ class ExternalDB:
         return _Dummy()
 
     def authenticate(self, username: str, password: str) -> Optional[dict]:
+        """Cek username + hash password di tabel user DB → dict, atau None."""
         if not self.s.user_table:
             return None
         try:
@@ -77,6 +87,7 @@ class ExternalDB:
         return user
 
     def get_user_by_rfid(self, rfid_uid: str) -> Optional[dict]:
+        """Cari user via hash UID RFID di tabel DB → dict, atau None."""
         if not self.s.user_table:
             return None
         try:
@@ -92,6 +103,7 @@ class ExternalDB:
     # ── Manajemen user (CLI + tab Akun) ─────────────────────────────
 
     def list_users(self) -> List[dict]:
+        """Daftar user dari tabel DB (list kosong bila tabel kosong/error)."""
         if not self.s.user_table:
             return []
         try:
@@ -102,21 +114,26 @@ class ExternalDB:
 
     def add_user(self, username: str, password: str, display_name: str = "",
                  role: str = "operator") -> None:
+        """Insert user baru ke tabel DB (password di-hash dulu)."""
         self._adapter.add_user(self.s.user_table, username,
                                credentials.hash_password(password), role)
 
     def set_password(self, username: str, password: str) -> int:
+        """Ganti hash password user → jumlah baris terpengaruh."""
         return self._adapter.set_password(
             self.s.user_table, username, credentials.hash_password(password))
 
     def set_role(self, username: str, role: str) -> int:
+        """Ganti role user → jumlah baris terpengaruh."""
         return self._adapter.set_role(self.s.user_table, username, role)
 
     def bind_rfid(self, username: str, rfid_uid: str) -> bool:
+        """Ikat hash UID RFID ke user di tabel DB."""
         return self._adapter.bind_rfid(
             self.s.user_table, username, credentials.hash_rfid(rfid_uid))
 
     def unbind_rfid(self, username: str) -> int:
+        """Kosongkan UID RFID user → jumlah baris terpengaruh."""
         return self._adapter.unbind_rfid(self.s.user_table, username)
 
     def delete_user(self, username: str) -> bool:
@@ -152,6 +169,7 @@ class ExternalDB:
     # ── Validasi ────────────────────────────────────────────────────
 
     def check(self) -> CheckReport:
+        """Validasi startup: koneksi, tabel inspeksi + MAP, tabel user → CheckReport."""
         r = CheckReport()
         s = self.s
         r.lines.append(

@@ -19,7 +19,7 @@ cd VisionInspect
 run.bat
 ```
 
-Saat pertama dijalankan, `run.bat` otomatis membuat venv `.vision\`, meng-install `requirements.txt`, meng-set `HF_HUB_OFFLINE=1`, dan mengarahkan folder data ke `data\` di dalam proyek — lalu menjalankan aplikasi.
+Saat pertama dijalankan, `run.bat` otomatis membuat venv `.vision\`, meng-install `requirements.txt`, dan mengarahkan folder data ke `data\` di dalam proyek — lalu menjalankan aplikasi. Perlu koneksi internet saat pertama (install deps + unduh backbone pretrained saat training pertama).
 
 Setup manual (kalau perlu):
 
@@ -45,13 +45,27 @@ Login pertama kali: user `admin`, password `admin` — wajib ganti saat login pe
 
 WSL hanya dipakai untuk training (lihat *Training*). Aplikasi utama berjalan di Windows native.
 
-## Struktur requirements
+## Requirements
 
-| File | Untuk | Isi |
-|------|-------|-----|
-| `requirements.txt` | Runtime — PC edge & umum | Inferensi OpenVINO + GUI + auth + Flask API + `fxplc` + driver DB (`psycopg2`/`pymysql`/`pyodbc`). Sudah termasuk `anomalib` + `torch` CPU. |
-| `requirements_dev.txt` | PC dev / training | Tambahan `ultralytics` (YOLO), `lightning`, `nncf` (INT8) + tooling test. |
-| `requirements-build.txt` | Build PyInstaller | `-r requirements.txt` + `pyinstaller`. |
+Isi paket sama semua (runtime OpenVINO/GUI/auth/Flask/`fxplc`/driver DB + training `ultralytics`/`lightning`/`nncf` + test). Hanya wheel `torch`/`torchvision` yang beda — dua file, pilih sesuai mesin:
+
+| File | Untuk | torch |
+|------|-------|-------|
+| `requirements.txt` | PC edge (Windows), mesin tanpa GPU | `+cpu` |
+| `requirements-gpu.txt` | PC dev / WSL dengan GPU NVIDIA | `+cu124` |
+
+```batch
+:: Windows — run.bat bikin venv .vision\ + install otomatis saat pertama
+run.bat
+```
+```bash
+# WSL — sekali di awal, dari root proyek
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-gpu.txt
+.venv/bin/python run.py
+```
+
+Semua versi **di-pin** ke kombinasi yang teruji E2E. Kedua file wajib identik kecuali 3 baris (index + torch + torchvision) — cek: `python tools/check_reqs_sync.py`.
 
 ## Menjalankan
 
@@ -64,35 +78,16 @@ Opsi CLI (`run.py` / `visioninspect/main.py`): `--config <path>`, `--data-dir <p
 
 **edge_mode** — set `"edge_mode": true` di `data\config.json` supaya `torch` tidak ikut dimuat saat start. PC edge inference-only wajib pakai ini.
 
-## Build (PyInstaller)
-
-Runner **wajib Windows**, Python 3.11, akses internet (github.com untuk `fxplc`, `download.pytorch.org` untuk torch CPU).
-
-```batch
-pip install -r requirements-build.txt
-pyinstaller packaging/VisionInspect.spec
-```
-
-Hasil di `dist\VisionInspect\` (one-folder):
-
-| File | Untuk |
-|------|-------|
-| `VisionInspect.exe` | GUI operator (windowed) |
-| `VisionInspect-cli.exe` | Konsol: `--check-db`, `--encrypt-secret "<teks>"`, `--db-user-add <u> <p> [role]` |
-| `db.txt.example` | Salin jadi `db.txt` di folder yang sama, lalu isi |
-
-Data (config, `database.db`, `users.json`) default ke `%USERPROFILE%\.visioninspect\` saat frozen — override dengan env `VISIONINSPECT_DATA`.
-
 ## Database eksternal (db.txt)
 
-Satu-satunya jalur DB eksternal. Kalau file **`db.txt`** ada di folder yang sama dengan `VisionInspect.exe` (root proyek saat dev), aplikasi push hasil inspeksi OK ke tabel DB customer dan mengecek login ke tabel user di DB itu. **Tanpa `db.txt`**: auth hanya tabel SQLite `users` lokal, tidak ada push. (Tidak ada lagi setting PostgreSQL di tab Settings — semua di `db.txt`.)
+Satu-satunya jalur DB eksternal. Kalau file **`db.txt`** ada di root proyek (di samping `run.py`), aplikasi push hasil inspeksi OK ke tabel DB customer dan mengecek login ke tabel user di DB itu. **Tanpa `db.txt`**: auth hanya tabel SQLite `users` lokal, tidak ada push. (Tidak ada lagi setting PostgreSQL di tab Settings — semua di `db.txt`.)
 
 - **Engine**: PostgreSQL, MySQL/MariaDB, SQL Server, atau SQLite. Driver PostgreSQL/MySQL sudah di `requirements.txt`; SQL Server juga butuh *Microsoft ODBC Driver 18* di-install manual di PC edge.
-- **Konfigurasi + pemetaan kolom** semua di `db.txt` — salin `db.txt.example`, isi, lalu (dev pakai `run.py`, edge pakai `VisionInspect-cli.exe`):
+- **Konfigurasi + pemetaan kolom** semua di `db.txt` — salin `db.txt.example`, isi, lalu:
   ```batch
-  VisionInspect-cli.exe --check-db                    :: validasi koneksi + tabel + mapping
-  VisionInspect-cli.exe --encrypt-secret "passwordDB" :: -> token enc:v2: untuk DB_PASSWORD
-  VisionInspect-cli.exe --db-user-add budi rahasia operator
+  run.bat --check-db                    :: validasi koneksi + tabel + mapping
+  run.bat --encrypt-secret "passwordDB" :: -> token enc:v2: untuk DB_PASSWORD
+  run.bat --db-user-add budi rahasia operator
   ```
 - **Login dua sumber**: akun lokal (`users.json`, migrasi otomatis dari SQLite saat pertama) **dan** tabel `DB_USER_TABLE`. Cocok di salah satu = masuk. Manajemen akun di tab Akun menulis ke store lokal; akun DB dibuat via `--db-user-add`.
 - **`enc:v2:`**: token terikat ke `%USERPROFILE%\.visioninspect\secret.key` di mesin tempat `--encrypt-secret` dijalankan. Jalankan di tiap PC edge, atau copy `secret.key` bareng `db.txt`. Password plain juga boleh.
@@ -122,7 +117,7 @@ visioninspect/
 ├── storage/           SQLite (WAL) + PostgreSQL opsional + retensi
 └── utils/             config, i18n, logging
 
-tools/                 train_cli, bundling_weights, fx_probe, pg_add_user, offline bundle
+tools/                 train_cli, check_reqs_sync, fx_probe, pg_add_user
 tests/                 pytest (core, part_check, soak)
 docs/                  ARCHITECTURE + manual operator + manual teknisi
 data/                  config.json, logs/, programs/, database (dibuat saat runtime)

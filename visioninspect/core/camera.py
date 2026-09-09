@@ -25,6 +25,7 @@ class CameraError(Exception):
 
 
 class CameraState(Enum):
+    """Status siklus hidup kamera."""
     CLOSED = "closed"
     OPENING = "opening"
     RUNNING = "running"
@@ -46,6 +47,7 @@ class CameraConfig:
         white_balance: int = -1,  # -1 = auto, atau suhu Kelvin (F2)
         backend: Optional[int] = None,
     ):
+        """exposure/gain/white_balance: -1 = auto; backend default DSHOW di Windows."""
         self.device_index = device_index
         self.width = width
         self.height = height
@@ -96,6 +98,7 @@ class CameraDevice:
     """
 
     def __init__(self, config: CameraConfig):
+        """Frame di-grab di thread terpisah; queue bounded maxsize 2 (drop-oldest)."""
         self._config = config
         self._state = CameraState.CLOSED
         self._state_lock = Lock()
@@ -111,11 +114,13 @@ class CameraDevice:
 
     @property
     def state(self) -> CameraState:
+        """State kamera saat ini (thread-safe)."""
         with self._state_lock:
             return self._state
 
     @property
     def fps(self) -> float:
+        """FPS terukur dari loop frame-grabbing."""
         return self._fps_counter.fps
 
     # ---- Lifecycle ----

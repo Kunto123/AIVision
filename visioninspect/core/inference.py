@@ -54,7 +54,7 @@ class InferenceResult:
 
 
 class InferenceEngineError(Exception):
-    pass
+    """Kegagalan load model atau inferensi pada InferenceEngine."""
 
 
 class InferenceEngine:
@@ -64,6 +64,7 @@ class InferenceEngine:
     def __init__(self, input_size: int = 256, device: str = "CPU",
                  cache_dir: Optional[Path] = None,
                  cpu_pcore_only: bool = False):
+        """device = CPU|GPU|AUTO; cache_dir wajib untuk GPU (compile pertama lambat)."""
         self._input_size = input_size
         # Device: CPU | GPU | AUTO. iGPU jauh lebih cepat + membebaskan CPU
         # untuk GUI, tapi default CPU (paling portabel).
@@ -135,15 +136,18 @@ class InferenceEngine:
 
     @property
     def is_loaded(self) -> bool:
+        """True bila model OpenVINO atau simple sudah ter-load."""
         with self._lock:
             return self._model is not None or self._simple_loaded
 
     @property
     def threshold(self) -> float:
+        """Threshold global OK/NG saat ini [0,1]."""
         return self._threshold
 
     @threshold.setter
     def threshold(self, value: float) -> None:
+        """Set threshold global, di-clamp ke [0,1]."""
         self._threshold = max(0.0, min(1.0, value))
 
     def set_roi_thresholds(self, per_roi: Optional[dict]) -> None:
@@ -177,6 +181,7 @@ class InferenceEngine:
 
     @property
     def latency_avg_ms(self) -> float:
+        """Rata-rata latency inferensi dari ~100 sampel terakhir (ms)."""
         with self._lock:
             if not self._latencies:
                 return 0.0
@@ -184,6 +189,7 @@ class InferenceEngine:
 
     @property
     def latency_p95_ms(self) -> float:
+        """Latency inferensi persentil-95 dari ~100 sampel terakhir (ms)."""
         with self._lock:
             if not self._latencies:
                 return 0.0

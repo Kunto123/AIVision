@@ -10,6 +10,8 @@ from visioninspect.storage.db_adapters.base import BaseAdapter, Column
 
 
 class SQLServerAdapter(BaseAdapter):
+    """Adapter Microsoft SQL Server (pyodbc + ODBC Driver 18)."""
+
     engine = "sqlserver"
     ph = "?"
     driver_hint = "pyodbc (+ Microsoft ODBC Driver 18 for SQL Server)"
@@ -31,18 +33,22 @@ class SQLServerAdapter(BaseAdapter):
         return pyodbc.connect(";".join(parts), timeout=self.s.connect_timeout)
 
     def q(self, ident: str) -> str:
+        """Quote identifier gaya T-SQL (bracket)."""
         return "[" + ident.replace("]", "]]") + "]"
 
     def server_now(self) -> str:
+        """Ekspresi waktu server UTC (DATETIME2)."""
         return "SYSUTCDATETIME()"
 
     def list_tables(self) -> List[str]:
+        """Base table dari information_schema."""
         rows = self._run(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_type = 'BASE TABLE' ORDER BY table_name", fetch="all") or []
         return [r[0] for r in rows]
 
     def describe_table(self, name: str) -> List[Column]:
+        """Kolom tabel dari information_schema + sys.identity_columns untuk PK."""
         rows = self._run(
             "SELECT column_name, data_type, is_nullable, column_default "
             "FROM information_schema.columns WHERE table_name = ? "
@@ -63,7 +69,8 @@ class SQLServerAdapter(BaseAdapter):
         return out
 
     def ensure_user_table(self, name: str):
-        # SQL Server tidak punya CREATE TABLE IF NOT EXISTS.
+        """Buat tabel user bila belum ada (dibungkus IF OBJECT_ID karena T-SQL
+        tak punya CREATE TABLE IF NOT EXISTS) → (dibuat_atau_ada, ddl)."""
         ddl = self.user_table_ddl(name)
         guarded = (
             f"IF OBJECT_ID(N'{name}', N'U') IS NULL\nBEGIN\n{ddl}\nEND")
@@ -77,6 +84,7 @@ class SQLServerAdapter(BaseAdapter):
             return False, ddl
 
     def user_table_ddl(self, name: str) -> str:
+        """DDL tabel user standar (IDENTITY PK, NVARCHAR, username & rfid UNIQUE)."""
         return (
             f"CREATE TABLE {self.q(name)} (\n"
             "    id            BIGINT IDENTITY(1,1) PRIMARY KEY,\n"

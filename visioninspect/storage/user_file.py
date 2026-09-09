@@ -27,6 +27,7 @@ class UserFileStore:
     """users.json: {"version": 1, "users": [ {...}, ... ]}."""
 
     def __init__(self, path: Path, sqlite_db=None):
+        """Muat users.json; bila kosong, migrasi dari SQLite lalu seed admin/admin."""
         self._path = Path(path)
         self._data: Dict = {"version": 1, "users": []}
         existed = self._path.exists()
@@ -124,16 +125,19 @@ class UserFileStore:
         return None
 
     def authenticate(self, username: str, password: str) -> Optional[dict]:
+        """Cek username + password → dict user, atau None bila salah."""
         u = self._find(username=username)
         if u and u["password_hash"] == credentials.hash_password(password):
             return dict(u)
         return None
 
     def get_user_by_rfid(self, rfid_uid: str) -> Optional[dict]:
+        """Cari user berdasarkan UID kartu RFID → dict, atau None."""
         u = self._find(rfid_uid=rfid_uid)
         return dict(u) if u else None
 
     def list_users(self) -> List[dict]:
+        """Daftar user dengan field aman untuk UI (tanpa password_hash)."""
         return [{
             "id": u["id"], "username": u["username"],
             "display_name": u.get("display_name", ""),
@@ -145,12 +149,14 @@ class UserFileStore:
         } for u in self._data["users"]]
 
     def list_users_full(self) -> List[dict]:
+        """Daftar user lengkap termasuk password_hash (untuk migrasi/sync)."""
         return [dict(u) for u in self._data["users"]]
 
     # ── Mutasi ───────────────────────────────────────────────────────
 
     def add_user(self, username: str, password: str, display_name: str = "",
                  role: str = "operator") -> int:
+        """Tambah user baru → id; ValueError bila username sudah ada."""
         if self._find(username=username):
             raise ValueError(f"Username '{username}' sudah ada")
         uid = self._next_id()
@@ -167,6 +173,7 @@ class UserFileStore:
 
     def update_user(self, user_id: int, display_name: str = None,
                     password: str = None, role: str = None) -> bool:
+        """Ubah display_name/password/role yang non-None; False bila user tak ada."""
         u = self._find(id=user_id)
         if not u:
             return False
@@ -181,6 +188,7 @@ class UserFileStore:
         return True
 
     def delete_user(self, user_id: int) -> bool:
+        """Hapus user; tolak (False) bila itu admin terakhir atau user tak ada."""
         u = self._find(id=user_id)
         if not u:
             return False
@@ -195,6 +203,7 @@ class UserFileStore:
         return True
 
     def bind_rfid(self, user_id: int, rfid_uid: str) -> bool:
+        """Ikat UID kartu RFID ke user; False bila UID sudah dipakai / user tak ada."""
         if self._find(rfid_uid=rfid_uid):
             return False
         u = self._find(id=user_id)
@@ -207,6 +216,7 @@ class UserFileStore:
         return True
 
     def unbind_rfid(self, user_id: int) -> bool:
+        """Lepas ikatan kartu RFID dari user."""
         u = self._find(id=user_id)
         if not u:
             return False

@@ -18,6 +18,7 @@ class RetentionManager:
     bila save_all_ng), plus sampling gambar OK (simpan N% saja)."""
 
     def __init__(self, db: Database):
+        """db = koneksi Database aktif untuk purge tabel history."""
         self._db = db
 
     def purge_old_data(

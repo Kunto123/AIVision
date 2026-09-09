@@ -46,11 +46,14 @@ def base_dir() -> Path:
 
 
 def config_path() -> Path:
+    """Path lengkap ke file db.txt."""
     return base_dir() / FILENAME
 
 
 @dataclass
 class DbSettings:
+    """Isi db.txt yang sudah diparsing: kredensial DB, tabel target, mapping kolom."""
+
     engine: str = ""
     host: str = ""
     port: int = 0
@@ -72,10 +75,12 @@ class DbSettings:
 
     @property
     def has_mapping(self) -> bool:
+        """True bila ada MAP_* kolom → push hasil inspeksi aktif."""
         return bool(self.mapping)
 
     @property
     def has_user_table(self) -> bool:
+        """True bila DB_USER_TABLE diisi → login lewat DB aktif."""
         return bool(self.user_table)
 
 
@@ -221,9 +226,9 @@ def _validate(s: DbSettings) -> None:
 TEMPLATE = """\
 # ============================================================================
 #  db.txt - konfigurasi database eksternal VisionInspect
-#  Letakkan file ini di folder yang sama dengan VisionInspect.exe.
+#  Letakkan file ini di root proyek (di samping run.py).
 #  Hapus / kosongkan DB_ENGINE untuk mematikan fitur (perilaku lama dipakai).
-#  Cek konfigurasi tanpa buka aplikasi:  VisionInspect.exe --check-db
+#  Cek konfigurasi tanpa buka aplikasi:  run.bat --check-db
 # ============================================================================
 
 # ---- Koneksi ----

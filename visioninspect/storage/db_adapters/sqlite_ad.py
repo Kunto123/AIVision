@@ -7,6 +7,8 @@ from visioninspect.storage.db_adapters.base import BaseAdapter, Column
 
 
 class SQLiteAdapter(BaseAdapter):
+    """Adapter SQLite (stdlib sqlite3) — DB_NAME = path file .db."""
+
     engine = "sqlite"
     ph = "?"
     driver_hint = "sqlite3 (stdlib)"
@@ -20,24 +22,29 @@ class SQLiteAdapter(BaseAdapter):
         return conn
 
     def q(self, ident: str) -> str:
+        """Quote identifier gaya SQLite (double-quote)."""
         return '"' + ident.replace('"', '""') + '"'
 
     def server_now(self) -> str:
+        """Ekspresi waktu server SQLite (UTC, presisi detik)."""
         return "CURRENT_TIMESTAMP"
 
     def list_tables(self) -> List[str]:
+        """Nama tabel dari sqlite_master."""
         rows = self._run(
             "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
             fetch="all") or []
         return [r[0] for r in rows]
 
     def describe_table(self, name: str) -> List[Column]:
+        """Kolom tabel via PRAGMA table_info."""
         rows = self._run(f"PRAGMA table_info({self.q(name)})", fetch="all") or []
         # (cid, name, type, notnull, dflt_value, pk)
         return [Column(r[1], r[2], not bool(r[3]), r[4] is not None or bool(r[5]),
                        is_pk=bool(r[5])) for r in rows]
 
     def user_table_ddl(self, name: str) -> str:
+        """DDL tabel user standar (INTEGER AUTOINCREMENT PK)."""
         return (
             f"CREATE TABLE IF NOT EXISTS {self.q(name)} (\n"
             "    id            INTEGER PRIMARY KEY AUTOINCREMENT,\n"

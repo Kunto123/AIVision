@@ -7,13 +7,9 @@ dist/
 build/
 *.egg
 *.whl
-*.spec
-
-!vendor/*.whl
 
 # --- Virtual Environment ---
 .vision/
-.buildvenv/
 venv/
 .venv/
 env/
@@ -54,7 +50,6 @@ Desktop.ini
 htmlcov/
 .coverage
 *.cover
-.pytest_cache/
 test_tmp*/
 
 # --- Hermes Agent (plan files, prompts) ---
@@ -71,29 +66,21 @@ rcc_*.py
 logs/
 kernel.errors.txt
 
-# --- Temp ---
+# --- Temp / cache ---
 tmp/
 temp/
 *.tmp
 .claude/
+.cache/
 
+# --- Lokal, tidak ikut repo ---
 datasets/
 pre_trained/
 results/
 tests/
-docs
 
-# packaging/: track spec + icon saja (artefak build dist/ build/ sudah di-ignore di atas)
-packaging/*
-!packaging/VisionInspect.spec
-!packaging/*.ico
-
-# --- Offline deployment bundle (built by tools/prepare_offline_bundle.bat) ---
-offline_bundle/
-
-docs/KNOWN_ISSUES.md
-docs/PROGRESS.md
-
-retrain_wsl.bat
-run.sh
-setup.bat
+# docs/: hanya 3 manual yang ikut repo; KNOWN_ISSUES + PROGRESS tetap lokal
+docs/*
+!docs/ARCHITECTURE.md
+!docs/MANUAL_OPERATOR.md
+!docs/MANUAL_TEKNISI.md

@@ -6,6 +6,8 @@ from visioninspect.storage.db_adapters.base import BaseAdapter, Column
 
 
 class PostgresAdapter(BaseAdapter):
+    """Adapter PostgreSQL (psycopg2)."""
+
     engine = "postgresql"
     ph = "%s"
     driver_hint = "psycopg2-binary"
@@ -29,6 +31,7 @@ class PostgresAdapter(BaseAdapter):
         return "CURRENT_TIMESTAMP"
 
     def list_tables(self) -> List[str]:
+        """Tabel non-sistem dari information_schema."""
         rows = self._run(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema NOT IN ('pg_catalog','information_schema') "
@@ -36,6 +39,7 @@ class PostgresAdapter(BaseAdapter):
         return [r[0] for r in rows]
 
     def describe_table(self, name: str) -> List[Column]:
+        """Kolom tabel dari information_schema.columns."""
         rows = self._run(
             "SELECT column_name, data_type, is_nullable, column_default, is_identity "
             "FROM information_schema.columns WHERE table_name = %s "
@@ -48,6 +52,7 @@ class PostgresAdapter(BaseAdapter):
         return out
 
     def user_table_ddl(self, name: str) -> str:
+        """DDL tabel user standar (IDENTITY PK, username & rfid UNIQUE)."""
         return (
             f"CREATE TABLE IF NOT EXISTS {self.q(name)} (\n"
             "    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n"

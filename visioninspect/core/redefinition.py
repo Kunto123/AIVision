@@ -14,7 +14,7 @@ logger = get_logger("app")
 
 
 class RedefinitionError(Exception):
-    pass
+    """Kegagalan proses redefinition (data koreksi kurang, judgement invalid)."""
 
 
 class RedefinitionManager:
@@ -22,12 +22,14 @@ class RedefinitionManager:
     data koreksi, versioning + rollback, audit trail."""
 
     def __init__(self, program_manager, training_pipeline, inference_engine):
+        """Butuh ProgramManager, TrainingPipeline, dan InferenceEngine aktif."""
         self._pm = program_manager
         self._training = training_pipeline
         self._engine = inference_engine
         self._progress_callback: Optional[Callable[[int, str], None]] = None
 
     def set_progress_callback(self, cb: Optional[Callable[[int, str], None]]) -> None:
+        """Set callback progres (percent, message); diteruskan ke training pipeline."""
         self._progress_callback = cb
         if self._training:
             self._training.set_progress_callback(cb)

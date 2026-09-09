@@ -15,6 +15,7 @@ def _encrypt(text: str) -> int:
 
 
 def check_db() -> int:
+    """Validasi db.txt + tes koneksi DB eksternal; cetak laporan, return exit code."""
     from visioninspect.storage import db_txt
     s = db_txt.load()
     if not s.engine and not s.errors:
@@ -38,6 +39,7 @@ def check_db() -> int:
 
 
 def db_user_add(argv) -> int:
+    """Tambah akun (username, password, [role]) ke tabel user DB eksternal."""
     if len(argv) < 2:
         print("pakai: --db-user-add <username> <password> [role]")
         return 2

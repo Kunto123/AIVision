@@ -53,6 +53,7 @@ class FXPLCManager:
     _RECONNECT_GIVE_UP = 5
 
     def __init__(self, plc_config: Optional[dict] = None):
+        """plc_config: port, baudrate, timeout, pulse_ms, reconnect_interval."""
         plc_config = plc_config or {}
         self._config = plc_config
         self._io_map = build_io_map(plc_config)
@@ -112,11 +113,25 @@ class FXPLCManager:
 
     # ---- Callbacks ----
 
-    def set_on_trigger(self, cb): self._on_trigger = cb
-    def set_on_reset(self, cb): self._on_reset = cb
-    def set_on_switch_program(self, cb): self._on_switch_program = cb
-    def set_on_status_change(self, cb): self._on_status_change = cb
-    def set_log_callback(self, cb): self._log_callback = cb
+    def set_on_trigger(self, cb):
+        """Set callback saat coil trigger inspeksi tepi-naik."""
+        self._on_trigger = cb
+
+    def set_on_reset(self, cb):
+        """Set callback saat coil reset tepi-naik."""
+        self._on_reset = cb
+
+    def set_on_switch_program(self, cb):
+        """Set callback ganti template; menerima nomor register program (int)."""
+        self._on_switch_program = cb
+
+    def set_on_status_change(self, cb):
+        """Set callback perubahan status koneksi PLC; menerima bool."""
+        self._on_status_change = cb
+
+    def set_log_callback(self, cb):
+        """Set callback baris log PLC untuk ditampilkan di UI."""
+        self._log_callback = cb
 
     def _log(self, message: str):
         logger.debug("[FX] %s", message)
@@ -125,10 +140,12 @@ class FXPLCManager:
 
     @property
     def io_map(self) -> dict:
+        """Peta nama I/O → alamat coil/register hasil build_io_map."""
         return self._io_map
 
     @property
     def is_connected(self) -> bool:
+        """True bila port terbuka DAN PLC terbukti menjawab probe."""
         return self._connected and self._client is not None
 
     # ---- Jembatan async → sync: loop di thread sendiri, panggilan
@@ -167,6 +184,7 @@ class FXPLCManager:
     # ---- Lifecycle ----
 
     def connect(self) -> bool:
+        """Buka port serial lalu probe coil result_ok; True hanya bila PLC menjawab."""
         if not HAS_FXPLC:
             self._log("ERROR: fxplc tidak terpasang")
             return False
@@ -224,6 +242,7 @@ class FXPLCManager:
             return True
 
     def disconnect(self) -> None:
+        """Tutup client + transport, hentikan event loop, set status putus."""
         with self._lock:
             self._client = None
             self._close_transport()
@@ -279,6 +298,7 @@ class FXPLCManager:
             self._on_status_change(False)
 
     def clear_breaker(self) -> None:
+        """Reset circuit breaker + hitungan retry (dipanggil dari 'Test Koneksi')."""
         self._breaker_open = False
         self._breaker_until = 0.0
         self._consec_fail = 0
@@ -296,6 +316,7 @@ class FXPLCManager:
             "untuk mencoba lagi.", self._reconnect_tries, self._port)
 
     def try_reconnect(self) -> bool:
+        """Coba sambung ulang bila backoff sudah lewat; menyerah setelah N gagal."""
         if self._reconnect_gave_up:
             return False
         # JANGAN early-return saat breaker tertutup: kegagalan connect di
@@ -394,6 +415,7 @@ class FXPLCManager:
     # ---- API yang dipakai main_window ------------------------------------
 
     def set_output(self, name: str, value: bool) -> bool:
+        """Tulis relay output bernama (dari io_map) ke ON/OFF."""
         addr = self._io_map["outputs"].get(name)
         if addr is None:
             logger.warning("Output '%s' tidak ada di io_map", name)
@@ -401,6 +423,7 @@ class FXPLCManager:
         return self._write_coil(addr, value)
 
     def pulse_output(self, name: str, pulse_ms: Optional[int] = None) -> bool:
+        """Nyalakan output lalu matikan setelah pulse_ms (default dari config)."""
         ms = pulse_ms if pulse_ms is not None else self._pulse_ms
         ok = self.set_output(name, True)
         if ok and ms > 0:
@@ -409,6 +432,7 @@ class FXPLCManager:
         return ok
 
     def reset_outputs(self) -> None:
+        """Matikan semua relay output yang terdaftar di io_map."""
         for name in self._io_map["outputs"]:
             self._write_coil(self._io_map["outputs"][name], False)
 
@@ -445,6 +469,7 @@ class FXPLCManager:
             return None
 
     def read_coil_state(self, name: str) -> Optional[bool]:
+        """Baca state satu coil (output atau input) berdasarkan nama io_map."""
         outputs = self._io_map.get("outputs", {})
         inputs = self._io_map.get("inputs", {})
         if name in outputs:

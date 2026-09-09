@@ -26,7 +26,7 @@ logger = get_logger("training")
 
 
 class TrainingError(Exception):
-    pass
+    """Kegagalan pipeline training (unduh weight, fit, atau export)."""
 
 
 # Tag release GitHub ultralytics/assets — dicoba berurutan sampai sukses.
@@ -95,6 +95,7 @@ class TrainingConfig:
         yolo_epochs: int = 100,
         yolo_imgsz: int = 0,                # 0 = pakai input_size
     ):
+        """batch_size/num_workers 0 = auto; max_epochs None = default per-algoritma."""
         self.algorithm = algorithm
         self.backbone = backbone
         self.input_size = input_size
@@ -127,6 +128,7 @@ class TrainingPipeline:
     """
 
     def __init__(self, config: TrainingConfig):
+        """Simpan TrainingConfig; jalankan lewat train() di worker thread."""
         self._config = config
         self._progress_callback: Optional[Callable[[int, str], None]] = None
         self._cancelled = False
@@ -134,9 +136,11 @@ class TrainingPipeline:
     # ---- Callbacks ----
 
     def set_progress_callback(self, cb: Optional[Callable[[int, str], None]]) -> None:
+        """Set callback progres (percent, message)."""
         self._progress_callback = cb
 
     def cancel(self) -> None:
+        """Minta training berhenti di checkpoint pengecekan berikutnya."""
         self._cancelled = True
 
     # ---- Main Training ----

@@ -6,6 +6,8 @@ from visioninspect.storage.db_adapters.base import BaseAdapter, Column
 
 
 class MySQLAdapter(BaseAdapter):
+    """Adapter MySQL / MariaDB (pymysql)."""
+
     engine = "mysql"
     ph = "%s"
     driver_hint = "pymysql"
@@ -20,12 +22,15 @@ class MySQLAdapter(BaseAdapter):
         return pymysql.connect(**kw)
 
     def q(self, ident: str) -> str:
+        """Quote identifier gaya MySQL (backtick)."""
         return "`" + ident.replace("`", "``") + "`"
 
     def server_now(self) -> str:
+        """Ekspresi waktu server MySQL dengan presisi mikrodetik."""
         return "NOW(6)"
 
     def list_tables(self) -> List[str]:
+        """Tabel pada schema aktif dari information_schema."""
         rows = self._run(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema = %s ORDER BY table_name",
@@ -33,6 +38,7 @@ class MySQLAdapter(BaseAdapter):
         return [r[0] for r in rows]
 
     def describe_table(self, name: str) -> List[Column]:
+        """Kolom tabel dari information_schema.columns (deteksi PK & auto_increment)."""
         rows = self._run(
             "SELECT column_name, data_type, is_nullable, column_default, "
             "extra, column_key FROM information_schema.columns "
@@ -46,6 +52,7 @@ class MySQLAdapter(BaseAdapter):
         return out
 
     def user_table_ddl(self, name: str) -> str:
+        """DDL tabel user standar (InnoDB, utf8mb4, AUTO_INCREMENT PK)."""
         return (
             f"CREATE TABLE IF NOT EXISTS {self.q(name)} (\n"
             "    id            BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,\n"

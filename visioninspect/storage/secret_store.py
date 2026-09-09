@@ -169,4 +169,5 @@ def decrypt(token: str) -> str:
 
 
 def is_encrypted(token: str) -> bool:
+    """True bila token sudah dalam format enc:v1: / enc:v2: (bukan plaintext)."""
     return bool(token) and (token.startswith(PREFIX) or token.startswith(PREFIX_V2))
